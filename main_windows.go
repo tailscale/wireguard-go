@@ -48,7 +48,9 @@ func main() {
 		os.Exit(ExitSetupFailed)
 	}
 
-	device := device.NewDevice(tun, logger)
+	device := device.NewDevice(tun, &device.DeviceOptions{
+		Logger: logger,
+	})
 	device.Up()
 	logger.Info.Println("Device started")
 
