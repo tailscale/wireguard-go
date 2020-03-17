@@ -16,7 +16,10 @@ type IP struct {
 
 func (ip IP) String() string { return net.IP(ip.Addr[:]).String() }
 
-func (ip *IP) IP() net.IP { return net.IP(ip.Addr[:]) }
+// IP converts ip into a standard library net.IP. The address bytes
+// are copied, so the returned net.IP shares no state with the
+// original IP.
+func (ip *IP) IP() net.IP { return append(net.IP(nil), ip.Addr[:]...) }
 func (ip *IP) Is6() bool  { return !ip.Is4() }
 func (ip *IP) Is4() bool {
 	return ip.Addr[0] == 0 && ip.Addr[1] == 0 &&
