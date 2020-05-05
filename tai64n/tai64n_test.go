@@ -14,17 +14,16 @@ import (
  * as used by WireGuard.
  */
 func TestMonotonic(t *testing.T) {
-	old := Now()
-	for i := 0; i < 50; i++ {
-		next := Now()
-		if next.After(old) {
-			t.Error("Whitening insufficient")
-		}
-		time.Sleep(time.Duration(whitenerMask)/time.Nanosecond + 1)
-		next = Now()
-		if !next.After(old) {
-			t.Error("Not monotonically increasing on whitened nano-second scale")
-		}
-		old = next
+	startTime := time.Now()
+	nanosToNext := whitenerMask - uint32(startTime.Nanosecond())&whitenerMask
+	sameTime := startTime.Add(time.Duration(nanosToNext) * time.Nanosecond)
+	nextTime := startTime.Add(time.Duration(nanosToNext)*time.Nanosecond + 1)
+
+	start, same, next := stamp(startTime), stamp(sameTime), stamp(nextTime)
+	if same.After(start) {
+		t.Error("Whitening insufficient")
+	}
+	if !next.After(start) {
+		t.Error("Not monotonically increasing on whitened nano-second scale")
 	}
 }
