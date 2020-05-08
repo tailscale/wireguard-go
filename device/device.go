@@ -26,13 +26,6 @@ const (
 	DeviceRoutineNumberAdditional = 2
 )
 
-type FilterResult int
-
-const (
-	FilterDrop FilterResult = iota
-	FilterAccept
-)
-
 type Device struct {
 	isUp           AtomicBool // device is (going) up
 	isClosed       AtomicBool // device is closed? (acting as guard)
@@ -41,10 +34,6 @@ type Device struct {
 	skipBindUpdate bool
 	createBind     func(uport uint16, device *Device) (conn.Bind, uint16, error)
 	createEndpoint func(key [32]byte, s string) (conn.Endpoint, error)
-
-	filterLock sync.Mutex
-	filterIn   func(b []byte) FilterResult
-	filterOut  func(b []byte) FilterResult
 
 	// synchronized resources (locks acquired in order)
 
@@ -309,13 +298,6 @@ type DeviceOptions struct {
 	// TODO(crawshaw): send the *Peer parameter here?
 	HandshakeDone func(peerKey wgcfg.Key, allowedIPs []net.IPNet)
 
-	// FilterIn is called on each incoming packet, to decide whether
-	// or not to pass it through. If nil, we accept all packets.
-	FilterIn func(b []byte) FilterResult
-
-	// Similarly, FilterOut is called on each outgoing packet.
-	FilterOut func(b []byte) FilterResult
-
 	CreateEndpoint func(key [32]byte, s string) (conn.Endpoint, error)
 	CreateBind     func(uport uint16) (conn.Bind, uint16, error)
 	SkipBindUpdate bool // if true, CreateBind only ever called once
@@ -339,8 +321,6 @@ func NewDevice(tunDevice tun.Device, opts *DeviceOptions) *Device {
 			}
 		}
 		device.handshakeDone = opts.HandshakeDone
-		device.filterIn = opts.FilterIn
-		device.filterOut = opts.FilterOut
 		if opts.CreateEndpoint != nil {
 			device.createEndpoint = opts.CreateEndpoint
 		} else {
@@ -411,13 +391,6 @@ func NewDevice(tunDevice tun.Device, opts *DeviceOptions) *Device {
 	device.state.starting.Wait()
 
 	return device
-}
-
-func (device *Device) SetFilterInOut(in, out func(b []byte) FilterResult) {
-	device.filterLock.Lock()
-	defer device.filterLock.Unlock()
-	device.filterIn = in
-	device.filterOut = out
 }
 
 func (device *Device) LookupPeer(pk wgcfg.Key) *Peer {

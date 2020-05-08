@@ -8,7 +8,6 @@ package device
 import (
 	"bytes"
 	"encoding/binary"
-	"errors"
 	"net"
 	"strconv"
 	"sync"
@@ -230,8 +229,6 @@ func (device *Device) RoutineReceiveIncoming(IP int, bind conn.Bind) {
 	}
 }
 
-var FilteredErr = errors.New("packet dropped by administrative filter")
-
 func (device *Device) RoutineDecryption() {
 
 	var nonce [chacha20poly1305.NonceSize]byte
@@ -288,15 +285,6 @@ func (device *Device) RoutineDecryption() {
 				content,
 				nil,
 			)
-			device.filterLock.Lock()
-			fp := device.filterIn
-			device.filterLock.Unlock()
-			if err == nil && fp != nil {
-				response := fp(elem.packet)
-				if response != FilterAccept {
-					err = FilteredErr
-				}
-			}
 			if err != nil {
 				elem.Drop()
 				device.PutMessageBuffer(elem.buffer)

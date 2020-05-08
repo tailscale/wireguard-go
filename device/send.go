@@ -9,7 +9,6 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
-	"io"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -243,52 +242,6 @@ func (peer *Peer) keepKeyFreshSending() {
 	}
 }
 
-// SendPacket sends a packet out over the device.
-func (device *Device) SendPacket(b []byte) (reterr error) {
-	elem := device.NewOutboundElement()
-	defer func() {
-		if reterr != nil {
-			device.PutMessageBuffer(elem.buffer)
-			device.PutOutboundElement(elem)
-		}
-	}()
-
-	offset := MessageTransportHeaderSize
-	n := copy(elem.buffer[offset:], b)
-	if n < len(b) {
-		return io.ErrShortWrite
-	}
-	if n < 8 {
-		return errPacketTooBig
-	}
-	elem.packet = elem.buffer[offset : offset+n]
-	peer := device.lookupPeer(elem.packet)
-	if peer == nil {
-		return errNoSuchPeer
-	}
-
-	device.filterLock.Lock()
-	fp := device.filterOut
-	device.filterLock.Unlock()
-	if fp != nil {
-		response := fp(elem.packet)
-		if response != FilterAccept {
-			return io.ErrNoProgress
-		}
-	}
-
-	if peer.isRunning.Get() {
-		if peer.queue.packetInNonceQueueIsAwaitingKey.Get() {
-			peer.SendHandshakeInitiation(false)
-		}
-		addToNonceQueue(peer.queue.nonce, elem, device)
-	}
-	return nil
-}
-
-var errNoSuchPeer = errors.New("wireguard: no such peer")
-var errPacketTooBig = errors.New("wireguard: packet too big")
-
 /* Reads packets from the TUN and inserts
  * into nonce queue for peer
  *
@@ -338,16 +291,6 @@ func (device *Device) RoutineReadFromTUN() {
 		peer := device.lookupPeer(elem.packet)
 		if peer == nil {
 			continue
-		}
-
-		device.filterLock.Lock()
-		fp := device.filterOut
-		device.filterLock.Unlock()
-		if fp != nil {
-			response := fp(elem.packet)
-			if response != FilterAccept {
-				continue
-			}
 		}
 
 		// insert into nonce/pre-handshake queue
