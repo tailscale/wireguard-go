@@ -14,7 +14,7 @@ import (
 func (device *Device) Config() *wgcfg.Config {
 	// Lock everything.
 	device.net.Lock()
-	device.net.Unlock()
+	defer device.net.Unlock()
 	device.staticIdentity.Lock()
 	defer device.staticIdentity.Unlock()
 	device.peers.Lock()
