@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"sort"
+	"sync"
 	"testing"
 
 	"github.com/tailscale/wireguard-go/tun"
@@ -102,6 +103,24 @@ func TestConfig(t *testing.T) {
 			t.Fatal(err)
 		}
 		cmp(t, device2, cfg2)
+	})
+
+	// This is only to test that Config and Reconfig are properly synchronized.
+	t.Run("device2 config/reconfig", func(t *testing.T) {
+		var wg sync.WaitGroup
+		wg.Add(2)
+
+		go func() {
+			device2.Reconfig(cfg2)
+			wg.Done()
+		}()
+
+		go func() {
+			device2.Config()
+			wg.Done()
+		}()
+
+		wg.Wait()
 	})
 
 	t.Run("device1 modify peer", func(t *testing.T) {
