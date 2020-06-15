@@ -12,17 +12,20 @@ import (
 )
 
 func (device *Device) Config() *wgcfg.Config {
-	// Lock everything.
 	device.net.Lock()
-	defer device.net.Unlock()
+	listenPort := device.net.port
+	device.net.Unlock()
+
 	device.staticIdentity.Lock()
-	defer device.staticIdentity.Unlock()
+	privateKey := device.staticIdentity.privateKey
+	device.staticIdentity.Unlock()
+
 	device.peers.Lock()
 	defer device.peers.Unlock()
 
 	cfg := &wgcfg.Config{
-		PrivateKey: device.staticIdentity.privateKey,
-		ListenPort: device.net.port,
+		PrivateKey: privateKey,
+		ListenPort: listenPort,
 	}
 	for _, peer := range device.peers.keyMap {
 		peer.RLock()

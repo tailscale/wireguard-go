@@ -145,13 +145,14 @@ func (peer *Peer) SendHandshakeInitiation(isRetry bool) error {
 	peer.handshake.mutex.Unlock()
 
 	peer.RLock()
-	if peer.endpoint == nil {
-		peer.RUnlock()
+	endpoint := peer.endpoint
+	peer.RUnlock()
+
+	if endpoint == nil {
 		return errors.New("no peer endpoint; skipped")
 	}
 
-	peer.device.log.Debug.Printf("%v - %v Send handshake init %v", peer, peer.device, peer.endpoint)
-	peer.RUnlock()
+	peer.device.log.Debug.Printf("%v - %v Send handshake init %v", peer, peer.device, endpoint)
 
 	msg, err := peer.device.CreateMessageInitiation(peer)
 	if err != nil {
