@@ -21,13 +21,14 @@ func (device *Device) Config() *wgcfg.Config {
 	device.staticIdentity.RUnlock()
 
 	device.peers.RLock()
-	defer device.peers.RUnlock()
+	keyMap := device.peers.keyMap
+	device.peers.RUnlock()
 
 	cfg := &wgcfg.Config{
 		PrivateKey: privateKey,
 		ListenPort: listenPort,
 	}
-	for _, peer := range device.peers.keyMap {
+	for _, peer := range keyMap {
 		peer.RLock()
 		p := wgcfg.Peer{
 			PublicKey:           peer.handshake.remoteStatic,
