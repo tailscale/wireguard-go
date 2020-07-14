@@ -346,8 +346,7 @@ func (peer *Peer) handshakeDoneCallback() {
 	key := peer.handshake.remoteStatic
 	peer.RUnlock()
 
-	allowedIPs := peer.device.allowedips.EntriesForPeer(peer)
-	peer.device.handshakeDone(key, allowedIPs)
+	peer.device.handshakeDone(key, peer, &peer.device.allowedips)
 }
 
 /* Queues packets when there is no handshake.
