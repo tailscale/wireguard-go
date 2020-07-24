@@ -42,6 +42,7 @@ type Peer struct {
 	handshake                   Handshake
 	device                      *Device
 	endpoint                    conn.Endpoint
+	allowedIPs                  []wgcfg.CIDR
 	persistentKeepaliveInterval uint16
 
 	timers struct {
