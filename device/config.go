@@ -150,9 +150,13 @@ func (device *Device) Reconfig(cfg *wgcfg.Config) (err error) {
 				peer.handshake.mutex.Unlock()
 			}
 		}
+		allowedIPsChanged := !cidrsEqual(peer.allowedIPs, p.AllowedIPs)
+		peer.allowedIPs = append([]wgcfg.CIDR(nil), p.AllowedIPs...)
 		peer.Unlock()
 
-		device.allowedips.RemoveByPeer(peer)
+		if allowedIPsChanged {
+			device.allowedips.RemoveByPeer(peer)
+		}
 		// DANGER: allowedIP is a value type. Its contents (the IP and
 		// Mask) are overwritten on every iteration through the
 		// loop. The loop owns its memory; don't retain references into it.
@@ -179,12 +183,54 @@ func endpointsEqual(x, y []wgcfg.Endpoint) bool {
 	if len(x) != len(y) {
 		return false
 	}
+	// First see if they're equal in order, without allocating.
+	exact := true
+	for i := range x {
+		if x[i] != y[i] {
+			exact = false
+			break
+		}
+	}
+	if exact {
+		return true
+	}
+
+	// Otherwise, see if they're the same, but out of order.
 	eps := make(map[wgcfg.Endpoint]bool)
 	for _, ep := range x {
 		eps[ep] = true
 	}
 	for _, ep := range y {
 		if !eps[ep] {
+			return false
+		}
+	}
+	return true
+}
+
+func cidrsEqual(x, y []wgcfg.CIDR) bool {
+	if len(x) != len(y) {
+		return false
+	}
+	// First see if they're equal in order, without allocating.
+	exact := true
+	for i := range x {
+		if x[i] != y[i] {
+			exact = false
+			break
+		}
+	}
+	if exact {
+		return true
+	}
+
+	// Otherwise, see if they're the same, but out of order.
+	m := make(map[wgcfg.CIDR]bool)
+	for _, v := range x {
+		m[v] = true
+	}
+	for _, v := range y {
+		if !m[v] {
 			return false
 		}
 	}
