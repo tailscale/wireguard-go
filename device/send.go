@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -146,13 +147,14 @@ func (peer *Peer) SendHandshakeInitiation(isRetry bool) error {
 
 	peer.RLock()
 	endpoint := peer.endpoint
-	device := peer.device
-	peer.RUnlock()
 	if endpoint == nil {
+		peer.RUnlock()
 		return errors.New("no peer endpoint; skipped")
 	}
-
-	device.log.Debug.Printf("%v - %v Send handshake init %v", peer, device, endpoint)
+	device := peer.device
+	endpointStr := fmt.Sprint(endpoint) // print while holding lock to avoid races
+	peer.RUnlock()
+	device.log.Debug.Printf("%v - %v Send handshake init %v", peer, device, endpointStr)
 
 	msg, err := device.CreateMessageInitiation(peer)
 	if err != nil {
@@ -186,9 +188,9 @@ func (peer *Peer) SendHandshakeResponse() error {
 	// We have to hold the peer lock to read peer.device and peer.endpoint.
 	peer.RLock()
 	device := peer.device
-	endpoint := peer.endpoint
+	endpointStr := fmt.Sprint(peer.endpoint) // print while holding lock to avoid races
 	peer.RUnlock()
-	device.log.Debug.Printf("%v - Send handshake response %v", peer, endpoint)
+	device.log.Debug.Printf("%v - Send handshake response %v", peer, endpointStr)
 
 	response, err := device.CreateMessageResponse(peer)
 	if err != nil {

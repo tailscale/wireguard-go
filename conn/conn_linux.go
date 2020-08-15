@@ -95,20 +95,6 @@ func CreateEndpoint(s string) (Endpoint, error) {
 	return &end, nil
 }
 
-// This is an empty implementation of fmt.Stringer. It exists because
-// Tailscale's patches try to print this struct with %v, in a context
-// where it's not safe to let reflect inspect the contents of the
-// NativeEndpoint (data races). Since Tailscale only uses
-// NativeEndpoint in wireguard-go tests, and not in actual code, we
-// use this no-op Stringer implementation to stop the unsafe
-// access.
-//
-// DO NOT UPSTREAM. This is only necessary because of the additional
-// debug logging we added in the send path.
-func (e *NativeEndpoint) String() string {
-	return ""
-}
-
 func (e *NativeEndpoint) UpdateDst(addr *net.UDPAddr) error {
 	ipv4 := addr.IP.To4()
 	if ipv4 != nil {
