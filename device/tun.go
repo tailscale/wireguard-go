@@ -41,13 +41,19 @@ func (device *Device) RoutineTUNEventReader() {
 		if event&tun.EventUp != 0 && !setUp {
 			logInfo.Println("Interface set up")
 			setUp = true
-			device.Up()
+			err := device.Up()
+			if err != nil {
+				logError.Printf("failed to bring up device %v: %v", device, err)
+			}
 		}
 
 		if event&tun.EventDown != 0 && setUp {
 			logInfo.Println("Interface set down")
 			setUp = false
-			device.Down()
+			err := device.Down()
+			if err != nil {
+				logError.Printf("failed to bring down device %v: %v", device, err)
+			}
 		}
 	}
 

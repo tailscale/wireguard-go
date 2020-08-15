@@ -6,6 +6,8 @@
 package device
 
 import (
+	"errors"
+	"fmt"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -111,12 +113,12 @@ func unsafeRemovePeer(device *Device, peer *Peer, key wgcfg.Key) {
 	delete(device.peers.keyMap, key)
 }
 
-func deviceUpdateState(device *Device) {
+func deviceUpdateState(device *Device) error {
 
 	// check if state already being updated (guard)
 
 	if device.state.changing.Swap(true) {
-		return
+		return nil
 	}
 
 	// compare to current state of device
@@ -128,7 +130,7 @@ func deviceUpdateState(device *Device) {
 	if newIsUp == device.state.current {
 		device.state.changing.Set(false)
 		device.state.Unlock()
-		return
+		return nil
 	}
 
 	// change state of device
@@ -136,9 +138,8 @@ func deviceUpdateState(device *Device) {
 	switch newIsUp {
 	case true:
 		if err := device.BindUpdate(); err != nil {
-			device.log.Error.Printf("Unable to update bind: %v\n", err)
 			device.isUp.Set(false)
-			break
+			return fmt.Errorf("unable to update bind: %v\n", err)
 		}
 		device.peers.RLock()
 		for _, peer := range device.peers.keyMap {
@@ -170,7 +171,7 @@ func deviceUpdateState(device *Device) {
 
 	// check for state change in the mean time
 
-	deviceUpdateState(device)
+	return deviceUpdateState(device)
 }
 
 func (device *Device) String() string {
@@ -179,21 +180,21 @@ func (device *Device) String() string {
 	return device.staticIdentity.publicKey.ShortString()
 }
 
-func (device *Device) Up() {
+func (device *Device) Up() error {
 
 	// closed device cannot be brought up
 
 	if device.isClosed.Get() {
-		return
+		return errors.New("device is closed")
 	}
 
 	device.isUp.Set(true)
-	deviceUpdateState(device)
+	return deviceUpdateState(device)
 }
 
-func (device *Device) Down() {
+func (device *Device) Down() error {
 	device.isUp.Set(false)
-	deviceUpdateState(device)
+	return deviceUpdateState(device)
 }
 
 func (device *Device) IsUnderLoad() bool {
