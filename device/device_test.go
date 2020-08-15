@@ -143,14 +143,13 @@ func TestTwoDevicePing(t *testing.T) {
 }
 
 func TestSimultaneousHandshake(t *testing.T) {
-	const maxWait = 300 * time.Millisecond
 	tun := genChannelTUNs(t)
 
 	msg2to1 := tuntest.Ping(net.ParseIP("1.0.0.1"), net.ParseIP("1.0.0.2"))
 	msg1to2 := tuntest.Ping(net.ParseIP("1.0.0.2"), net.ParseIP("1.0.0.1"))
 
 	var wg sync.WaitGroup
-	wg.Add(2)
+	wg.Add(4)
 	go func() {
 		tun[0].Outbound <- msg1to2
 		wg.Done()
@@ -159,25 +158,24 @@ func TestSimultaneousHandshake(t *testing.T) {
 		tun[1].Outbound <- msg2to1
 		wg.Done()
 	}()
-	wg.Wait()
 
-	select {
-	case msgRecv := <-tun[0].Inbound:
+	go func() {
+		msgRecv := <-tun[0].Inbound
 		if !bytes.Equal(msg2to1, msgRecv) {
 			t.Error("ping did not transit correctly")
 		}
-	case <-time.After(maxWait):
-		t.Error("ping 1.0.0.1 did not transit")
-	}
+		wg.Done()
+	}()
 
-	select {
-	case msgRecv := <-tun[1].Inbound:
+	go func() {
+		msgRecv := <-tun[1].Inbound
 		if !bytes.Equal(msg1to2, msgRecv) {
 			t.Error("return ping did not transit correctly")
 		}
-	case <-time.After(maxWait):
-		t.Error("ping 1.0.0.2 did not transit")
-	}
+		wg.Done()
+	}()
+
+	wg.Wait()
 }
 
 func assertNil(t *testing.T, err error) {
