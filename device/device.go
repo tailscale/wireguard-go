@@ -139,6 +139,7 @@ func deviceUpdateState(device *Device) error {
 	case true:
 		if err := device.BindUpdate(); err != nil {
 			device.isUp.Set(false)
+			device.state.Unlock()
 			return fmt.Errorf("unable to update bind: %v\n", err)
 		}
 		device.peers.RLock()
