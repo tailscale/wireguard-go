@@ -123,8 +123,8 @@ type Silence struct{}
 func (s Silence) Printf(fmt string, args ...interface{}) {}
 func (s Silence) Println(args ...interface{})            {}
 
-func (device *Device) IpcSetOperation(socket *bufio.Reader) error {
-	scanner := bufio.NewScanner(socket)
+func (device *Device) IpcSetOperation(r io.Reader) error {
+	scanner := bufio.NewScanner(r)
 	logError := device.log.Error
 	logDebug := Silence{}
 
@@ -142,6 +142,7 @@ func (device *Device) IpcSetOperation(socket *bufio.Reader) error {
 		if line == "" {
 			return nil
 		}
+		line = strings.TrimSpace(line)
 		parts := strings.Split(line, "=")
 		if len(parts) != 2 {
 			return &IPCError{ipc.IpcErrorProtocol}

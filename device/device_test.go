@@ -6,9 +6,9 @@
 package device
 
 import (
-	"bufio"
 	"bytes"
 	"fmt"
+	"io"
 	"net"
 	"strings"
 	"sync"
@@ -28,10 +28,7 @@ func getFreePort(t *testing.T) string {
 	return fmt.Sprintf("%d", l.LocalAddr().(*net.UDPAddr).Port)
 }
 
-func genConfigs(t *testing.T) (cfg1, cfg2 string) {
-	port1 := getFreePort(t)
-	port2 := getFreePort(t)
-
+const (
 	cfg1 = `private_key=481eb0d8113a4a5da532d2c3e9c14b53c8454b34ab109676f6b58c2245e37b58
 listen_port={{PORT1}}
 replace_peers=true
@@ -40,8 +37,6 @@ protocol_version=1
 replace_allowed_ips=true
 allowed_ip=1.0.0.2/32
 endpoint=127.0.0.1:{{PORT2}}`
-	cfg1 = strings.ReplaceAll(cfg1, "{{PORT1}}", port1)
-	cfg1 = strings.ReplaceAll(cfg1, "{{PORT2}}", port2)
 
 	cfg2 = `private_key=98c7989b1661a0d64fd6af3502000f87716b7c4bbcf00d04fc6073aa7b539768
 listen_port={{PORT2}}
@@ -51,40 +46,80 @@ protocol_version=1
 replace_allowed_ips=true
 allowed_ip=1.0.0.1/32
 endpoint=127.0.0.1:{{PORT1}}`
-	cfg2 = strings.ReplaceAll(cfg2, "{{PORT1}}", port1)
-	cfg2 = strings.ReplaceAll(cfg2, "{{PORT2}}", port2)
+)
 
-	return cfg1, cfg2
+func genConfigs(t *testing.T) (cfgs [2]io.Reader) {
+	var port1, port2 string
+	for port1 == port2 {
+		port1 = getFreePort(t)
+		port2 = getFreePort(t)
+	}
+	for i, cfg := range []string{cfg1, cfg2} {
+		cfg = strings.ReplaceAll(cfg, "{{PORT1}}", port1)
+		cfg = strings.ReplaceAll(cfg, "{{PORT2}}", port2)
+		cfgs[i] = strings.NewReader(cfg)
+	}
+	return
+}
+
+func genChannelTUNs(t *testing.T) (tun [2]*tuntest.ChannelTUN) {
+	const maxAttempts = 10
+NextAttempt:
+	for attempts := 0; attempts < maxAttempts; attempts++ {
+		cfg := genConfigs(t)
+		for i := range tun {
+			tun[i] = tuntest.NewChannelTUN()
+			dev := NewDevice(tun[i].TUN(), &DeviceOptions{
+				Logger: NewLogger(LogLevelDebug, fmt.Sprintf("dev%d: ", i)),
+			})
+			if err := dev.Up(); err != nil {
+				// TODO: for some of these errors, we might want to retry
+				t.Logf("failed to bring up device %v: %v", dev, err)
+				continue NextAttempt
+			}
+			err := dev.IpcSetOperation(cfg[i])
+			if err != nil {
+				// genConfigs attempted to pick ports that were free.
+				// There's a tiny window between genConfigs closing the port
+				// and us opening it, during which another process could
+				// start using it. We just lost that race.
+				// The manifests in a few different errors.
+				// Try again, from the beginning.
+				// If there's something permanent wrong,
+				// we'll see that when we run out of attempts.
+				t.Logf("failed to configure %v (%v), trying again", dev, err)
+				continue NextAttempt
+			}
+			// Frustratingly, even if err is nil,
+			// the device might still not be up.
+			// There's no good way to thread the error
+			// in RoutineTUNEventReader's call to dev.Up back out
+			// someplace useful (here).
+			// For now check that the device is up,
+			// and if not, assume it's due to a transient error (port in use),
+			// and retry the whole thing.
+			if !dev.isUp.Get() {
+				t.Logf("%v did not come up, trying again", dev)
+				continue NextAttempt
+			}
+			// The device is up. Close it on our way out.
+			t.Cleanup(dev.Close)
+		}
+		return // success!
+	}
+
+	t.Fatalf("failed %d times to find two free ports", maxAttempts)
+	return
 }
 
 func TestTwoDevicePing(t *testing.T) {
-	cfg1, cfg2 := genConfigs(t)
-
-	tun1 := tuntest.NewChannelTUN()
-	dev1 := NewDevice(tun1.TUN(), &DeviceOptions{
-		Logger: NewLogger(LogLevelDebug, "dev1: "),
-	})
-	dev1.Up()
-	defer dev1.Close()
-	if err := dev1.IpcSetOperation(bufio.NewReader(strings.NewReader(cfg1))); err != nil {
-		t.Fatal(err)
-	}
-
-	tun2 := tuntest.NewChannelTUN()
-	dev2 := NewDevice(tun2.TUN(), &DeviceOptions{
-		Logger: NewLogger(LogLevelDebug, "dev2: "),
-	})
-	dev2.Up()
-	defer dev2.Close()
-	if err := dev2.IpcSetOperation(bufio.NewReader(strings.NewReader(cfg2))); err != nil {
-		t.Fatal(err)
-	}
+	tun := genChannelTUNs(t)
 
 	t.Run("ping 1.0.0.1", func(t *testing.T) {
 		msg2to1 := tuntest.Ping(net.ParseIP("1.0.0.1"), net.ParseIP("1.0.0.2"))
-		tun2.Outbound <- msg2to1
+		tun[1].Outbound <- msg2to1
 		select {
-		case msgRecv := <-tun1.Inbound:
+		case msgRecv := <-tun[0].Inbound:
 			if !bytes.Equal(msg2to1, msgRecv) {
 				t.Error("ping did not transit correctly")
 			}
@@ -95,9 +130,9 @@ func TestTwoDevicePing(t *testing.T) {
 
 	t.Run("ping 1.0.0.2", func(t *testing.T) {
 		msg1to2 := tuntest.Ping(net.ParseIP("1.0.0.2"), net.ParseIP("1.0.0.1"))
-		tun1.Outbound <- msg1to2
+		tun[0].Outbound <- msg1to2
 		select {
-		case msgRecv := <-tun2.Inbound:
+		case msgRecv := <-tun[1].Inbound:
 			if !bytes.Equal(msg1to2, msgRecv) {
 				t.Error("return ping did not transit correctly")
 			}
@@ -109,27 +144,7 @@ func TestTwoDevicePing(t *testing.T) {
 
 func TestSimultaneousHandshake(t *testing.T) {
 	const maxWait = 300 * time.Millisecond
-	cfg1, cfg2 := genConfigs(t)
-
-	tun1 := tuntest.NewChannelTUN()
-	dev1 := NewDevice(tun1.TUN(), &DeviceOptions{
-		Logger: NewLogger(LogLevelDebug, "dev1: "),
-	})
-	dev1.Up()
-	defer dev1.Close()
-	if err := dev1.IpcSetOperation(bufio.NewReader(strings.NewReader(cfg1))); err != nil {
-		t.Fatal(err)
-	}
-
-	tun2 := tuntest.NewChannelTUN()
-	dev2 := NewDevice(tun2.TUN(), &DeviceOptions{
-		Logger: NewLogger(LogLevelDebug, "dev2: "),
-	})
-	dev2.Up()
-	defer dev2.Close()
-	if err := dev2.IpcSetOperation(bufio.NewReader(strings.NewReader(cfg2))); err != nil {
-		t.Fatal(err)
-	}
+	tun := genChannelTUNs(t)
 
 	msg2to1 := tuntest.Ping(net.ParseIP("1.0.0.1"), net.ParseIP("1.0.0.2"))
 	msg1to2 := tuntest.Ping(net.ParseIP("1.0.0.2"), net.ParseIP("1.0.0.1"))
@@ -137,17 +152,17 @@ func TestSimultaneousHandshake(t *testing.T) {
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
-		tun1.Outbound <- msg1to2
+		tun[0].Outbound <- msg1to2
 		wg.Done()
 	}()
 	go func() {
-		tun2.Outbound <- msg2to1
+		tun[1].Outbound <- msg2to1
 		wg.Done()
 	}()
 	wg.Wait()
 
 	select {
-	case msgRecv := <-tun1.Inbound:
+	case msgRecv := <-tun[0].Inbound:
 		if !bytes.Equal(msg2to1, msgRecv) {
 			t.Error("ping did not transit correctly")
 		}
@@ -156,7 +171,7 @@ func TestSimultaneousHandshake(t *testing.T) {
 	}
 
 	select {
-	case msgRecv := <-tun2.Inbound:
+	case msgRecv := <-tun[1].Inbound:
 		if !bytes.Equal(msg1to2, msgRecv) {
 			t.Error("return ping did not transit correctly")
 		}
