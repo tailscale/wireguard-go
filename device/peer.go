@@ -167,12 +167,11 @@ func (peer *Peer) String() string {
 	return peer.handshake.remoteStatic.ShortString()
 }
 
-func (peer *Peer) Start() {
+func (peer *Peer) Start() error {
 
 	// should never start a peer on a closed device
-
 	if peer.device.isClosed.Get() {
-		return
+		return errors.New("Start called on closed device")
 	}
 
 	// prevent simultaneous start/stop operations
@@ -181,7 +180,7 @@ func (peer *Peer) Start() {
 	defer peer.routines.Unlock()
 
 	if peer.isRunning.Get() {
-		return
+		return errors.New("Start called on running device")
 	}
 
 	device := peer.device
@@ -217,6 +216,7 @@ func (peer *Peer) Start() {
 
 	peer.routines.starting.Wait()
 	peer.isRunning.Set(true)
+	return nil
 }
 
 func (peer *Peer) ZeroAndFlushAll() {
