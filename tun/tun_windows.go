@@ -215,11 +215,6 @@ func (tun *NativeTun) Write(buff []byte, offset int) (int, error) {
 	return 0, fmt.Errorf("Write failed: %w", err)
 }
 
-
-func (tun *NativeTun) GUID() windows.GUID {
-	return tun.wt.GUID()
-}
-
 //
 // LUID returns Windows adapter instance ID.
 //
