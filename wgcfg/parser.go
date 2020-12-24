@@ -11,6 +11,8 @@ import (
 	"net"
 	"strconv"
 	"strings"
+
+	"inet.af/netaddr"
 )
 
 type ParseError struct {
@@ -215,7 +217,7 @@ func FromWgQuick(s string, name string) (*Config, error) {
 					return nil, err
 				}
 				for _, address := range addresses {
-					a, err := ParseCIDR(address)
+					a, err := netaddr.ParseIPPrefix(address)
 					if err != nil {
 						return nil, err
 					}
@@ -227,8 +229,8 @@ func FromWgQuick(s string, name string) (*Config, error) {
 					return nil, err
 				}
 				for _, address := range addresses {
-					a, ok := ParseIP(address)
-					if !ok {
+					a, err := netaddr.ParseIP(address)
+					if err != nil {
 						return nil, &ParseError{"Invalid IP address", address}
 					}
 					conf.DNS = append(conf.DNS, a)
@@ -256,7 +258,7 @@ func FromWgQuick(s string, name string) (*Config, error) {
 					return nil, err
 				}
 				for _, address := range addresses {
-					a, err := ParseCIDR(address)
+					a, err := netaddr.ParseIPPrefix(address)
 					if err != nil {
 						return nil, err
 					}
@@ -369,7 +371,7 @@ func Broken_FromUAPI(s string, existingConfig *Config) (*Config, error) {
 					return nil, &ParseError{"Protocol version must be 1", val}
 				}
 			case "allowed_ip":
-				a, err := ParseCIDR(val)
+				a, err := netaddr.ParseIPPrefix(val)
 				if err != nil {
 					return nil, err
 				}

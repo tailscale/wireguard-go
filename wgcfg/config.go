@@ -9,23 +9,25 @@ package wgcfg
 import (
 	"fmt"
 	"strings"
+
+	"inet.af/netaddr"
 )
 
 // Config is a wireguard configuration.
 type Config struct {
 	Name       string
 	PrivateKey PrivateKey
-	Addresses  []CIDR
+	Addresses  []netaddr.IPPrefix
 	ListenPort uint16
 	MTU        uint16
-	DNS        []IP
+	DNS        []netaddr.IP
 	Peers      []Peer
 }
 
 type Peer struct {
 	PublicKey           Key
 	PresharedKey        SymmetricKey
-	AllowedIPs          []CIDR
+	AllowedIPs          []netaddr.IPPrefix
 	Endpoints           []Endpoint
 	PersistentKeepalive uint16
 }
@@ -51,10 +53,10 @@ func (e *Endpoint) IsEmpty() bool {
 func (cfg Config) Copy() Config {
 	res := cfg
 	if res.Addresses != nil {
-		res.Addresses = append([]CIDR{}, res.Addresses...)
+		res.Addresses = append([]netaddr.IPPrefix{}, res.Addresses...)
 	}
 	if res.DNS != nil {
-		res.DNS = append([]IP{}, res.DNS...)
+		res.DNS = append([]netaddr.IP{}, res.DNS...)
 	}
 	peers := make([]Peer, 0, len(res.Peers))
 	for _, peer := range res.Peers {
@@ -69,7 +71,7 @@ func (cfg Config) Copy() Config {
 func (peer Peer) Copy() Peer {
 	res := peer
 	if res.AllowedIPs != nil {
-		res.AllowedIPs = append([]CIDR{}, res.AllowedIPs...)
+		res.AllowedIPs = append([]netaddr.IPPrefix{}, res.AllowedIPs...)
 	}
 	if res.Endpoints != nil {
 		res.Endpoints = append([]Endpoint{}, res.Endpoints...)

@@ -11,6 +11,7 @@ import (
 
 	"github.com/tailscale/wireguard-go/tun"
 	"github.com/tailscale/wireguard-go/wgcfg"
+	"inet.af/netaddr"
 )
 
 func TestConfig(t *testing.T) {
@@ -18,7 +19,7 @@ func TestConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ip1, err := wgcfg.ParseCIDR("10.0.0.1/32")
+	ip1, err := netaddr.ParseIPPrefix("10.0.0.1/32")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -27,7 +28,7 @@ func TestConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ip2, err := wgcfg.ParseCIDR("10.0.0.2/32")
+	ip2, err := netaddr.ParseIPPrefix("10.0.0.2/32")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -36,7 +37,7 @@ func TestConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ip3, err := wgcfg.ParseCIDR("10.0.0.3/32")
+	ip3, err := netaddr.ParseIPPrefix("10.0.0.3/32")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,7 +46,7 @@ func TestConfig(t *testing.T) {
 		PrivateKey: pk1,
 		Peers: []wgcfg.Peer{{
 			PublicKey:  pk2.Public(),
-			AllowedIPs: []wgcfg.CIDR{ip2},
+			AllowedIPs: []netaddr.IPPrefix{ip2},
 		}},
 	}
 
@@ -53,7 +54,7 @@ func TestConfig(t *testing.T) {
 		PrivateKey: pk2,
 		Peers: []wgcfg.Peer{{
 			PublicKey:           pk1.Public(),
-			AllowedIPs:          []wgcfg.CIDR{ip1},
+			AllowedIPs:          []netaddr.IPPrefix{ip1},
 			PersistentKeepalive: 5,
 		}},
 	}
@@ -147,7 +148,7 @@ func TestConfig(t *testing.T) {
 	t.Run("device1 add new peer", func(t *testing.T) {
 		cfg1.Peers = append(cfg1.Peers, wgcfg.Peer{
 			PublicKey:  pk3.Public(),
-			AllowedIPs: []wgcfg.CIDR{ip3},
+			AllowedIPs: []netaddr.IPPrefix{ip3},
 		})
 		sort.Slice(cfg1.Peers, func(i, j int) bool {
 			return cfg1.Peers[i].PublicKey.LessThan(&cfg1.Peers[j].PublicKey)

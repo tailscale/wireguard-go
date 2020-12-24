@@ -9,6 +9,8 @@ import (
 	"reflect"
 	"runtime"
 	"testing"
+
+	"inet.af/netaddr"
 )
 
 const testInput = `
@@ -78,8 +80,8 @@ func TestFromWgQuick(t *testing.T) {
 	if noError(t, err) {
 
 		lenTest(t, conf.Addresses, 2)
-		contains(t, conf.Addresses, CIDR{IPv4(10, 10, 0, 1), 16})
-		contains(t, conf.Addresses, CIDR{IPv4(10, 192, 122, 1), 24})
+		contains(t, conf.Addresses, netaddr.IPPrefix{IP: netaddr.IPv4(10, 10, 0, 1), Bits: 16})
+		contains(t, conf.Addresses, netaddr.IPPrefix{IP: netaddr.IPv4(10, 192, 122, 1), Bits: 24})
 		equal(t, "yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=", conf.PrivateKey.String())
 		equal(t, uint16(51820), conf.ListenPort)
 

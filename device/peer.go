@@ -14,6 +14,7 @@ import (
 
 	"github.com/tailscale/wireguard-go/conn"
 	"github.com/tailscale/wireguard-go/wgcfg"
+	"inet.af/netaddr"
 )
 
 const (
@@ -41,7 +42,7 @@ type Peer struct {
 	handshake                   Handshake
 	device                      *Device
 	endpoint                    conn.Endpoint
-	allowedIPs                  []wgcfg.CIDR
+	allowedIPs                  []netaddr.IPPrefix
 	persistentKeepaliveInterval uint16
 	disableRoaming              bool
 
