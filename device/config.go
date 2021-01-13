@@ -79,7 +79,8 @@ func (device *Device) Reconfig(cfg *wgcfg.Config) (err error) {
 		delete(oldPeers, NoisePublicKey(p.PublicKey))
 	}
 	for k := range oldPeers {
-		device.log.Debug.Printf("device.Reconfig: removing old peer %s", k.ToHex())
+		wk := wgcfg.Key(k)
+		device.log.Debug.Printf("device.Reconfig: removing old peer %s", wk.ShortString())
 		device.RemovePeer(k)
 	}
 
