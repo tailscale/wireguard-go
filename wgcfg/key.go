@@ -227,8 +227,10 @@ func ParseSymmetricHexKey(s string) (SymmetricKey, error) {
 // It is used by WireGuard to represent pre-shared symmetric keys.
 type SymmetricKey [chacha20poly1305.KeySize]byte
 
-func (k SymmetricKey) Base64() string             { return base64.StdEncoding.EncodeToString(k[:]) }
-func (k SymmetricKey) String() string             { return "sym:" + k.Base64()[:8] }
-func (k SymmetricKey) HexString() string          { return hex.EncodeToString(k[:]) }
-func (k SymmetricKey) IsZero() bool               { return k.Equal(SymmetricKey{}) }
-func (k SymmetricKey) Equal(k2 SymmetricKey) bool { return subtle.ConstantTimeCompare(k[:], k2[:]) == 1 }
+func (k SymmetricKey) Base64() string    { return base64.StdEncoding.EncodeToString(k[:]) }
+func (k SymmetricKey) String() string    { return "sym:" + k.Base64()[:8] }
+func (k SymmetricKey) HexString() string { return hex.EncodeToString(k[:]) }
+func (k SymmetricKey) IsZero() bool      { return k.Equal(SymmetricKey{}) }
+func (k SymmetricKey) Equal(k2 SymmetricKey) bool {
+	return subtle.ConstantTimeCompare(k[:], k2[:]) == 1
+}

@@ -15,45 +15,36 @@ import (
 )
 
 func TestConfig(t *testing.T) {
-	pk1, err := wgcfg.NewPrivateKey()
+	pk1, err := newPrivateKey()
 	if err != nil {
 		t.Fatal(err)
 	}
-	ip1, err := netaddr.ParseIPPrefix("10.0.0.1/32")
-	if err != nil {
-		t.Fatal(err)
-	}
+	ip1 := netaddr.MustParseIPPrefix("10.0.0.1/32")
 
-	pk2, err := wgcfg.NewPrivateKey()
+	pk2, err := newPrivateKey()
 	if err != nil {
 		t.Fatal(err)
 	}
-	ip2, err := netaddr.ParseIPPrefix("10.0.0.2/32")
-	if err != nil {
-		t.Fatal(err)
-	}
+	ip2 := netaddr.MustParseIPPrefix("10.0.0.2/32")
 
-	pk3, err := wgcfg.NewPrivateKey()
+	pk3, err := newPrivateKey()
 	if err != nil {
 		t.Fatal(err)
 	}
-	ip3, err := netaddr.ParseIPPrefix("10.0.0.3/32")
-	if err != nil {
-		t.Fatal(err)
-	}
+	ip3 := netaddr.MustParseIPPrefix("10.0.0.3/32")
 
 	cfg1 := &wgcfg.Config{
-		PrivateKey: pk1,
+		PrivateKey: wgcfg.PrivateKey(pk1),
 		Peers: []wgcfg.Peer{{
-			PublicKey:  pk2.Public(),
+			PublicKey:  wgcfg.Key(pk2.publicKey()),
 			AllowedIPs: []netaddr.IPPrefix{ip2},
 		}},
 	}
 
 	cfg2 := &wgcfg.Config{
-		PrivateKey: pk2,
+		PrivateKey: wgcfg.PrivateKey(pk2),
 		Peers: []wgcfg.Peer{{
-			PublicKey:           pk1.Public(),
+			PublicKey:           wgcfg.Key(pk1.publicKey()),
 			AllowedIPs:          []netaddr.IPPrefix{ip1},
 			PersistentKeepalive: 5,
 		}},
@@ -147,7 +138,7 @@ func TestConfig(t *testing.T) {
 
 	t.Run("device1 add new peer", func(t *testing.T) {
 		cfg1.Peers = append(cfg1.Peers, wgcfg.Peer{
-			PublicKey:  pk3.Public(),
+			PublicKey:  wgcfg.Key(pk3.publicKey()),
 			AllowedIPs: []netaddr.IPPrefix{ip3},
 		})
 		sort.Slice(cfg1.Peers, func(i, j int) bool {
@@ -155,7 +146,7 @@ func TestConfig(t *testing.T) {
 		})
 
 		device1.peers.RLock()
-		originalPeer0 := device1.peers.keyMap[pk2.Public()]
+		originalPeer0 := device1.peers.keyMap[pk2.publicKey()]
 		device1.peers.RUnlock()
 
 		if err := device1.Reconfig(cfg1); err != nil {
@@ -164,7 +155,7 @@ func TestConfig(t *testing.T) {
 		cmp(t, device1, cfg1)
 
 		device1.peers.RLock()
-		newPeer0 := device1.peers.keyMap[pk2.Public()]
+		newPeer0 := device1.peers.keyMap[pk2.publicKey()]
 		device1.peers.RUnlock()
 
 		if originalPeer0 != newPeer0 {
@@ -182,7 +173,7 @@ func TestConfig(t *testing.T) {
 		cmp(t, device1, cfg1)
 
 		device1.peers.RLock()
-		removedPeer := device1.peers.keyMap[removeKey]
+		removedPeer := device1.peers.keyMap[NoisePublicKey(removeKey)]
 		device1.peers.RUnlock()
 
 		if removedPeer != nil {

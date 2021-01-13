@@ -6,14 +6,15 @@
 package device
 
 import (
+	"encoding/base64"
 	"errors"
+	"fmt"
 	"net"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/tailscale/wireguard-go/conn"
-	"github.com/tailscale/wireguard-go/wgcfg"
 	"inet.af/netaddr"
 )
 
@@ -80,7 +81,7 @@ type Peer struct {
 	cookieGenerator CookieGenerator
 }
 
-func (device *Device) NewPeer(pk wgcfg.Key) (*Peer, error) {
+func (device *Device) NewPeer(pk NoisePublicKey) (*Peer, error) {
 
 	if device.isClosed.Get() {
 		return nil, errors.New("device closed")
@@ -120,7 +121,7 @@ func (device *Device) NewPeer(pk wgcfg.Key) (*Peer, error) {
 
 	handshake := &peer.handshake
 	handshake.mutex.Lock()
-	handshake.precomputedStaticStatic = device.staticIdentity.privateKey.SharedSecret(pk)
+	handshake.precomputedStaticStatic = device.staticIdentity.privateKey.sharedSecret(pk)
 	handshake.remoteStatic = pk
 	handshake.initiationLimit.Cap = 10
 	handshake.initiationLimit.Fill = HandshakeInitationRate
@@ -172,7 +173,12 @@ func (peer *Peer) SendBuffer(buffer []byte) error {
 }
 
 func (peer *Peer) String() string {
-	return peer.handshake.remoteStatic.ShortString()
+	base64Key := base64.StdEncoding.EncodeToString(peer.handshake.remoteStatic[:])
+	abbreviatedKey := "invalid"
+	if len(base64Key) == 44 {
+		abbreviatedKey = base64Key[0:4] + "…" + base64Key[39:43]
+	}
+	return fmt.Sprintf("peer(%s)", abbreviatedKey)
 }
 
 func (peer *Peer) Start() error {

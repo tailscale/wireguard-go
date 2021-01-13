@@ -27,14 +27,14 @@ func (device *Device) Config() *wgcfg.Config {
 	device.peers.RUnlock()
 
 	cfg := &wgcfg.Config{
-		PrivateKey: privateKey,
+		PrivateKey: wgcfg.PrivateKey(privateKey),
 		ListenPort: listenPort,
 	}
 	for _, peer := range keyMap {
 		peer.RLock()
 		p := wgcfg.Peer{
-			PublicKey:           peer.handshake.remoteStatic,
-			PresharedKey:        peer.handshake.presharedKey,
+			PublicKey:           wgcfg.Key(peer.handshake.remoteStatic),
+			PresharedKey:        wgcfg.SymmetricKey(peer.handshake.presharedKey),
 			PersistentKeepalive: uint16(atomic.LoadUint32(&peer.persistentKeepaliveInterval)),
 		}
 		if peer.endpoint != nil {
@@ -70,16 +70,16 @@ func (device *Device) Reconfig(cfg *wgcfg.Config) (err error) {
 
 	// Remove any current peers not in the new configuration.
 	device.peers.RLock()
-	oldPeers := make(map[wgcfg.Key]bool)
+	oldPeers := make(map[NoisePublicKey]bool)
 	for k := range device.peers.keyMap {
 		oldPeers[k] = true
 	}
 	device.peers.RUnlock()
 	for _, p := range cfg.Peers {
-		delete(oldPeers, p.PublicKey)
+		delete(oldPeers, NoisePublicKey(p.PublicKey))
 	}
 	for k := range oldPeers {
-		device.log.Debug.Printf("device.Reconfig: removing old peer %s", k.ShortString())
+		device.log.Debug.Printf("device.Reconfig: removing old peer %s", k.ToHex())
 		device.RemovePeer(k)
 	}
 
@@ -87,9 +87,9 @@ func (device *Device) Reconfig(cfg *wgcfg.Config) (err error) {
 	curPrivKey := device.staticIdentity.privateKey
 	device.staticIdentity.Unlock()
 
-	if !curPrivKey.Equal(cfg.PrivateKey) {
+	if !curPrivKey.Equals(NoisePrivateKey(cfg.PrivateKey)) {
 		device.log.Debug.Println("device.Reconfig: resetting private key")
-		if err := device.SetPrivateKey(cfg.PrivateKey); err != nil {
+		if err := device.SetPrivateKey(NoisePrivateKey(cfg.PrivateKey)); err != nil {
 			return err
 		}
 	}
@@ -106,10 +106,10 @@ func (device *Device) Reconfig(cfg *wgcfg.Config) (err error) {
 
 	newKeepalivePeers := make(map[wgcfg.Key]*Peer)
 	for _, p := range cfg.Peers {
-		peer := device.LookupPeer(p.PublicKey)
+		peer := device.LookupPeer(NoisePublicKey(p.PublicKey))
 		if peer == nil {
 			device.log.Debug.Printf("device.Reconfig: new peer %s", p.PublicKey.ShortString())
-			peer, err = device.NewPeer(p.PublicKey)
+			peer, err = device.NewPeer(NoisePublicKey(p.PublicKey))
 			if err != nil {
 				return err
 			}
@@ -120,7 +120,7 @@ func (device *Device) Reconfig(cfg *wgcfg.Config) (err error) {
 
 		if !p.PresharedKey.IsZero() {
 			peer.handshake.mutex.Lock()
-			peer.handshake.presharedKey = p.PresharedKey
+			peer.handshake.presharedKey = NoiseSymmetricKey(p.PresharedKey)
 			peer.handshake.mutex.Unlock()
 
 			device.log.Debug.Printf("device.Reconfig: setting preshared key for peer %s", p.PublicKey.ShortString())

@@ -17,7 +17,6 @@ import (
 	"github.com/tailscale/wireguard-go/ratelimiter"
 	"github.com/tailscale/wireguard-go/rwcancel"
 	"github.com/tailscale/wireguard-go/tun"
-	"github.com/tailscale/wireguard-go/wgcfg"
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
 	"inet.af/netaddr"
@@ -27,7 +26,7 @@ type Device struct {
 	isUp           AtomicBool // device is (going) up
 	isClosed       AtomicBool // device is closed? (acting as guard)
 	log            *Logger
-	handshakeDone  func(peerKey wgcfg.Key, peer *Peer, allowedIPs *AllowedIPs)
+	handshakeDone  func(peerKey NoisePublicKey, peer *Peer, allowedIPs *AllowedIPs)
 	skipBindUpdate bool
 	createBind     func(uport uint16, device *Device) (conn.Bind, uint16, error)
 	createEndpoint func(key [32]byte, s string) (conn.Endpoint, error)
@@ -52,14 +51,14 @@ type Device struct {
 
 	staticIdentity struct {
 		sync.RWMutex
-		privateKey wgcfg.PrivateKey
-		publicKey  wgcfg.Key
+		privateKey NoisePrivateKey
+		publicKey  NoisePublicKey
 	}
 
 	peers struct {
 		empty        AtomicBool // empty reports whether len(keyMap) == 0
 		sync.RWMutex            // protects keyMap
-		keyMap       map[wgcfg.Key]*Peer
+		keyMap       map[NoisePublicKey]*Peer
 	}
 
 	// unprotected / "self-synchronising resources"
@@ -68,7 +67,7 @@ type Device struct {
 	indexTable    IndexTable
 	cookieChecker CookieChecker
 
-	unexpectedip func(key *wgcfg.Key, ip netaddr.IP)
+	unexpectedip func(key *NoisePublicKey, ip netaddr.IP)
 
 	rate struct {
 		underLoadUntil atomic.Value
@@ -130,7 +129,7 @@ func newEncryptionQueue() *encryptionQueue {
  *
  * Must hold device.peers.Mutex
  */
-func unsafeRemovePeer(device *Device, peer *Peer, key wgcfg.Key) {
+func unsafeRemovePeer(device *Device, peer *Peer, key NoisePublicKey) {
 	// stop routing of packets
 	device.allowedips.RemoveByPeer(peer)
 
@@ -201,12 +200,6 @@ func deviceUpdateState(device *Device) error {
 	return deviceUpdateState(device)
 }
 
-func (device *Device) String() string {
-	device.staticIdentity.RLock()
-	defer device.staticIdentity.RUnlock()
-	return device.staticIdentity.publicKey.ShortString()
-}
-
 func (device *Device) Up() error {
 
 	// closed device cannot be brought up
@@ -241,7 +234,7 @@ func (device *Device) IsUnderLoad() bool {
 	return until.After(now)
 }
 
-func (device *Device) SetPrivateKey(sk wgcfg.PrivateKey) error {
+func (device *Device) SetPrivateKey(sk NoisePrivateKey) error {
 	var peersToStop []*Peer
 	defer func() {
 		for _, peer := range peersToStop {
@@ -254,7 +247,7 @@ func (device *Device) SetPrivateKey(sk wgcfg.PrivateKey) error {
 	device.staticIdentity.Lock()
 	defer device.staticIdentity.Unlock()
 
-	if sk.Equal(device.staticIdentity.privateKey) {
+	if sk.Equals(device.staticIdentity.privateKey) {
 		return nil
 	}
 
@@ -268,13 +261,13 @@ func (device *Device) SetPrivateKey(sk wgcfg.PrivateKey) error {
 	}
 
 	// remove peers with matching public keys
-	var publicKey wgcfg.Key // allow a zero key here for disabling this device
+	var publicKey NoisePublicKey // allow a zero key here for disabling this device
 	if !sk.IsZero() {
-		publicKey = sk.Public()
+		publicKey = sk.publicKey()
 	}
 
 	for key, peer := range device.peers.keyMap {
-		if peer.handshake.remoteStatic.Equal(publicKey) {
+		if peer.handshake.remoteStatic.Equals(publicKey) {
 			unsafeRemovePeer(device, peer, key)
 			peersToStop = append(peersToStop, peer)
 		}
@@ -291,7 +284,7 @@ func (device *Device) SetPrivateKey(sk wgcfg.PrivateKey) error {
 	expiredPeers := make([]*Peer, 0, len(device.peers.keyMap))
 	for _, peer := range device.peers.keyMap {
 		handshake := &peer.handshake
-		handshake.precomputedStaticStatic = device.staticIdentity.privateKey.SharedSecret(handshake.remoteStatic)
+		handshake.precomputedStaticStatic = device.staticIdentity.privateKey.sharedSecret(handshake.remoteStatic)
 		expiredPeers = append(expiredPeers, peer)
 	}
 
@@ -311,10 +304,10 @@ type DeviceOptions struct {
 	// UnexpectedIP is called when a packet is received from a
 	// validated peer with an unexpected internal IP address.
 	// The packet is then dropped.
-	UnexpectedIP func(key *wgcfg.Key, ip netaddr.IP)
+	UnexpectedIP func(key *NoisePublicKey, ip netaddr.IP)
 
 	// HandshakeDone is called every time we complete a peer handshake.
-	HandshakeDone func(peerKey wgcfg.Key, peer *Peer, allowedIPs *AllowedIPs)
+	HandshakeDone func(peerKey NoisePublicKey, peer *Peer, allowedIPs *AllowedIPs)
 
 	CreateEndpoint func(key [32]byte, s string) (conn.Endpoint, error)
 	CreateBind     func(uport uint16) (conn.Bind, uint16, error)
@@ -334,7 +327,7 @@ func NewDevice(tunDevice tun.Device, opts *DeviceOptions) *Device {
 		if opts.UnexpectedIP != nil {
 			device.unexpectedip = opts.UnexpectedIP
 		} else {
-			device.unexpectedip = func(key *wgcfg.Key, ip netaddr.IP) {
+			device.unexpectedip = func(key *NoisePublicKey, ip netaddr.IP) {
 				device.log.Info.Printf("IPv4 packet with disallowed source address %s from %v", ip, key)
 			}
 		}
@@ -366,7 +359,7 @@ func NewDevice(tunDevice tun.Device, opts *DeviceOptions) *Device {
 	}
 	device.tun.mtu = int32(mtu)
 
-	device.peers.keyMap = make(map[wgcfg.Key]*Peer)
+	device.peers.keyMap = make(map[NoisePublicKey]*Peer)
 
 	device.rate.limiter.Init()
 	device.rate.underLoadUntil.Store(time.Time{})
@@ -409,7 +402,7 @@ func NewDevice(tunDevice tun.Device, opts *DeviceOptions) *Device {
 	return device
 }
 
-func (device *Device) LookupPeer(pk wgcfg.Key) *Peer {
+func (device *Device) LookupPeer(pk NoisePublicKey) *Peer {
 	device.peers.RLock()
 	defer device.peers.RUnlock()
 
@@ -417,7 +410,7 @@ func (device *Device) LookupPeer(pk wgcfg.Key) *Peer {
 }
 
 // RemovePeer stops the Peer and removes it from routing.
-func (device *Device) RemovePeer(key wgcfg.Key) {
+func (device *Device) RemovePeer(key NoisePublicKey) {
 	device.peers.Lock()
 	peer := device.peers.keyMap[key]
 	if peer != nil {
@@ -444,7 +437,7 @@ func (device *Device) RemoveAllPeers() {
 		peersToStop = append(peersToStop, peer)
 		unsafeRemovePeer(device, peer, key)
 	}
-	device.peers.keyMap = make(map[wgcfg.Key]*Peer)
+	device.peers.keyMap = make(map[NoisePublicKey]*Peer)
 }
 
 func (device *Device) FlushPacketQueues() {

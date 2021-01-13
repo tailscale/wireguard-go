@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/tailscale/wireguard-go/conn"
-	"github.com/tailscale/wireguard-go/wgcfg"
 	"golang.org/x/crypto/chacha20poly1305"
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
@@ -618,7 +617,7 @@ func (peer *Peer) RoutineSequentialReceiver() {
 					peer,
 				)
 				ip := netaddr.IPv4(src[0], src[1], src[2], src[3])
-				key := (*wgcfg.Key)(&peer.handshake.remoteStatic)
+				key := (*NoisePublicKey)(&peer.handshake.remoteStatic)
 				device.unexpectedip(key, ip)
 				continue
 			}
@@ -649,7 +648,7 @@ func (peer *Peer) RoutineSequentialReceiver() {
 					peer,
 				)
 				ip := netaddr.IPv4(src[0], src[1], src[2], src[3])
-				key := (*wgcfg.Key)(&peer.handshake.remoteStatic)
+				key := (*NoisePublicKey)(&peer.handshake.remoteStatic)
 				device.unexpectedip(key, ip)
 				continue
 			}

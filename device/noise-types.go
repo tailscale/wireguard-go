@@ -89,3 +89,14 @@ func (key *NoiseSymmetricKey) FromHex(src string) error {
 func (key NoiseSymmetricKey) ToHex() string {
 	return hex.EncodeToString(key[:])
 }
+
+func (a *NoisePublicKey) LessThan(b *NoisePublicKey) bool {
+	for i := range a {
+		if a[i] < b[i] {
+			return true
+		} else if a[i] > b[i] {
+			return false
+		}
+	}
+	return false
+}
