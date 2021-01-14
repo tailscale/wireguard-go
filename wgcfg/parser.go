@@ -24,31 +24,29 @@ func (e *ParseError) Error() string {
 	return fmt.Sprintf("%s: ‘%s’", e.why, e.offender)
 }
 
-func parseEndpoints(s string) ([]Endpoint, error) {
-	var eps []Endpoint
+func validateEndpoints(s string) error {
 	vals := strings.Split(s, ",")
 	for _, val := range vals {
-		e, err := parseEndpoint(val)
+		_, _, err := parseEndpoint(val)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		eps = append(eps, *e)
 	}
-	return eps, nil
+	return nil
 }
 
-func parseEndpoint(s string) (*Endpoint, error) {
+func parseEndpoint(s string) (host string, port uint16, err error) {
 	i := strings.LastIndexByte(s, ':')
 	if i < 0 {
-		return nil, &ParseError{"Missing port from endpoint", s}
+		return "", 0, &ParseError{"Missing port from endpoint", s}
 	}
 	host, portStr := s[:i], s[i+1:]
 	if len(host) < 1 {
-		return nil, &ParseError{"Invalid endpoint host", host}
+		return "", 0, &ParseError{"Invalid endpoint host", host}
 	}
-	port, err := parsePort(portStr)
+	port, err = parsePort(portStr)
 	if err != nil {
-		return nil, err
+		return "", 0, err
 	}
 	hostColon := strings.IndexByte(host, ':')
 	if host[0] == '[' || host[len(host)-1] == ']' || hostColon > 0 {
@@ -56,14 +54,14 @@ func parseEndpoint(s string) (*Endpoint, error) {
 		if len(host) > 3 && host[0] == '[' && host[len(host)-1] == ']' && hostColon > 0 {
 			maybeV6 := net.ParseIP(host[1 : len(host)-1])
 			if maybeV6 == nil || len(maybeV6) != net.IPv6len {
-				return nil, err
+				return "", 0, err
 			}
 		} else {
-			return nil, err
+			return "", 0, err
 		}
 		host = host[1 : len(host)-1]
 	}
-	return &Endpoint{host, uint16(port)}, nil
+	return host, uint16(port), nil
 }
 
 func parseMTU(s string) (uint16, error) {
@@ -271,11 +269,11 @@ func FromWgQuick(s string, name string) (*Config, error) {
 				}
 				peer.PersistentKeepalive = p
 			case "endpoint":
-				eps, err := parseEndpoints(val)
+				err := validateEndpoints(val)
 				if err != nil {
 					return nil, err
 				}
-				peer.Endpoints = eps
+				peer.Endpoints = val
 			default:
 				return nil, &ParseError{"Invalid key for [Peer] section", key}
 			}
@@ -383,11 +381,11 @@ func Broken_FromUAPI(s string, existingConfig *Config) (*Config, error) {
 				}
 				peer.PersistentKeepalive = p
 			case "endpoint":
-				eps, err := parseEndpoints(val)
+				err := validateEndpoints(val)
 				if err != nil {
 					return nil, err
 				}
-				peer.Endpoints = eps
+				peer.Endpoints = val
 			default:
 				return nil, &ParseError{"Invalid key for peer section", key}
 			}

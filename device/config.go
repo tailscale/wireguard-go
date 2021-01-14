@@ -5,6 +5,7 @@ package device
 import (
 	"fmt"
 	"sort"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -129,12 +130,8 @@ func (device *Device) Reconfig(cfg *wgcfg.Config) (err error) {
 
 		peer.Lock()
 		atomic.StoreUint32(&peer.persistentKeepaliveInterval, uint32(p.PersistentKeepalive))
-		if len(p.Endpoints) > 0 && (peer.endpoint == nil || !endpointsEqual(p.Endpoints, peer.endpoint.Addrs())) {
-			str := p.Endpoints[0].String()
-			for _, cfgEp := range p.Endpoints[1:] {
-				str += "," + cfgEp.String()
-			}
-			ep, err := device.createEndpoint(p.PublicKey, str)
+		if p.Endpoints != "" && (peer.endpoint == nil || !endpointsEqual(p.Endpoints, peer.endpoint.Addrs())) {
+			ep, err := device.createEndpoint(p.PublicKey, p.Endpoints)
 			if err != nil {
 				peer.Unlock()
 				return err
@@ -187,33 +184,22 @@ func (device *Device) Reconfig(cfg *wgcfg.Config) (err error) {
 	return nil
 }
 
-func endpointsEqual(x, y []wgcfg.Endpoint) bool {
-	if len(x) != len(y) {
-		return false
-	}
-	// First see if they're equal in order, without allocating.
-	exact := true
-	for i := range x {
-		if x[i] != y[i] {
-			exact = false
-			break
-		}
-	}
-	if exact {
+func endpointsEqual(x, y string) bool {
+	// Cheap comparisons.
+	if x == y {
 		return true
 	}
-
+	xs := strings.Split(x, ",")
+	ys := strings.Split(y, ",")
+	if len(xs) != len(ys) {
+		return false
+	}
 	// Otherwise, see if they're the same, but out of order.
-	eps := make(map[wgcfg.Endpoint]bool)
-	for _, ep := range x {
-		eps[ep] = true
-	}
-	for _, ep := range y {
-		if !eps[ep] {
-			return false
-		}
-	}
-	return true
+	sort.Strings(xs)
+	sort.Strings(ys)
+	x = strings.Join(xs, ",")
+	y = strings.Join(ys, ",")
+	return x == y
 }
 
 func cidrsEqual(x, y []netaddr.IPPrefix) bool {

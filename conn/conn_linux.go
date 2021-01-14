@@ -15,7 +15,6 @@ import (
 	"syscall"
 	"unsafe"
 
-	"github.com/tailscale/wireguard-go/wgcfg"
 	"golang.org/x/sys/unix"
 )
 
@@ -60,18 +59,14 @@ func (endpoint *NativeEndpoint) dst6() *unix.SockaddrInet6 {
 	return (*unix.SockaddrInet6)(unsafe.Pointer(&endpoint.dst[0]))
 }
 
-func (e *NativeEndpoint) Addrs() []wgcfg.Endpoint {
-	port := uint16(0)
+func (e *NativeEndpoint) Addrs() string {
+	var port int
 	if e.isV6 {
-		port = uint16(e.dst6().Port)
+		port = e.dst6().Port
 	} else {
-		port = uint16(e.dst4().Port)
+		port = e.dst4().Port
 	}
-
-	return []wgcfg.Endpoint{{
-		Host: e.DstIP().String(),
-		Port: uint16(port),
-	}}
+	return net.JoinHostPort(e.DstIP().String(), strconv.Itoa(port))
 }
 
 type nativeBind struct {

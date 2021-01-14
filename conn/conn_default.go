@@ -10,9 +10,8 @@ package conn
 import (
 	"net"
 	"os"
+	"strconv"
 	"syscall"
-
-	"github.com/tailscale/wireguard-go/wgcfg"
 )
 
 /* This code is meant to be a temporary solution
@@ -77,11 +76,8 @@ func (e *NativeEndpoint) UpdateDst(dst *net.UDPAddr) error {
 	return nil
 }
 
-func (e *NativeEndpoint) Addrs() []wgcfg.Endpoint {
-	return []wgcfg.Endpoint{{
-		Host: e.IP.String(),
-		Port: uint16(e.Port),
-	}}
+func (e *NativeEndpoint) Addrs() string {
+	return net.JoinHostPort(e.IP.String(), strconv.Itoa(e.Port))
 }
 
 func listenNet(network string, port int) (*net.UDPConn, int, error) {

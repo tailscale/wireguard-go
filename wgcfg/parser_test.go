@@ -87,42 +87,42 @@ func TestFromWgQuick(t *testing.T) {
 
 		lenTest(t, conf.Peers, 3)
 		lenTest(t, conf.Peers[0].AllowedIPs, 2)
-		equal(t, Endpoint{Host: "192.95.5.67", Port: 1234}, conf.Peers[0].Endpoints[0])
+		equal(t, "192.95.5.67:1234", conf.Peers[0].Endpoints)
 		equal(t, "xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=", conf.Peers[0].PublicKey.Base64())
 
 		lenTest(t, conf.Peers[1].AllowedIPs, 2)
-		equal(t, Endpoint{Host: "2607:5300:60:6b0::c05f:543", Port: 2468}, conf.Peers[1].Endpoints[0])
+		equal(t, "[2607:5300:60:6b0::c05f:543]:2468", conf.Peers[1].Endpoints)
 		equal(t, "TrMvSoP4jYQlY6RIzBgbssQqY3vxI2Pi+y71lOWWXX0=", conf.Peers[1].PublicKey.Base64())
 		equal(t, uint16(100), conf.Peers[1].PersistentKeepalive)
 
 		lenTest(t, conf.Peers[2].AllowedIPs, 1)
-		equal(t, Endpoint{Host: "test.wireguard.com", Port: 18981}, conf.Peers[2].Endpoints[0])
+		equal(t, "test.wireguard.com:18981", conf.Peers[2].Endpoints)
 		equal(t, "gN65BkIKy1eCE9pP1wdc8ROUtkHLF2PfAqYdyYBz6EA=", conf.Peers[2].PublicKey.Base64())
 		equal(t, "TrMvSoP4jYQlY6RIzBgbssQqY3vxI2Pi+y71lOWWXX0=", conf.Peers[2].PresharedKey.Base64())
 	}
 }
 
 func TestParseEndpoint(t *testing.T) {
-	_, err := parseEndpoint("[192.168.42.0:]:51880")
+	_, _, err := parseEndpoint("[192.168.42.0:]:51880")
 	if err == nil {
 		t.Error("Error was expected")
 	}
-	e, err := parseEndpoint("192.168.42.0:51880")
+	host, port, err := parseEndpoint("192.168.42.0:51880")
 	if noError(t, err) {
-		equal(t, "192.168.42.0", e.Host)
-		equal(t, uint16(51880), e.Port)
+		equal(t, "192.168.42.0", host)
+		equal(t, uint16(51880), port)
 	}
-	e, err = parseEndpoint("test.wireguard.com:18981")
+	host, port, err = parseEndpoint("test.wireguard.com:18981")
 	if noError(t, err) {
-		equal(t, "test.wireguard.com", e.Host)
-		equal(t, uint16(18981), e.Port)
+		equal(t, "test.wireguard.com", host)
+		equal(t, uint16(18981), port)
 	}
-	e, err = parseEndpoint("[2607:5300:60:6b0::c05f:543]:2468")
+	host, port, err = parseEndpoint("[2607:5300:60:6b0::c05f:543]:2468")
 	if noError(t, err) {
-		equal(t, "2607:5300:60:6b0::c05f:543", e.Host)
-		equal(t, uint16(2468), e.Port)
+		equal(t, "2607:5300:60:6b0::c05f:543", host)
+		equal(t, uint16(2468), port)
 	}
-	_, err = parseEndpoint("[::::::invalid:18981")
+	_, _, err = parseEndpoint("[::::::invalid:18981")
 	if err == nil {
 		t.Error("Error was expected")
 	}

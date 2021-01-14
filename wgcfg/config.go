@@ -7,9 +7,6 @@
 package wgcfg
 
 import (
-	"fmt"
-	"strings"
-
 	"inet.af/netaddr"
 )
 
@@ -28,24 +25,8 @@ type Peer struct {
 	PublicKey           Key
 	PresharedKey        SymmetricKey
 	AllowedIPs          []netaddr.IPPrefix
-	Endpoints           []Endpoint
+	Endpoints           string // comma-separated host/port pairs: "1.2.3.4:56,[::]:80"
 	PersistentKeepalive uint16
-}
-
-type Endpoint struct {
-	Host string
-	Port uint16
-}
-
-func (e *Endpoint) String() string {
-	if strings.IndexByte(e.Host, ':') > 0 {
-		return fmt.Sprintf("[%s]:%d", e.Host, e.Port)
-	}
-	return fmt.Sprintf("%s:%d", e.Host, e.Port)
-}
-
-func (e *Endpoint) IsEmpty() bool {
-	return len(e.Host) == 0
 }
 
 // Copy makes a deep copy of Config.
@@ -72,9 +53,6 @@ func (peer Peer) Copy() Peer {
 	res := peer
 	if res.AllowedIPs != nil {
 		res.AllowedIPs = append([]netaddr.IPPrefix{}, res.AllowedIPs...)
-	}
-	if res.Endpoints != nil {
-		res.Endpoints = append([]Endpoint{}, res.Endpoints...)
 	}
 	return res
 }

@@ -10,8 +10,6 @@ import (
 	"errors"
 	"net"
 	"strings"
-
-	"github.com/tailscale/wireguard-go/wgcfg"
 )
 
 // A Bind listens on a port for both IPv6 and IPv4 UDP traffic.
@@ -83,7 +81,7 @@ type Endpoint interface {
 	DstIP() net.IP
 	SrcIP() net.IP
 	UpdateDst(addr *net.UDPAddr) error
-	Addrs() []wgcfg.Endpoint
+	Addrs() string // comma-separated host/port pairs: "1.2.3.4:56,[::]:80"
 }
 
 func parseEndpoint(s string) (*net.UDPAddr, error) {

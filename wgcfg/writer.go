@@ -8,6 +8,7 @@ package wgcfg
 import (
 	"fmt"
 	"net"
+	"strconv"
 	"strings"
 )
 
@@ -36,10 +37,15 @@ func (conf *Config) ToUAPI() (string, error) {
 			}
 		}
 
-		if len(peer.Endpoints) > 0 {
-			var reps []string
-			for _, ep := range peer.Endpoints {
-				ips, err := net.LookupIP(ep.Host)
+		var reps []string
+		if peer.Endpoints != "" {
+			eps := strings.Split(peer.Endpoints, ",")
+			for _, ep := range eps {
+				host, port, err := parseEndpoint(ep)
+				if err != nil {
+					return "", err
+				}
+				ips, err := net.LookupIP(host)
 				if err != nil {
 					return "", err
 				}
@@ -54,15 +60,12 @@ func (conf *Config) ToUAPI() (string, error) {
 					}
 				}
 				if ip == nil {
-					return "", fmt.Errorf("unable to resolve IP address of endpoint %q (%v)", ep.Host, ips)
+					return "", fmt.Errorf("unable to resolve IP address of endpoint %q (%v)", host, ips)
 				}
-				resolvedEndpoint := Endpoint{ip.String(), ep.Port}
-				reps = append(reps, resolvedEndpoint.String())
+				reps = append(reps, net.JoinHostPort(ip.String(), strconv.Itoa(int(port))))
 			}
-			fmt.Fprintf(output, "endpoint=%s\n", strings.Join(reps, ","))
-		} else {
-			fmt.Fprint(output, "endpoint=\n")
 		}
+		fmt.Fprintf(output, "endpoint=%s\n", strings.Join(reps, ","))
 
 		// Note: this needs to come *after* endpoint definitions,
 		// because setting it will trigger a handshake to all

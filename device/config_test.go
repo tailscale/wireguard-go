@@ -116,10 +116,7 @@ func TestConfig(t *testing.T) {
 	})
 
 	t.Run("device1 modify peer", func(t *testing.T) {
-		cfg1.Peers[0].Endpoints = []wgcfg.Endpoint{{
-			Host: "1.2.3.4",
-			Port: 12345,
-		}}
+		cfg1.Peers[0].Endpoints = "1.2.3.4:12345"
 		if err := device1.Reconfig(cfg1); err != nil {
 			t.Fatal(err)
 		}
@@ -127,9 +124,7 @@ func TestConfig(t *testing.T) {
 	})
 
 	t.Run("device1 replace endpoint", func(t *testing.T) {
-		cfg1.Peers[0].Endpoints = []wgcfg.Endpoint{
-			{Host: "1.1.1.1", Port: 123},
-		}
+		cfg1.Peers[0].Endpoints = "1.1.1.1:123"
 		if err := device1.Reconfig(cfg1); err != nil {
 			t.Fatal(err)
 		}
