@@ -249,11 +249,3 @@ func (table *AllowedIPs) LookupIPv6(address []byte) *Peer {
 	defer table.mutex.RUnlock()
 	return table.IPv6.lookup(address)
 }
-
-func (table *AllowedIPs) LookupIP(a net.IP) *Peer {
-	if a.To4() != nil {
-		return table.LookupIPv4(a)
-	} else {
-		return table.LookupIPv6(a)
-	}
-}

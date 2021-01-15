@@ -25,7 +25,6 @@ type QueueHandshakeElement struct {
 	msgType  uint32
 	packet   []byte
 	endpoint conn.Endpoint
-	addr     *net.UDPAddr
 	buffer   *[MaxMessageSize]byte
 }
 
@@ -37,7 +36,6 @@ type QueueInboundElement struct {
 	counter  uint64
 	keypair  *Keypair
 	endpoint conn.Endpoint
-	addr     *net.UDPAddr
 }
 
 // clearPointers clears elem fields that contain pointers.
@@ -123,7 +121,6 @@ func (device *Device) RoutineReceiveIncoming(IP int, bind conn.Bind) {
 		err      error
 		size     int
 		endpoint conn.Endpoint
-		addr     *net.UDPAddr
 	)
 
 	for {
@@ -132,9 +129,9 @@ func (device *Device) RoutineReceiveIncoming(IP int, bind conn.Bind) {
 
 		switch IP {
 		case ipv4.Version:
-			size, endpoint, addr, err = bind.ReceiveIPv4(buffer[:])
+			size, endpoint, err = bind.ReceiveIPv4(buffer[:])
 		case ipv6.Version:
-			size, endpoint, addr, err = bind.ReceiveIPv6(buffer[:])
+			size, endpoint, err = bind.ReceiveIPv6(buffer[:])
 		default:
 			panic("invalid IP version")
 		}
@@ -192,7 +189,6 @@ func (device *Device) RoutineReceiveIncoming(IP int, bind conn.Bind) {
 			elem.keypair = keypair
 			elem.dropped = AtomicFalse
 			elem.endpoint = endpoint
-			elem.addr = addr
 			elem.counter = 0
 			elem.Mutex = sync.Mutex{}
 			elem.Lock()
@@ -234,7 +230,6 @@ func (device *Device) RoutineReceiveIncoming(IP int, bind conn.Bind) {
 					buffer:   buffer,
 					packet:   packet,
 					endpoint: endpoint,
-					addr:     addr,
 				},
 			)) {
 				buffer = device.GetMessageBuffer()
@@ -295,16 +290,6 @@ func (device *Device) RoutineDecryption() {
 			elem.Unlock()
 		}
 	}
-}
-
-func addrToBytes(addr *net.UDPAddr) []byte {
-	out := addr.IP.To4()
-	if out == nil {
-		out = addr.IP
-	}
-	out = append(out, byte(addr.Port&0xff))
-	out = append(out, byte((addr.Port>>8)&0xff))
-	return out
 }
 
 /* Handles incoming packets related to handshake
@@ -394,14 +379,14 @@ func (device *Device) RoutineHandshake() {
 
 				// verify MAC2 field
 
-				if !device.cookieChecker.CheckMAC2(elem.packet, addrToBytes(elem.addr)) {
+				if !device.cookieChecker.CheckMAC2(elem.packet, elem.endpoint.DstToBytes()) {
 					device.SendHandshakeCookie(&elem)
 					continue
 				}
 
 				// check ratelimiter
 
-				if !device.rate.limiter.Allow(elem.addr.IP) {
+				if !device.rate.limiter.Allow(elem.endpoint.DstIP()) {
 					continue
 				}
 			}
@@ -443,7 +428,7 @@ func (device *Device) RoutineHandshake() {
 			peer.timersAnyAuthenticatedPacketReceived()
 
 			// update endpoint
-			peer.SetEndpointAddress(elem.addr)
+			peer.SetEndpointFromPacket(elem.endpoint)
 
 			logDebug.Println(peer, "- Received handshake initiation")
 			atomic.AddUint64(&peer.stats.rxBytes, uint64(len(elem.packet)))
@@ -480,7 +465,7 @@ func (device *Device) RoutineHandshake() {
 			}
 
 			// update endpoint
-			peer.SetEndpointAddress(elem.addr)
+			peer.SetEndpointFromPacket(elem.endpoint)
 
 			logDebug.Println(peer, "- Received handshake response")
 			atomic.AddUint64(&peer.stats.rxBytes, uint64(len(elem.packet)))
@@ -560,7 +545,7 @@ func (peer *Peer) RoutineSequentialReceiver() {
 		}
 
 		// update endpoint
-		peer.SetEndpointAddress(elem.addr)
+		peer.SetEndpointFromPacket(elem.endpoint)
 
 		// check for replay
 		if !elem.keypair.replayFilter.ValidateCounter(elem.counter, RejectAfterMessages) {

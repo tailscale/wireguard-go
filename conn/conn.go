@@ -28,17 +28,15 @@ type Bind interface {
 	//
 	// It reports the number of bytes read, n,
 	// the packet source address ep,
-	// the UDP address addr,
 	// and any error.
-	ReceiveIPv6(buff []byte) (n int, ep Endpoint, addr *net.UDPAddr, err error)
+	ReceiveIPv6(buff []byte) (n int, ep Endpoint, err error)
 
 	// ReceiveIPv4 reads an IPv4 UDP packet into b.
 	//
 	// It reports the number of bytes read, n,
 	// the packet source address ep,
-	// the UDP address addr,
 	// and any error.
-	ReceiveIPv4(b []byte) (n int, ep Endpoint, addr *net.UDPAddr, err error)
+	ReceiveIPv4(b []byte) (n int, ep Endpoint, err error)
 
 	// Send writes a packet b to address ep.
 	Send(b []byte, ep Endpoint) error
@@ -80,7 +78,6 @@ type Endpoint interface {
 	DstToBytes() []byte  // used for mac2 cookie calculations
 	DstIP() net.IP
 	SrcIP() net.IP
-	UpdateDst(addr *net.UDPAddr) error
 	Addrs() string // comma-separated host/port pairs: "1.2.3.4:56,[::]:80"
 }
 

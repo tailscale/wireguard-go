@@ -9,7 +9,6 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"net"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -309,20 +308,11 @@ func (peer *Peer) Stop() {
 	peer.ZeroAndFlushAll()
 }
 
-func (peer *Peer) SetEndpointAddress(addr *net.UDPAddr) {
+func (peer *Peer) SetEndpointFromPacket(endpoint conn.Endpoint) {
 	if peer.disableRoaming {
 		return
 	}
-	if p := peer.device.allowedips.LookupIP(addr.IP); p != nil {
-		return
-	}
-
 	peer.Lock()
-	if peer.endpoint != nil {
-		err := peer.endpoint.UpdateDst(addr)
-		if err != nil {
-			peer.device.log.Debug.Printf("%v - SetEndpointAddress: %v", peer, err)
-		}
-	}
+	peer.endpoint = endpoint
 	peer.Unlock()
 }
