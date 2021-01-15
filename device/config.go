@@ -4,6 +4,7 @@ package device
 
 import (
 	"fmt"
+	"io"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -15,49 +16,32 @@ import (
 )
 
 func (device *Device) Config() *wgcfg.Config {
-	device.net.RLock()
-	listenPort := device.net.port
-	device.net.RUnlock()
-
-	device.staticIdentity.RLock()
-	privateKey := device.staticIdentity.privateKey
-	device.staticIdentity.RUnlock()
-
-	device.peers.RLock()
-	keyMap := device.peers.keyMap
-	device.peers.RUnlock()
-
-	cfg := &wgcfg.Config{
-		PrivateKey: wgcfg.PrivateKey(privateKey),
-		ListenPort: listenPort,
+	cfg, err := device.config()
+	if err != nil {
+		device.log.Error.Println("Config failed:", err.Error())
 	}
-	for _, peer := range keyMap {
-		peer.RLock()
-		p := wgcfg.Peer{
-			PublicKey:           wgcfg.Key(peer.handshake.remoteStatic),
-			PresharedKey:        wgcfg.SymmetricKey(peer.handshake.presharedKey),
-			PersistentKeepalive: uint16(atomic.LoadUint32(&peer.persistentKeepaliveInterval)),
-		}
-		if peer.endpoint != nil {
-			p.Endpoints = peer.endpoint.Addrs()
-		}
-		for _, ipnet := range device.allowedips.EntriesForPeer(peer) {
-			cidr, ok := netaddr.FromStdIPNet(&ipnet)
-			if !ok {
-				device.log.Error.Println("bad ipnet " + ipnet.String())
-				continue
-			}
-			p.AllowedIPs = append(p.AllowedIPs, cidr)
-		}
-		peer.RUnlock()
+	return cfg
+}
 
-		cfg.Peers = append(cfg.Peers, p)
+func (device *Device) config() (*wgcfg.Config, error) {
+	r, w := io.Pipe()
+	errc := make(chan error, 1)
+	go func() {
+		errc <- device.IpcGetOperation(w)
+		w.Close()
+	}()
+	cfg, err := wgcfg.FromUAPI(r)
+	if err != nil {
+		return nil, err
 	}
+	if err := <-errc; err != nil {
+		return nil, err
+	}
+
 	sort.Slice(cfg.Peers, func(i, j int) bool {
 		return cfg.Peers[i].PublicKey.LessThan(&cfg.Peers[j].PublicKey)
 	})
-
-	return cfg
+	return cfg, nil
 }
 
 // Reconfig replaces the existing device configuration with cfg.
