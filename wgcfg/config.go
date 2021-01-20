@@ -10,7 +10,8 @@ import (
 	"inet.af/netaddr"
 )
 
-// Config is a wireguard configuration.
+// Config is a WireGuard configuration.
+// It only supports the set of things Tailscale uses.
 type Config struct {
 	Name       string
 	PrivateKey PrivateKey
