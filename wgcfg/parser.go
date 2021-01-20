@@ -46,7 +46,7 @@ func parseEndpoint(s string) (host string, port uint16, err error) {
 	if len(host) < 1 {
 		return "", 0, &ParseError{"Invalid endpoint host", host}
 	}
-	port, err = parsePort(portStr)
+	uport, err := strconv.ParseUint(portStr, 10, 16)
 	if err != nil {
 		return "", 0, err
 	}
@@ -63,18 +63,7 @@ func parseEndpoint(s string) (host string, port uint16, err error) {
 		}
 		host = host[1 : len(host)-1]
 	}
-	return host, uint16(port), nil
-}
-
-func parsePort(s string) (uint16, error) {
-	m, err := strconv.Atoi(s)
-	if err != nil {
-		return 0, err
-	}
-	if m < 0 || m > 65535 {
-		return 0, &ParseError{"Invalid port", s}
-	}
-	return uint16(m), nil
+	return host, uint16(uport), nil
 }
 
 func parseKeyHex(s string) (*Key, error) {
