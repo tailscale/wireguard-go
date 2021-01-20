@@ -9,33 +9,7 @@ import (
 	"reflect"
 	"runtime"
 	"testing"
-
-	"inet.af/netaddr"
 )
-
-const testInput = `
-[Interface] 
-Address = 10.192.122.1/24 
-Address = 10.10.0.1/16 
-PrivateKey = yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk= 
-ListenPort = 51820  #comments don't matter
-
-[Peer] 
-PublicKey   =   xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=    
-Endpoint = 192.95.5.67:1234 
-AllowedIPs = 10.192.122.3/32, 10.192.124.1/24
-
-[Peer] 
-PublicKey = TrMvSoP4jYQlY6RIzBgbssQqY3vxI2Pi+y71lOWWXX0= 
-Endpoint = [2607:5300:60:6b0::c05f:543]:2468 
-AllowedIPs = 10.192.122.4/32, 192.168.0.0/16
-PersistentKeepalive = 100
-
-[Peer] 
-PublicKey = gN65BkIKy1eCE9pP1wdc8ROUtkHLF2PfAqYdyYBz6EA= 
-PresharedKey = TrMvSoP4jYQlY6RIzBgbssQqY3vxI2Pi+y71lOWWXX0= 
-Endpoint = test.wireguard.com:18981 
-AllowedIPs = 10.10.10.230/32`
 
 func noError(t *testing.T, err error) bool {
 	if err == nil {
@@ -53,52 +27,6 @@ func equal(t *testing.T, expected, actual interface{}) bool {
 	_, fn, line, _ := runtime.Caller(1)
 	t.Errorf("Failed equals at %s:%d\nactual   %#v\nexpected %#v", fn, line, actual, expected)
 	return false
-}
-func lenTest(t *testing.T, actualO interface{}, expected int) bool {
-	actual := reflect.ValueOf(actualO).Len()
-	if reflect.DeepEqual(expected, actual) {
-		return true
-	}
-	_, fn, line, _ := runtime.Caller(1)
-	t.Errorf("Wrong length at %s:%d\nactual   %#v\nexpected %#v", fn, line, actual, expected)
-	return false
-}
-func contains(t *testing.T, list, element interface{}) bool {
-	listValue := reflect.ValueOf(list)
-	for i := 0; i < listValue.Len(); i++ {
-		if reflect.DeepEqual(listValue.Index(i).Interface(), element) {
-			return true
-		}
-	}
-	_, fn, line, _ := runtime.Caller(1)
-	t.Errorf("Error %s:%d\nelement not found: %#v", fn, line, element)
-	return false
-}
-
-func TestFromWgQuick(t *testing.T) {
-	conf, err := FromWgQuick(testInput, "test")
-	if noError(t, err) {
-
-		lenTest(t, conf.Addresses, 2)
-		contains(t, conf.Addresses, netaddr.IPPrefix{IP: netaddr.IPv4(10, 10, 0, 1), Bits: 16})
-		contains(t, conf.Addresses, netaddr.IPPrefix{IP: netaddr.IPv4(10, 192, 122, 1), Bits: 24})
-		equal(t, "yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=", conf.PrivateKey.String())
-		equal(t, uint16(51820), conf.ListenPort)
-
-		lenTest(t, conf.Peers, 3)
-		lenTest(t, conf.Peers[0].AllowedIPs, 2)
-		equal(t, "192.95.5.67:1234", conf.Peers[0].Endpoints)
-		equal(t, "xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=", conf.Peers[0].PublicKey.Base64())
-
-		lenTest(t, conf.Peers[1].AllowedIPs, 2)
-		equal(t, "[2607:5300:60:6b0::c05f:543]:2468", conf.Peers[1].Endpoints)
-		equal(t, "TrMvSoP4jYQlY6RIzBgbssQqY3vxI2Pi+y71lOWWXX0=", conf.Peers[1].PublicKey.Base64())
-		equal(t, uint16(100), conf.Peers[1].PersistentKeepalive)
-
-		lenTest(t, conf.Peers[2].AllowedIPs, 1)
-		equal(t, "test.wireguard.com:18981", conf.Peers[2].Endpoints)
-		equal(t, "gN65BkIKy1eCE9pP1wdc8ROUtkHLF2PfAqYdyYBz6EA=", conf.Peers[2].PublicKey.Base64())
-	}
 }
 
 func TestParseEndpoint(t *testing.T) {
