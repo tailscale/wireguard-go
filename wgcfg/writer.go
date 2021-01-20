@@ -27,10 +27,6 @@ func (conf *Config) ToUAPI() (string, error) {
 		fmt.Fprintf(output, "protocol_version=1\n")
 		fmt.Fprintf(output, "replace_allowed_ips=true\n")
 
-		if !peer.PresharedKey.IsZero() {
-			fmt.Fprintf(output, "preshared_key = %s\n", peer.PresharedKey.String())
-		}
-
 		if len(peer.AllowedIPs) > 0 {
 			for _, address := range peer.AllowedIPs {
 				fmt.Fprintf(output, "allowed_ip=%s\n", address.String())

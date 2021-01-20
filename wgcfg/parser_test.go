@@ -98,7 +98,6 @@ func TestFromWgQuick(t *testing.T) {
 		lenTest(t, conf.Peers[2].AllowedIPs, 1)
 		equal(t, "test.wireguard.com:18981", conf.Peers[2].Endpoints)
 		equal(t, "gN65BkIKy1eCE9pP1wdc8ROUtkHLF2PfAqYdyYBz6EA=", conf.Peers[2].PublicKey.Base64())
-		equal(t, "TrMvSoP4jYQlY6RIzBgbssQqY3vxI2Pi+y71lOWWXX0=", conf.Peers[2].PresharedKey.Base64())
 	}
 }
 

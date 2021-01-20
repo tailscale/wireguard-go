@@ -247,11 +247,7 @@ func FromWgQuick(s string, name string) (*Config, error) {
 				}
 				peer.PublicKey = *k
 			case "presharedkey":
-				k, err := ParseKey(val)
-				if err != nil {
-					return nil, err
-				}
-				peer.PresharedKey = SymmetricKey(*k)
+				// ignore
 			case "allowedips":
 				addresses, err := splitList(val)
 				if err != nil {
@@ -383,12 +379,6 @@ func (cfg *Config) handlePublicKeyLine(value string) (*Peer, error) {
 
 func (cfg *Config) handlePeerLine(peer *Peer, key, value string) error {
 	switch key {
-	case "preshared_key":
-		k, err := parseKeyHex(value)
-		if err != nil {
-			return err
-		}
-		peer.PresharedKey = SymmetricKey(*k)
 	case "endpoint":
 		err := validateEndpoints(value)
 		if err != nil {
@@ -411,7 +401,7 @@ func (cfg *Config) handlePeerLine(peer *Peer, key, value string) error {
 		if value != "1" {
 			return fmt.Errorf("invalid protocol version: %v", value)
 		}
-	case "last_handshake_time_sec", "last_handshake_time_nsec", "tx_bytes", "rx_bytes":
+	case "preshared_key", "last_handshake_time_sec", "last_handshake_time_nsec", "tx_bytes", "rx_bytes":
 		// ignore
 	default:
 		return fmt.Errorf("unexpected IpcGetOperation key: %v", key)

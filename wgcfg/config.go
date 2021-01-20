@@ -23,7 +23,6 @@ type Config struct {
 
 type Peer struct {
 	PublicKey           Key
-	PresharedKey        SymmetricKey
 	AllowedIPs          []netaddr.IPPrefix
 	Endpoints           string // comma-separated host/port pairs: "1.2.3.4:56,[::]:80"
 	PersistentKeepalive uint16

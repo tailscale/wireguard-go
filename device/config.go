@@ -104,14 +104,6 @@ func (device *Device) Reconfig(cfg *wgcfg.Config) (err error) {
 			}
 		}
 
-		if !p.PresharedKey.IsZero() {
-			peer.handshake.mutex.Lock()
-			peer.handshake.presharedKey = NoiseSymmetricKey(p.PresharedKey)
-			peer.handshake.mutex.Unlock()
-
-			device.log.Debug.Printf("device.Reconfig: setting preshared key for peer %s", p.PublicKey.ShortString())
-		}
-
 		peer.Lock()
 		atomic.StoreUint32(&peer.persistentKeepaliveInterval, uint32(p.PersistentKeepalive))
 		if p.Endpoints != "" && (peer.endpoint == nil || !endpointsEqual(p.Endpoints, peer.endpoint.Addrs())) {
