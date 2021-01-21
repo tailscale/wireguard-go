@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 
@@ -62,12 +63,17 @@ func TestConfig(t *testing.T) {
 	cmp := func(t *testing.T, device *Device, want *wgcfg.Config) {
 		t.Helper()
 		got := device.Config()
-		gotStr, err := got.ToUAPI()
+		prev := new(wgcfg.Config)
+		gotbuf := new(strings.Builder)
+		err := got.ToUAPI(gotbuf, prev)
+		gotStr := gotbuf.String()
 		if err != nil {
 			t.Errorf("got.ToUAPI(): error: %v", err)
 			return
 		}
-		wantStr, err := want.ToUAPI()
+		wantbuf := new(strings.Builder)
+		err = want.ToUAPI(wantbuf, prev)
+		wantStr := wantbuf.String()
 		if err != nil {
 			t.Errorf("want.ToUAPI(): error: %v", err)
 			return

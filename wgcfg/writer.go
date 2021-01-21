@@ -7,66 +7,136 @@ package wgcfg
 
 import (
 	"fmt"
-	"net"
+	"io"
+	"sort"
 	"strconv"
 	"strings"
+
+	"inet.af/netaddr"
 )
 
-func (conf *Config) ToUAPI() (string, error) {
-	output := new(strings.Builder)
-	fmt.Fprintf(output, "private_key=%s\n", conf.PrivateKey.HexString())
-
-	if conf.ListenPort > 0 {
-		fmt.Fprintf(output, "listen_port=%d\n", conf.ListenPort)
+// ToUAPI writes cfg in UAPI format to w.
+// Prev is the previous device Config.
+// Prev is required so that we can remove now-defunct peers
+// without having to remove and re-add all peers.
+func (cfg *Config) ToUAPI(w io.Writer, prev *Config) error {
+	var stickyErr error
+	set := func(key, value string) {
+		if stickyErr != nil {
+			return
+		}
+		_, err := fmt.Fprintf(w, "%s=%s\n", key, value)
+		if err != nil {
+			stickyErr = err
+		}
+	}
+	setUint16 := func(key string, value uint16) {
+		set(key, strconv.FormatUint(uint64(value), 10))
+	}
+	setPeer := func(peer Peer) {
+		set("public_key", peer.PublicKey.HexString())
 	}
 
-	output.WriteString("replace_peers=true\n")
+	// Device config.
+	if prev.PrivateKey != cfg.PrivateKey {
+		set("private_key", cfg.PrivateKey.HexString())
+	}
+	if prev.ListenPort != cfg.ListenPort {
+		setUint16("listen_port", cfg.ListenPort)
+	}
 
-	for _, peer := range conf.Peers {
-		fmt.Fprintf(output, "public_key=%s\n", peer.PublicKey.HexString())
-		fmt.Fprintf(output, "protocol_version=1\n")
-		fmt.Fprintf(output, "replace_allowed_ips=true\n")
+	old := make(map[Key]Peer)
+	for _, p := range prev.Peers {
+		old[p.PublicKey] = p
+	}
 
-		if len(peer.AllowedIPs) > 0 {
-			for _, address := range peer.AllowedIPs {
-				fmt.Fprintf(output, "allowed_ip=%s\n", address.String())
+	// Add/configure all new peers.
+	for _, p := range cfg.Peers {
+		oldPeer := old[p.PublicKey]
+		setPeer(p)
+		set("protocol_version", "1")
+
+		if !endpointsEqual(oldPeer.Endpoints, p.Endpoints) {
+			set("endpoint", p.Endpoints)
+		}
+
+		// TODO: replace_allowed_ips is expensive.
+		// If p.AllowedIPs is a strict superset of oldPeer.AllowedIPs,
+		// then skip replace_allowed_ips and instead add only
+		// the new ipps with allowed_ip.
+		if !cidrsEqual(oldPeer.AllowedIPs, p.AllowedIPs) {
+			set("replace_allowed_ips", "true")
+			for _, ipp := range p.AllowedIPs {
+				set("allowed_ip", ipp.String())
 			}
 		}
 
-		var reps []string
-		if peer.Endpoints != "" {
-			eps := strings.Split(peer.Endpoints, ",")
-			for _, ep := range eps {
-				host, port, err := parseEndpoint(ep)
-				if err != nil {
-					return "", err
-				}
-				ips, err := net.LookupIP(host)
-				if err != nil {
-					return "", err
-				}
-				var ip net.IP
-				for _, iterip := range ips {
-					if ip4 := iterip.To4(); ip4 != nil {
-						ip = ip4
-						break
-					}
-					if ip == nil {
-						ip = iterip
-					}
-				}
-				if ip == nil {
-					return "", fmt.Errorf("unable to resolve IP address of endpoint %q (%v)", host, ips)
-				}
-				reps = append(reps, net.JoinHostPort(ip.String(), strconv.Itoa(int(port))))
-			}
+		// Set PersistentKeepalive after the peer is otherwise configured,
+		// because it can trigger handshake packets.
+		if oldPeer.PersistentKeepalive != p.PersistentKeepalive {
+			setUint16("persistent_keepalive_interval", p.PersistentKeepalive)
 		}
-		fmt.Fprintf(output, "endpoint=%s\n", strings.Join(reps, ","))
-
-		// Note: this needs to come *after* endpoint definitions,
-		// because setting it will trigger a handshake to all
-		// already-defined endpoints.
-		fmt.Fprintf(output, "persistent_keepalive_interval=%d\n", peer.PersistentKeepalive)
 	}
-	return output.String(), nil
+
+	// Remove peers that were present but should no longer be.
+	for _, p := range cfg.Peers {
+		delete(old, p.PublicKey)
+	}
+	for _, p := range old {
+		setPeer(p)
+		set("remove", "true")
+	}
+
+	if stickyErr != nil {
+		stickyErr = fmt.Errorf("ToUAPI: %w", stickyErr)
+	}
+	return stickyErr
+}
+
+func endpointsEqual(x, y string) bool {
+	// Cheap comparisons.
+	if x == y {
+		return true
+	}
+	xs := strings.Split(x, ",")
+	ys := strings.Split(y, ",")
+	if len(xs) != len(ys) {
+		return false
+	}
+	// Otherwise, see if they're the same, but out of order.
+	sort.Strings(xs)
+	sort.Strings(ys)
+	x = strings.Join(xs, ",")
+	y = strings.Join(ys, ",")
+	return x == y
+}
+
+func cidrsEqual(x, y []netaddr.IPPrefix) bool {
+	// TODO: re-implement using netaddr.IPSet.Equal.
+	if len(x) != len(y) {
+		return false
+	}
+	// First see if they're equal in order, without allocating.
+	exact := true
+	for i := range x {
+		if x[i] != y[i] {
+			exact = false
+			break
+		}
+	}
+	if exact {
+		return true
+	}
+
+	// Otherwise, see if they're the same, but out of order.
+	m := make(map[netaddr.IPPrefix]bool)
+	for _, v := range x {
+		m[v] = true
+	}
+	for _, v := range y {
+		if !m[v] {
+			return false
+		}
+	}
+	return true
 }
