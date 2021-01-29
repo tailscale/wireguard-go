@@ -180,11 +180,12 @@ func (peer *Peer) String() string {
 	return fmt.Sprintf("peer(%s)", abbreviatedKey)
 }
 
-func (peer *Peer) Start() error {
+func (peer *Peer) Start() {
 
 	// should never start a peer on a closed device
+
 	if peer.device.isClosed.Get() {
-		return errors.New("Start called on closed device")
+		return
 	}
 
 	// prevent simultaneous start/stop operations
@@ -193,7 +194,7 @@ func (peer *Peer) Start() error {
 	defer peer.routines.Unlock()
 
 	if peer.isRunning.Get() {
-		return errors.New("Start called on running device")
+		return
 	}
 
 	device := peer.device
@@ -229,7 +230,6 @@ func (peer *Peer) Start() error {
 	go peer.RoutineSequentialReceiver()
 
 	peer.isRunning.Set(true)
-	return nil
 }
 
 func (peer *Peer) ZeroAndFlushAll() {

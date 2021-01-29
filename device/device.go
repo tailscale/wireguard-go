@@ -6,8 +6,6 @@
 package device
 
 import (
-	"errors"
-	"fmt"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -138,12 +136,12 @@ func unsafeRemovePeer(device *Device, peer *Peer, key NoisePublicKey) {
 	device.peers.empty.Set(len(device.peers.keyMap) == 0)
 }
 
-func deviceUpdateState(device *Device) error {
+func deviceUpdateState(device *Device) {
 
 	// check if state already being updated (guard)
 
 	if device.state.changing.Swap(true) {
-		return nil
+		return
 	}
 
 	// compare to current state of device
@@ -155,7 +153,7 @@ func deviceUpdateState(device *Device) error {
 	if newIsUp == device.state.current {
 		device.state.changing.Set(false)
 		device.state.Unlock()
-		return nil
+		return
 	}
 
 	// change state of device
@@ -163,17 +161,13 @@ func deviceUpdateState(device *Device) error {
 	switch newIsUp {
 	case true:
 		if err := device.BindUpdate(); err != nil {
+			device.log.Error.Println("Unable to update bind:", err)
 			device.isUp.Set(false)
-			device.state.Unlock()
-			return fmt.Errorf("unable to update bind: %w\n", err)
+			break
 		}
 		device.peers.RLock()
 		for _, peer := range device.peers.keyMap {
-			if err := peer.Start(); err != nil {
-				device.state.Unlock()
-				device.peers.RUnlock()
-				return err
-			}
+			peer.Start()
 			if atomic.LoadUint32(&peer.persistentKeepaliveInterval) > 0 {
 				peer.SendKeepalive()
 			}
@@ -197,24 +191,24 @@ func deviceUpdateState(device *Device) error {
 
 	// check for state change in the mean time
 
-	return deviceUpdateState(device)
+	deviceUpdateState(device)
 }
 
-func (device *Device) Up() error {
+func (device *Device) Up() {
 
 	// closed device cannot be brought up
 
 	if device.isClosed.Get() {
-		return errors.New("device is closed")
+		return
 	}
 
 	device.isUp.Set(true)
-	return deviceUpdateState(device)
+	deviceUpdateState(device)
 }
 
-func (device *Device) Down() error {
+func (device *Device) Down() {
 	device.isUp.Set(false)
-	return deviceUpdateState(device)
+	deviceUpdateState(device)
 }
 
 func (device *Device) IsUnderLoad() bool {
