@@ -59,16 +59,6 @@ func (endpoint *NativeEndpoint) dst6() *unix.SockaddrInet6 {
 	return (*unix.SockaddrInet6)(unsafe.Pointer(&endpoint.dst[0]))
 }
 
-func (e *NativeEndpoint) Addrs() string {
-	var port int
-	if e.isV6 {
-		port = e.dst6().Port
-	} else {
-		port = e.dst4().Port
-	}
-	return net.JoinHostPort(e.DstIP().String(), strconv.Itoa(port))
-}
-
 type nativeBind struct {
 	sock4    int
 	sock6    int

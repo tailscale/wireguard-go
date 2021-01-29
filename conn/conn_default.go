@@ -10,7 +10,6 @@ package conn
 import (
 	"net"
 	"os"
-	"strconv"
 	"syscall"
 )
 
@@ -65,10 +64,6 @@ func (e *NativeEndpoint) DstToString() string {
 
 func (e *NativeEndpoint) SrcToString() string {
 	return ""
-}
-
-func (e *NativeEndpoint) Addrs() string {
-	return net.JoinHostPort(e.IP.String(), strconv.Itoa(e.Port))
 }
 
 func listenNet(network string, port int) (*net.UDPConn, int, error) {

@@ -78,7 +78,6 @@ type Endpoint interface {
 	DstToBytes() []byte  // used for mac2 cookie calculations
 	DstIP() net.IP
 	SrcIP() net.IP
-	Addrs() string // comma-separated host/port pairs: "1.2.3.4:56,[::]:80"
 }
 
 func parseEndpoint(s string) (*net.UDPAddr, error) {
