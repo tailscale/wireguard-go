@@ -603,7 +603,7 @@ func (peer *Peer) RoutineSequentialReceiver() {
 				)
 				ip := netaddr.IPv4(src[0], src[1], src[2], src[3])
 				key := (*NoisePublicKey)(&peer.handshake.remoteStatic)
-				device.unexpectedip(key, ip)
+				device.log.Info.Printf("IPv4 packet with disallowed source address %s from %v", ip, key)
 				continue
 			}
 
@@ -634,7 +634,7 @@ func (peer *Peer) RoutineSequentialReceiver() {
 				)
 				ip := netaddr.IPv4(src[0], src[1], src[2], src[3])
 				key := (*NoisePublicKey)(&peer.handshake.remoteStatic)
-				device.unexpectedip(key, ip)
+				device.log.Info.Printf("IPv4 packet with disallowed source address %s from %v", ip, key)
 				continue
 			}
 

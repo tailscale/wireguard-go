@@ -17,7 +17,6 @@ import (
 	"github.com/tailscale/wireguard-go/tun"
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
-	"inet.af/netaddr"
 )
 
 type Device struct {
@@ -64,8 +63,6 @@ type Device struct {
 	allowedips    AllowedIPs
 	indexTable    IndexTable
 	cookieChecker CookieChecker
-
-	unexpectedip func(key *NoisePublicKey, ip netaddr.IP)
 
 	rate struct {
 		underLoadUntil atomic.Value
@@ -295,11 +292,6 @@ func (device *Device) SetPrivateKey(sk NoisePrivateKey) error {
 type DeviceOptions struct {
 	Logger *Logger
 
-	// UnexpectedIP is called when a packet is received from a
-	// validated peer with an unexpected internal IP address.
-	// The packet is then dropped.
-	UnexpectedIP func(key *NoisePublicKey, ip netaddr.IP)
-
 	// HandshakeDone is called every time we complete a peer handshake.
 	HandshakeDone func(peerKey NoisePublicKey, peer *Peer, allowedIPs *AllowedIPs)
 
@@ -317,13 +309,6 @@ func NewDevice(tunDevice tun.Device, opts *DeviceOptions) *Device {
 	if opts != nil {
 		if opts.Logger != nil {
 			device.log = opts.Logger
-		}
-		if opts.UnexpectedIP != nil {
-			device.unexpectedip = opts.UnexpectedIP
-		} else {
-			device.unexpectedip = func(key *NoisePublicKey, ip netaddr.IP) {
-				device.log.Info.Printf("IPv4 packet with disallowed source address %s from %v", ip, key)
-			}
 		}
 		device.handshakeDone = opts.HandshakeDone
 		if opts.CreateEndpoint != nil {
