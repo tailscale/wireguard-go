@@ -219,7 +219,7 @@ func main() {
 		return
 	}
 
-	device := device.NewDevice(tun, &device.DeviceOptions{Logger: logger})
+	device := device.NewDevice(tun, logger)
 
 	logger.Verbosef("Device started")
 

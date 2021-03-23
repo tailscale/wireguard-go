@@ -158,7 +158,7 @@ func genTestPair(tb testing.TB) (pair testPair) {
 		if _, ok := tb.(*testing.B); ok && !testing.Verbose() {
 			level = LogLevelError
 		}
-		p.dev = NewDevice(p.tun.TUN(), &DeviceOptions{Logger: NewLogger(level, fmt.Sprintf("dev%d: ", i))})
+		p.dev = NewDevice(p.tun.TUN(), NewLogger(level, fmt.Sprintf("dev%d: ", i)))
 		if err := p.dev.IpcSet(cfg[i]); err != nil {
 			tb.Errorf("failed to configure device %d: %v", i, err)
 			p.dev.Close()
@@ -332,7 +332,7 @@ func randDevice(t *testing.T) *Device {
 	}
 	tun := newDummyTUN("dummy")
 	logger := NewLogger(LogLevelError, "")
-	device := NewDevice(tun, &DeviceOptions{Logger: logger})
+	device := NewDevice(tun, logger)
 	device.SetPrivateKey(sk)
 	return device
 }

@@ -47,7 +47,7 @@ func main() {
 		os.Exit(ExitSetupFailed)
 	}
 
-	device := device.NewDevice(tun, &device.DeviceOptions{Logger: logger})
+	device := device.NewDevice(tun, logger)
 	err = device.Up()
 	if err != nil {
 		logger.Errorf("Failed to bring up device: %v", err)

@@ -93,7 +93,7 @@ type Device struct {
 	// Tailscale options (to be deleted)
 	handshakeDone  func(peerKey NoisePublicKey, peer *Peer, allowedIPs *AllowedIPs)
 	skipBindUpdate bool
-	createBind     func(uport uint16, device *Device) (conn.Bind, uint16, error)
+	createBind     func(uport uint16) (conn.Bind, uint16, error)
 	createEndpoint func(key [32]byte, s string) (conn.Endpoint, error)
 }
 
@@ -298,35 +298,28 @@ type DeviceOptions struct {
 	SkipBindUpdate bool // if true, CreateBind only ever called once
 }
 
-func NewDevice(tunDevice tun.Device, opts *DeviceOptions) *Device {
+func NewDevice(tunDevice tun.Device, logger *Logger, opts ...*DeviceOptions) *Device {
 	device := new(Device)
 	device.state.state = uint32(deviceStateDown)
 	device.closed = make(chan struct{})
 
-	if opts != nil {
-		if opts.Logger != nil {
-			device.log = opts.Logger
-		}
-		device.handshakeDone = opts.HandshakeDone
-		if opts.CreateEndpoint != nil {
-			device.createEndpoint = opts.CreateEndpoint
-		} else {
-			device.createEndpoint = func(_ [32]byte, s string) (conn.Endpoint, error) {
-				return conn.CreateEndpoint(s)
-			}
-		}
-		if opts.CreateBind != nil {
-			device.createBind = func(uport uint16, device *Device) (conn.Bind, uint16, error) {
-				return opts.CreateBind(uport)
-			}
-		} else {
-			device.createBind = func(uport uint16, device *Device) (conn.Bind, uint16, error) {
-				return conn.CreateBind(uport)
-			}
-		}
-		device.skipBindUpdate = opts.SkipBindUpdate
+	device.createEndpoint = func(_ [32]byte, s string) (conn.Endpoint, error) {
+		return conn.CreateEndpoint(s)
+	}
+	device.createBind = conn.CreateBind
+	switch len(opts) {
+	case 0:
+	case 1:
+		opt := opts[0]
+		device.handshakeDone = opt.HandshakeDone
+		device.createEndpoint = opt.CreateEndpoint
+		device.createBind = opt.CreateBind
+		device.skipBindUpdate = opt.SkipBindUpdate
+	default:
+		panic("multiple DeviceOptions passed to NewDevice")
 	}
 
+	device.log = logger
 	device.tun.device = tunDevice
 	mtu, err := device.tun.device.MTU()
 	if err != nil {
@@ -522,7 +515,7 @@ func (device *Device) BindUpdate() error {
 	// bind to new port
 	var err error
 	netc := &device.net
-	netc.bind, netc.port, err = device.createBind(netc.port, device)
+	netc.bind, netc.port, err = device.createBind(netc.port)
 	if err != nil {
 		netc.bind = nil
 		netc.port = 0
