@@ -26,6 +26,10 @@ import (
 )
 
 func (device *Device) startRouteListener(bind conn.Bind) (*rwcancel.RWCancel, error) {
+	// NOTE(Tailscale): we don't use this; we use
+	// https://github.com/tailscale/tailscale/wgengine/{magicsock,monitor}
+	return nil, nil
+
 	netlinkSock, err := createNetlinkRouteSocket()
 	if err != nil {
 		return nil, err
