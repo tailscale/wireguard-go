@@ -91,10 +91,11 @@ type Device struct {
 	log      *Logger
 
 	// Tailscale options (to be deleted)
-	handshakeDone  func(peerKey NoisePublicKey, peer *Peer, allowedIPs *AllowedIPs)
-	skipBindUpdate bool
-	createBind     func(uport uint16) (conn.Bind, uint16, error)
-	createEndpoint func(key [32]byte, s string) (conn.Endpoint, error)
+	handshakeDone        func(peerKey NoisePublicKey, peer *Peer, allowedIPs *AllowedIPs)
+	prependKeyToEndpoint bool
+	skipBindUpdate       bool
+	createBind           func(uport uint16) (conn.Bind, uint16, error)
+	createEndpoint       func(s string) (conn.Endpoint, error)
 }
 
 // deviceState represents the state of a Device.
@@ -291,9 +292,8 @@ type DeviceOptions struct {
 	// HandshakeDone is called every time we complete a peer handshake.
 	HandshakeDone func(peerKey NoisePublicKey, peer *Peer, allowedIPs *AllowedIPs)
 
-	CreateEndpoint func(key [32]byte, s string) (conn.Endpoint, error)
+	CreateEndpoint func(s string) (conn.Endpoint, error)
 	CreateBind     func(uport uint16) (conn.Bind, uint16, error)
-	SkipBindUpdate bool // if true, CreateBind only ever called once
 }
 
 func NewDevice(tunDevice tun.Device, logger *Logger, opts ...*DeviceOptions) *Device {
@@ -301,18 +301,17 @@ func NewDevice(tunDevice tun.Device, logger *Logger, opts ...*DeviceOptions) *De
 	device.state.state = uint32(deviceStateDown)
 	device.closed = make(chan struct{})
 
-	device.createEndpoint = func(_ [32]byte, s string) (conn.Endpoint, error) {
-		return conn.CreateEndpoint(s)
-	}
+	device.createEndpoint = conn.CreateEndpoint
 	device.createBind = conn.CreateBind
 	switch len(opts) {
 	case 0:
 	case 1:
 		opt := opts[0]
 		device.handshakeDone = opt.HandshakeDone
+		device.prependKeyToEndpoint = true
 		device.createEndpoint = opt.CreateEndpoint
 		device.createBind = opt.CreateBind
-		device.skipBindUpdate = opt.SkipBindUpdate
+		device.skipBindUpdate = true
 	default:
 		panic("multiple DeviceOptions passed to NewDevice")
 	}

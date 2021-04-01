@@ -330,10 +330,14 @@ func (device *Device) handlePeerLine(peer *ipcSetPeer, key, value string) error 
 
 	case "endpoint":
 		device.log.Verbosef("%v - UAPI: Updating endpoint", peer.Peer)
-		peer.handshake.mutex.Lock()
-		key := peer.handshake.remoteStatic
-		peer.handshake.mutex.Unlock()
-		endpoint, err := device.createEndpoint(key, value)
+		s := value
+		if device.prependKeyToEndpoint {
+			peer.handshake.mutex.Lock()
+			key := peer.handshake.remoteStatic
+			peer.handshake.mutex.Unlock()
+			s = string(key[:]) + s
+		}
+		endpoint, err := device.createEndpoint(s)
 		if err != nil {
 			return ipcErrorf(ipc.IpcErrorInvalid, "failed to set endpoint %v: %w", value, err)
 		}
