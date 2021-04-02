@@ -243,11 +243,8 @@ func (device *Device) SetPrivateKey(sk NoisePrivateKey) error {
 	}
 
 	// remove peers with matching public keys
-	var publicKey NoisePublicKey // allow a zero key here for disabling this device
-	if !sk.IsZero() {
-		publicKey = sk.publicKey()
-	}
 
+	publicKey := sk.publicKey()
 	for key, peer := range device.peers.keyMap {
 		if peer.handshake.remoteStatic.Equals(publicKey) {
 			peer.handshake.mutex.RUnlock()
