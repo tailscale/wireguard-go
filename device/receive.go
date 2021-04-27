@@ -93,6 +93,7 @@ func (device *Device) RoutineReceiveIncoming(recv conn.ReceiveFunc) {
 		size, endpoint, err = recv(buffer[:])
 
 		if err != nil {
+			device.log.Verbosef("Routine: receive incoming %s - failed to receive packet: %v", recvName, err)
 			device.PutMessageBuffer(buffer)
 			if errors.Is(err, net.ErrClosed) {
 				return
@@ -100,7 +101,6 @@ func (device *Device) RoutineReceiveIncoming(recv conn.ReceiveFunc) {
 			if neterr, ok := err.(net.Error); ok && !neterr.Temporary() {
 				return
 			}
-			device.log.Errorf("Failed to receive packet: %v", err)
 			if deathSpiral < 10 {
 				deathSpiral++
 				time.Sleep(time.Second / 3)
