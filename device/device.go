@@ -86,10 +86,6 @@ type Device struct {
 	ipcMutex sync.RWMutex
 	closed   chan struct{}
 	log      *Logger
-
-	// Tailscale options (to be deleted)
-	handshakeDone        func(peerKey NoisePublicKey, peer *Peer, allowedIPs *AllowedIPs)
-	prependKeyToEndpoint bool
 }
 
 // deviceState represents the state of a Device.
@@ -281,25 +277,10 @@ func (device *Device) SetPrivateKey(sk NoisePrivateKey) error {
 	return nil
 }
 
-type DeviceOptions struct {
-	// HandshakeDone is called every time we complete a peer handshake.
-	HandshakeDone func(peerKey NoisePublicKey, peer *Peer, allowedIPs *AllowedIPs)
-}
-
-func NewDevice(tunDevice tun.Device, bind conn.Bind, logger *Logger, opts ...*DeviceOptions) *Device {
+func NewDevice(tunDevice tun.Device, bind conn.Bind, logger *Logger) *Device {
 	device := new(Device)
 	device.state.state = uint32(deviceStateDown)
 	device.closed = make(chan struct{})
-
-	switch len(opts) {
-	case 0:
-	case 1:
-		opt := opts[0]
-		device.handshakeDone = opt.HandshakeDone
-		device.prependKeyToEndpoint = true
-	default:
-		panic("multiple DeviceOptions passed to NewDevice")
-	}
 
 	device.log = logger
 	device.net.bind = bind
