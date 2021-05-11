@@ -16,9 +16,6 @@ import (
 )
 
 func TestFormatting(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("windows checkouts use CRLF, which doesn't play nicely with gofmt")
-	}
 	var wg sync.WaitGroup
 	filepath.WalkDir(".", func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -35,6 +32,9 @@ func TestFormatting(t *testing.T) {
 			if err != nil {
 				t.Errorf("unable to read %s: %v", path, err)
 				return
+			}
+			if runtime.GOOS == "windows" {
+				src = bytes.ReplaceAll(src, []byte{'\r', '\n'}, []byte{'\n'})
 			}
 			formatted, err := format.Source(src)
 			if err != nil {
