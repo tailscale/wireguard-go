@@ -18,9 +18,10 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/tailscale/wireguard-go/rwcancel"
 	"golang.org/x/net/ipv6"
 	"golang.org/x/sys/unix"
+
+	"golang.zx2c4.com/wireguard/rwcancel"
 )
 
 const (

@@ -17,7 +17,7 @@ import (
 
 	"golang.org/x/sys/windows"
 
-	"github.com/tailscale/wireguard-go/tun/wintun"
+	"golang.zx2c4.com/wireguard/tun/wintun"
 )
 
 const (

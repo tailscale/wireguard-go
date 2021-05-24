@@ -18,7 +18,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/tailscale/wireguard-go/tun"
+	"golang.zx2c4.com/wireguard/tun"
 
 	"golang.org/x/net/dns/dnsmessage"
 	"gvisor.dev/gvisor/pkg/tcpip"

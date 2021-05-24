@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"sync/atomic"
 
-	"github.com/tailscale/wireguard-go/tun"
+	"golang.zx2c4.com/wireguard/tun"
 )
 
 const DefaultMTU = 1420

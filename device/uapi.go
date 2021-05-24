@@ -18,7 +18,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/tailscale/wireguard-go/ipc"
+	"golang.zx2c4.com/wireguard/ipc"
 )
 
 type IPCError struct {

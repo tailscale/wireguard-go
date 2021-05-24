@@ -11,7 +11,7 @@ import (
 	"net"
 	"os"
 
-	"github.com/tailscale/wireguard-go/tun"
+	"golang.zx2c4.com/wireguard/tun"
 )
 
 func Ping(dst, src net.IP) []byte {
