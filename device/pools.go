@@ -46,6 +46,14 @@ func (p *WaitPool) Put(x any) {
 }
 
 func (device *Device) PopulatePools() {
+	device.pool.outboundElementsSlice = NewWaitPool(PreallocatedBuffersPerPool, func() any {
+		s := make([]*QueueOutboundElement, 0, device.BatchSize())
+		return &s
+	})
+	device.pool.inboundElementsSlice = NewWaitPool(PreallocatedBuffersPerPool, func() any {
+		s := make([]*QueueInboundElement, 0, device.BatchSize())
+		return &s
+	})
 	device.pool.messageBuffers = NewWaitPool(PreallocatedBuffersPerPool, func() any {
 		return new([MaxMessageSize]byte)
 	})
@@ -57,11 +65,38 @@ func (device *Device) PopulatePools() {
 	})
 }
 
+func (device *Device) GetOutboundElementsSlice() *[]*QueueOutboundElement {
+	return device.pool.outboundElementsSlice.Get().(*[]*QueueOutboundElement)
+}
+
+func (device *Device) PutOutboundElementsSlice(s *[]*QueueOutboundElement) {
+	for i := range *s {
+		(*s)[i] = nil
+	}
+	*s = (*s)[:0]
+	device.pool.outboundElementsSlice.Put(s)
+}
+
+func (device *Device) GetInboundElementsSlice() *[]*QueueInboundElement {
+	return device.pool.inboundElementsSlice.Get().(*[]*QueueInboundElement)
+}
+
+func (device *Device) PutInboundElementsSlice(s *[]*QueueInboundElement) {
+	for i := range *s {
+		(*s)[i] = nil
+	}
+	*s = (*s)[:0]
+	device.pool.inboundElementsSlice.Put(s)
+}
+
 func (device *Device) GetMessageBuffer() *[MaxMessageSize]byte {
 	return device.pool.messageBuffers.Get().(*[MaxMessageSize]byte)
 }
 
 func (device *Device) PutMessageBuffer(msg *[MaxMessageSize]byte) {
+	if msg == nil {
+		panic("msg is nil")
+	}
 	device.pool.messageBuffers.Put(msg)
 }
 

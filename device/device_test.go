@@ -12,6 +12,7 @@ import (
 	"io"
 	"math/rand"
 	"net/netip"
+	"os"
 	"runtime"
 	"runtime/pprof"
 	"sync"
@@ -21,6 +22,7 @@ import (
 
 	"golang.zx2c4.com/wireguard/conn"
 	"golang.zx2c4.com/wireguard/conn/bindtest"
+	"golang.zx2c4.com/wireguard/tun"
 	"golang.zx2c4.com/wireguard/tun/tuntest"
 )
 
@@ -404,4 +406,60 @@ func goroutineLeakCheck(t *testing.T) {
 		t.Logf("ending stacks:\n%s\n", endStacks)
 		t.Fatalf("expected %d goroutines, got %d, leak?", startGoroutines, endGoroutines)
 	})
+}
+
+type fakeBindSized struct {
+	sz int
+}
+
+func (b *fakeBindSized) Open(port uint16) (fns []conn.ReceiveFunc, actualPort uint16, err error) {
+	return nil, 0, nil
+}
+func (b *fakeBindSized) Close() error                                  { return nil }
+func (b *fakeBindSized) SetMark(mark uint32) error                     { return nil }
+func (b *fakeBindSized) Send(buffs [][]byte, ep conn.Endpoint) error   { return nil }
+func (b *fakeBindSized) ParseEndpoint(s string) (conn.Endpoint, error) { return nil, nil }
+func (b *fakeBindSized) BatchSize() int                                { return b.sz }
+
+type fakeTUNDeviceSized struct {
+	sz int
+}
+
+func (t *fakeTUNDeviceSized) File() *os.File { return nil }
+func (t *fakeTUNDeviceSized) Read(buffs [][]byte, sizes []int, offset int) (n int, err error) {
+	return 0, nil
+}
+func (t *fakeTUNDeviceSized) Write(buffs [][]byte, offset int) (int, error) { return 0, nil }
+func (t *fakeTUNDeviceSized) MTU() (int, error)                             { return 0, nil }
+func (t *fakeTUNDeviceSized) Name() (string, error)                         { return "", nil }
+func (t *fakeTUNDeviceSized) Events() <-chan tun.Event                      { return nil }
+func (t *fakeTUNDeviceSized) Close() error                                  { return nil }
+func (t *fakeTUNDeviceSized) BatchSize() int                                { return t.sz }
+
+func TestBatchSize(t *testing.T) {
+	d := Device{}
+
+	d.net.bind = &fakeBindSized{1}
+	d.tun.device = &fakeTUNDeviceSized{1}
+	if want, got := 1, d.BatchSize(); got != want {
+		t.Errorf("expected batch size %d, got %d", want, got)
+	}
+
+	d.net.bind = &fakeBindSized{1}
+	d.tun.device = &fakeTUNDeviceSized{128}
+	if want, got := 128, d.BatchSize(); got != want {
+		t.Errorf("expected batch size %d, got %d", want, got)
+	}
+
+	d.net.bind = &fakeBindSized{128}
+	d.tun.device = &fakeTUNDeviceSized{1}
+	if want, got := 128, d.BatchSize(); got != want {
+		t.Errorf("expected batch size %d, got %d", want, got)
+	}
+
+	d.net.bind = &fakeBindSized{128}
+	d.tun.device = &fakeTUNDeviceSized{128}
+	if want, got := 128, d.BatchSize(); got != want {
+		t.Errorf("expected batch size %d, got %d", want, got)
+	}
 }

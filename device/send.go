@@ -17,6 +17,7 @@ import (
 	"golang.org/x/crypto/chacha20poly1305"
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
+	"golang.zx2c4.com/wireguard/tun"
 )
 
 /* Outbound flow
@@ -77,12 +78,15 @@ func (elem *QueueOutboundElement) clearPointers() {
 func (peer *Peer) SendKeepalive() {
 	if len(peer.queue.staged) == 0 && peer.isRunning.Load() {
 		elem := peer.device.NewOutboundElement()
+		elems := peer.device.GetOutboundElementsSlice()
+		*elems = append(*elems, elem)
 		select {
-		case peer.queue.staged <- elem:
+		case peer.queue.staged <- elems:
 			peer.device.log.Verbosef("%v - Sending keepalive packet", peer)
 		default:
 			peer.device.PutMessageBuffer(elem.buffer)
 			peer.device.PutOutboundElement(elem)
+			peer.device.PutOutboundElementsSlice(elems)
 		}
 	}
 	peer.SendStagedPackets()
@@ -125,7 +129,8 @@ func (peer *Peer) SendHandshakeInitiation(isRetry bool) error {
 	peer.timersAnyAuthenticatedPacketTraversal()
 	peer.timersAnyAuthenticatedPacketSent()
 
-	err = peer.SendBuffer(packet)
+	// TODO(raggi): allocation could be avoided here
+	err = peer.SendBuffers([][]byte{packet})
 	if err != nil {
 		peer.device.log.Errorf("%v - Failed to send handshake initiation: %v", peer, err)
 	}
@@ -163,7 +168,8 @@ func (peer *Peer) SendHandshakeResponse() error {
 	peer.timersAnyAuthenticatedPacketTraversal()
 	peer.timersAnyAuthenticatedPacketSent()
 
-	err = peer.SendBuffer(packet)
+	// TODO(raggi): allocation could be avoided
+	err = peer.SendBuffers([][]byte{packet})
 	if err != nil {
 		peer.device.log.Errorf("%v - Failed to send handshake response: %v", peer, err)
 	}
@@ -183,7 +189,8 @@ func (device *Device) SendHandshakeCookie(initiatingElem *QueueHandshakeElement)
 	var buff [MessageCookieReplySize]byte
 	writer := bytes.NewBuffer(buff[:0])
 	binary.Write(writer, binary.LittleEndian, reply)
-	device.net.bind.Send(writer.Bytes(), initiatingElem.endpoint)
+	// TODO(raggi): allocation could be avoided
+	device.net.bind.Send([][]byte{writer.Bytes()}, initiatingElem.endpoint)
 	return nil
 }
 
@@ -198,11 +205,6 @@ func (peer *Peer) keepKeyFreshSending() {
 	}
 }
 
-/* Reads packets from the TUN and inserts
- * into staged queue for peer
- *
- * Obs. Single instance per TUN device
- */
 func (device *Device) RoutineReadFromTUN() {
 	defer func() {
 		device.log.Verbosef("Routine: TUN reader - stopped")
@@ -212,81 +214,124 @@ func (device *Device) RoutineReadFromTUN() {
 
 	device.log.Verbosef("Routine: TUN reader - started")
 
-	var elem *QueueOutboundElement
+	var (
+		readErr     error
+		elems       = make([]*QueueOutboundElement, device.BatchSize())
+		buffs       = make([][]byte, device.BatchSize())
+		elemsByPeer = make(map[*Peer]*[]*QueueOutboundElement, device.BatchSize())
+		count       = 0
+		sizes       = make([]int, device.BatchSize())
+		offset      = MessageTransportHeaderSize
+	)
+
+	defer func() {
+		for _, elem := range elems {
+			if elem != nil {
+				device.PutMessageBuffer(elem.buffer)
+				device.PutOutboundElement(elem)
+			}
+		}
+	}()
 
 	for {
-		if elem != nil {
-			device.PutMessageBuffer(elem.buffer)
-			device.PutOutboundElement(elem)
+		// Repopulate queue elements and buffer pointers
+		for i := range elems {
+			if elems[i] == nil {
+				elems[i] = device.NewOutboundElement()
+			}
+			buffs[i] = elems[i].buffer[:]
 		}
-		elem = device.NewOutboundElement()
 
-		// read packet
+		// read packets
+		count, readErr = device.tun.device.Read(buffs, sizes, offset)
+		for i := 0; i < count; i++ {
+			if sizes[i] < 1 {
+				continue
+			}
 
-		offset := MessageTransportHeaderSize
-		size, err := device.tun.device.Read(elem.buffer[:], offset)
-		if err != nil {
+			elem := elems[i]
+			elem.packet = buffs[i][offset : offset+sizes[i]]
+
+			// lookup peer
+			var peer *Peer
+			switch elem.packet[0] >> 4 {
+			case ipv4.Version:
+				if len(elem.packet) < ipv4.HeaderLen {
+					continue
+				}
+				dst := elem.packet[IPv4offsetDst : IPv4offsetDst+net.IPv4len]
+				peer = device.allowedips.Lookup(dst)
+
+			case ipv6.Version:
+				if len(elem.packet) < ipv6.HeaderLen {
+					continue
+				}
+				dst := elem.packet[IPv6offsetDst : IPv6offsetDst+net.IPv6len]
+				peer = device.allowedips.Lookup(dst)
+
+			default:
+				device.log.Verbosef("Received packet with unknown IP version")
+			}
+
+			if peer == nil {
+				continue
+			}
+			elemsForPeer, ok := elemsByPeer[peer]
+			if !ok {
+				elemsForPeer = device.GetOutboundElementsSlice()
+				elemsByPeer[peer] = elemsForPeer
+			}
+			*elemsForPeer = append(*elemsForPeer, elem)
+			elems[i] = nil
+		}
+
+		for peer, elemsForPeer := range elemsByPeer {
+			if peer.isRunning.Load() {
+				peer.StagePackets(elemsForPeer)
+				peer.SendStagedPackets()
+			} else {
+				for _, elem := range *elemsForPeer {
+					device.PutMessageBuffer(elem.buffer)
+					device.PutOutboundElement(elem)
+				}
+				device.PutOutboundElementsSlice(elemsForPeer)
+			}
+			delete(elemsByPeer, peer)
+		}
+
+		if readErr != nil {
+			if errors.Is(readErr, tun.ErrTooManySegments) {
+				// TODO: record stat for this
+				// This will happen if MSS is surprisingly small (< 576)
+				// coincident with reasonably high throughput.
+				device.log.Verbosef("Dropped some packets from multi-segment read: %v", readErr)
+				continue
+			}
 			if !device.isClosed() {
-				if !errors.Is(err, os.ErrClosed) {
-					device.log.Errorf("Failed to read packet from TUN device: %v", err)
+				if !errors.Is(readErr, os.ErrClosed) {
+					device.log.Errorf("Failed to read packet from TUN device: %v", readErr)
 				}
 				go device.Close()
 			}
-			device.PutMessageBuffer(elem.buffer)
-			device.PutOutboundElement(elem)
 			return
-		}
-
-		if size == 0 || size > MaxContentSize {
-			continue
-		}
-
-		elem.packet = elem.buffer[offset : offset+size]
-
-		// lookup peer
-
-		var peer *Peer
-		switch elem.packet[0] >> 4 {
-		case ipv4.Version:
-			if len(elem.packet) < ipv4.HeaderLen {
-				continue
-			}
-			dst := elem.packet[IPv4offsetDst : IPv4offsetDst+net.IPv4len]
-			peer = device.allowedips.Lookup(dst)
-
-		case ipv6.Version:
-			if len(elem.packet) < ipv6.HeaderLen {
-				continue
-			}
-			dst := elem.packet[IPv6offsetDst : IPv6offsetDst+net.IPv6len]
-			peer = device.allowedips.Lookup(dst)
-
-		default:
-			device.log.Verbosef("Received packet with unknown IP version")
-		}
-
-		if peer == nil {
-			continue
-		}
-		if peer.isRunning.Load() {
-			peer.StagePacket(elem)
-			elem = nil
-			peer.SendStagedPackets()
 		}
 	}
 }
 
-func (peer *Peer) StagePacket(elem *QueueOutboundElement) {
+func (peer *Peer) StagePackets(elems *[]*QueueOutboundElement) {
 	for {
 		select {
-		case peer.queue.staged <- elem:
+		case peer.queue.staged <- elems:
 			return
 		default:
 		}
 		select {
 		case tooOld := <-peer.queue.staged:
-			peer.device.PutMessageBuffer(tooOld.buffer)
-			peer.device.PutOutboundElement(tooOld)
+			for _, elem := range *tooOld {
+				peer.device.PutMessageBuffer(elem.buffer)
+				peer.device.PutOutboundElement(elem)
+			}
+			peer.device.PutOutboundElementsSlice(tooOld)
 		default:
 		}
 	}
@@ -305,26 +350,56 @@ top:
 	}
 
 	for {
+		var elemsOOO *[]*QueueOutboundElement
 		select {
-		case elem := <-peer.queue.staged:
-			elem.peer = peer
-			elem.nonce = keypair.sendNonce.Add(1) - 1
-			if elem.nonce >= RejectAfterMessages {
-				keypair.sendNonce.Store(RejectAfterMessages)
-				peer.StagePacket(elem) // XXX: Out of order, but we can't front-load go chans
+		case elems := <-peer.queue.staged:
+			i := 0
+			for _, elem := range *elems {
+				elem.peer = peer
+				elem.nonce = keypair.sendNonce.Add(1) - 1
+				if elem.nonce >= RejectAfterMessages {
+					peer.device.log.Errorf("reordering message due to invalid nonce for peer %s", peer)
+					keypair.sendNonce.Store(RejectAfterMessages)
+					if elemsOOO == nil {
+						elemsOOO = peer.device.GetOutboundElementsSlice()
+					}
+					*elemsOOO = append(*elemsOOO, elem)
+					continue
+				} else {
+					(*elems)[i] = elem
+					i++
+				}
+
+				elem.keypair = keypair
+				elem.Lock()
+			}
+			*elems = (*elems)[:i]
+
+			if elemsOOO != nil {
+				peer.StagePackets(elemsOOO) // XXX: Out of order, but we can't front-load go chans
+			}
+
+			if len(*elems) < 1 {
+				peer.device.PutOutboundElementsSlice(elems)
 				goto top
 			}
 
-			elem.keypair = keypair
-			elem.Lock()
-
 			// add to parallel and sequential queue
 			if peer.isRunning.Load() {
-				peer.queue.outbound.c <- elem
-				peer.device.queue.encryption.c <- elem
+				peer.queue.outbound.c <- elems
+				for _, elem := range *elems {
+					peer.device.queue.encryption.c <- elem
+				}
 			} else {
-				peer.device.PutMessageBuffer(elem.buffer)
-				peer.device.PutOutboundElement(elem)
+				for _, elem := range *elems {
+					peer.device.PutMessageBuffer(elem.buffer)
+					peer.device.PutOutboundElement(elem)
+				}
+				peer.device.PutOutboundElementsSlice(elems)
+			}
+
+			if elemsOOO != nil {
+				goto top
 			}
 		default:
 			return
@@ -335,9 +410,12 @@ top:
 func (peer *Peer) FlushStagedPackets() {
 	for {
 		select {
-		case elem := <-peer.queue.staged:
-			peer.device.PutMessageBuffer(elem.buffer)
-			peer.device.PutOutboundElement(elem)
+		case elems := <-peer.queue.staged:
+			for _, elem := range *elems {
+				peer.device.PutMessageBuffer(elem.buffer)
+				peer.device.PutOutboundElement(elem)
+			}
+			peer.device.PutOutboundElementsSlice(elems)
 		default:
 			return
 		}
@@ -400,12 +478,7 @@ func (device *Device) RoutineEncryption(id int) {
 	}
 }
 
-/* Sequentially reads packets from queue and sends to endpoint
- *
- * Obs. Single instance per peer.
- * The routine terminates then the outbound queue is closed.
- */
-func (peer *Peer) RoutineSequentialSender() {
+func (peer *Peer) RoutineSequentialSender(maxBatchSize int) {
 	device := peer.device
 	defer func() {
 		defer device.log.Verbosef("%v - Routine: sequential sender - stopped", peer)
@@ -413,36 +486,50 @@ func (peer *Peer) RoutineSequentialSender() {
 	}()
 	device.log.Verbosef("%v - Routine: sequential sender - started", peer)
 
-	for elem := range peer.queue.outbound.c {
-		if elem == nil {
+	buffs := make([][]byte, 0, maxBatchSize)
+
+	for elems := range peer.queue.outbound.c {
+		buffs = buffs[:0]
+		if elems == nil {
 			return
 		}
-		elem.Lock()
 		if !peer.isRunning.Load() {
 			// peer has been stopped; return re-usable elems to the shared pool.
 			// This is an optimization only. It is possible for the peer to be stopped
 			// immediately after this check, in which case, elem will get processed.
-			// The timers and SendBuffer code are resilient to a few stragglers.
+			// The timers and SendBuffers code are resilient to a few stragglers.
 			// TODO: rework peer shutdown order to ensure
 			// that we never accidentally keep timers alive longer than necessary.
-			device.PutMessageBuffer(elem.buffer)
-			device.PutOutboundElement(elem)
+			for _, elem := range *elems {
+				elem.Lock()
+				device.PutMessageBuffer(elem.buffer)
+				device.PutOutboundElement(elem)
+			}
 			continue
+		}
+		dataSent := false
+		for _, elem := range *elems {
+			elem.Lock()
+			if len(elem.packet) != MessageKeepaliveSize {
+				dataSent = true
+			}
+			buffs = append(buffs, elem.packet)
 		}
 
 		peer.timersAnyAuthenticatedPacketTraversal()
 		peer.timersAnyAuthenticatedPacketSent()
 
-		// send message and return buffer to pool
-
-		err := peer.SendBuffer(elem.packet)
-		if len(elem.packet) != MessageKeepaliveSize {
+		err := peer.SendBuffers(buffs)
+		if dataSent {
 			peer.timersDataSent()
 		}
-		device.PutMessageBuffer(elem.buffer)
-		device.PutOutboundElement(elem)
+		for _, elem := range *elems {
+			device.PutMessageBuffer(elem.buffer)
+			device.PutOutboundElement(elem)
+		}
+		device.PutOutboundElementsSlice(elems)
 		if err != nil {
-			device.log.Errorf("%v - Failed to send data packet: %v", peer, err)
+			device.log.Errorf("%v - Failed to send data packets: %v", peer, err)
 			continue
 		}
 

@@ -68,9 +68,11 @@ type Device struct {
 	cookieChecker CookieChecker
 
 	pool struct {
-		messageBuffers   *WaitPool
-		inboundElements  *WaitPool
-		outboundElements *WaitPool
+		outboundElementsSlice *WaitPool
+		inboundElementsSlice  *WaitPool
+		messageBuffers        *WaitPool
+		inboundElements       *WaitPool
+		outboundElements      *WaitPool
 	}
 
 	queue struct {
@@ -295,6 +297,7 @@ func NewDevice(tunDevice tun.Device, bind conn.Bind, logger *Logger) *Device {
 	device.peers.keyMap = make(map[NoisePublicKey]*Peer)
 	device.rate.limiter.Init()
 	device.indexTable.Init()
+
 	device.PopulatePools()
 
 	// create queues
@@ -320,6 +323,18 @@ func NewDevice(tunDevice tun.Device, bind conn.Bind, logger *Logger) *Device {
 	go device.RoutineTUNEventReader()
 
 	return device
+}
+
+// BatchSize returns the BatchSize for the device as a whole which is the max of
+// the bind batch size and the tun batch size. The batch size reported by device
+// is the size used to construct memory pools, and is the allowed batch size for
+// the lifetime of the device.
+func (device *Device) BatchSize() int {
+	sz := device.net.bind.BatchSize()
+	if sz < device.tun.device.BatchSize() {
+		sz = device.tun.device.BatchSize()
+	}
+	return sz
 }
 
 func (device *Device) LookupPeer(pk NoisePublicKey) *Peer {
@@ -392,10 +407,8 @@ func (device *Device) SendKeepalivesToPeersWithCurrentKeypair() {
 
 	device.peers.RLock()
 	for _, peer := range device.peers.keyMap {
-		peer.keypairs.RLock()
-		sendKeepalive := peer.keypairs.current != nil && !peer.keypairs.current.created.Add(RejectAfterTime).Before(time.Now())
-		peer.keypairs.RUnlock()
-		if sendKeepalive {
+		current := peer.keypairs.Current()
+		if current.created.Add(RejectAfterTime).Before(time.Now()) {
 			peer.SendKeepalive()
 		}
 	}
@@ -472,11 +485,13 @@ func (device *Device) BindUpdate() error {
 	var err error
 	var recvFns []conn.ReceiveFunc
 	netc := &device.net
+
 	recvFns, netc.port, err = netc.bind.Open(netc.port)
 	if err != nil {
 		netc.port = 0
 		return err
 	}
+
 	netc.netlinkCancel, err = device.startRouteListener(netc.bind)
 	if err != nil {
 		netc.bind.Close()
@@ -508,7 +523,7 @@ func (device *Device) BindUpdate() error {
 	device.queue.decryption.wg.Add(len(recvFns)) // each RoutineReceiveIncoming goroutine writes to device.queue.decryption
 	device.queue.handshake.wg.Add(len(recvFns))  // each RoutineReceiveIncoming goroutine writes to device.queue.handshake
 	for _, fn := range recvFns {
-		go device.RoutineReceiveIncoming(fn)
+		go device.RoutineReceiveIncoming(netc.bind.BatchSize(), fn)
 	}
 
 	device.log.Verbosef("UDP bind has been updated")

@@ -30,6 +30,7 @@ const (
 	ENV_WG_TUN_FD             = "WG_TUN_FD"
 	ENV_WG_UAPI_FD            = "WG_UAPI_FD"
 	ENV_WG_PROCESS_FOREGROUND = "WG_PROCESS_FOREGROUND"
+	ENV_WG_DISABLE_OFFLOAD    = "WG_DISABLE_OFFLOAD"
 )
 
 func printUsage() {
@@ -111,7 +112,7 @@ func main() {
 
 	// open TUN device (or use supplied fd)
 
-	tun, err := func() (tun.Device, error) {
+	tdev, err := func() (tun.Device, error) {
 		tunFdStr := os.Getenv(ENV_WG_TUN_FD)
 		if tunFdStr == "" {
 			return tun.CreateTUN(interfaceName, device.DefaultMTU)
@@ -134,7 +135,7 @@ func main() {
 	}()
 
 	if err == nil {
-		realInterfaceName, err2 := tun.Name()
+		realInterfaceName, err2 := tdev.Name()
 		if err2 == nil {
 			interfaceName = realInterfaceName
 		}
@@ -150,6 +151,16 @@ func main() {
 	if err != nil {
 		logger.Errorf("Failed to create TUN device: %v", err)
 		os.Exit(ExitSetupFailed)
+	}
+
+	if s := os.Getenv(ENV_WG_DISABLE_OFFLOAD); s == "1" {
+		do, ok := tdev.(tun.DisableOffloader)
+		if !ok {
+			logger.Errorf("TUN device does not support DisableOffload")
+		}
+		if err := do.DisableOffload(); err != nil {
+			logger.Errorf("Failed to disable offload: %v", err)
+		}
 	}
 
 	// open UAPI file (or use supplied fd)
@@ -196,7 +207,7 @@ func main() {
 				files[0], // stdin
 				files[1], // stdout
 				files[2], // stderr
-				tun.File(),
+				tdev.File(),
 				fileUAPI,
 			},
 			Dir: ".",
@@ -222,7 +233,7 @@ func main() {
 		return
 	}
 
-	device := device.NewDevice(tun, conn.NewDefaultBind(), logger)
+	device := device.NewDevice(tdev, conn.NewDefaultBind(), logger)
 
 	logger.Verbosef("Device started")
 
