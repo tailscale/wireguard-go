@@ -87,7 +87,7 @@ func setSrcControl(control *[]byte, ep *StdNetEndpoint) {
 	if ep.SrcIP().Is4() {
 		hdr.Level = unix.IPPROTO_IP
 		hdr.Type = unix.IP_PKTINFO
-		hdr.Len = uint64(unix.CmsgLen(unix.SizeofInet4Pktinfo))
+		hdr.SetLen(unix.CmsgLen(unix.SizeofInet4Pktinfo))
 
 		info := (*unix.Inet4Pktinfo)(unsafe.Pointer(&(*control)[unix.SizeofCmsghdr]))
 		info.Ifindex = ep.src.ifidx
