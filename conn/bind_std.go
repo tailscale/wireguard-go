@@ -22,10 +22,7 @@ var (
 	_ Bind = (*StdNetBind)(nil)
 )
 
-// StdNetBind is meant to be a temporary solution on platforms for which
-// the sticky socket / source caching behavior has not yet been implemented.
-// It uses the Go's net package to implement networking.
-// See LinuxSocketBind for a proper implementation on the Linux platform.
+// StdNetBind implements Bind for all platforms except Windows.
 type StdNetBind struct {
 	mu           sync.Mutex // protects following fields
 	ipv4         *net.UDPConn
