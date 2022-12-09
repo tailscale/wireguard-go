@@ -6,9 +6,9 @@ import (
 	"errors"
 	"unsafe"
 
+	"github.com/tailscale/wireguard-go/conn"
+	"github.com/tailscale/wireguard-go/endian"
 	"golang.org/x/sys/unix"
-	"golang.zx2c4.com/wireguard/conn"
-	"golang.zx2c4.com/wireguard/endian"
 )
 
 // virtioNetHdrFlags are defined in the kernel in include/uapi/linux/virtio_net.h.
