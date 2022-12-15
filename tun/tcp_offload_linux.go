@@ -7,7 +7,6 @@ import (
 	"unsafe"
 
 	"github.com/tailscale/wireguard-go/conn"
-	"github.com/tailscale/wireguard-go/endian"
 	"golang.org/x/sys/unix"
 )
 
@@ -50,12 +49,7 @@ func (v *virtioNetHdr) decode(b []byte) error {
 	if len(b) < virtioNetHdrLen {
 		return errors.New("too short")
 	}
-	v.flags = b[0]
-	v.gsoType = b[1]
-	v.hdrLen = endian.Native.Uint16(b[2:])
-	v.gsoSize = endian.Native.Uint16(b[4:])
-	v.csumStart = endian.Native.Uint16(b[6:])
-	v.csumOffset = endian.Native.Uint16(b[8:])
+	copy(unsafe.Slice((*byte)(unsafe.Pointer(v)), virtioNetHdrLen), b[:virtioNetHdrLen])
 	return nil
 }
 
@@ -63,12 +57,7 @@ func (v *virtioNetHdr) encode(b []byte) error {
 	if len(b) < virtioNetHdrLen {
 		return errors.New("too short")
 	}
-	b[0] = v.flags
-	b[1] = v.gsoType
-	endian.Native.PutUint16(b[2:], v.hdrLen)
-	endian.Native.PutUint16(b[4:], v.gsoSize)
-	endian.Native.PutUint16(b[6:], v.csumStart)
-	endian.Native.PutUint16(b[8:], v.csumOffset)
+	copy(b[:virtioNetHdrLen], unsafe.Slice((*byte)(unsafe.Pointer(v)), virtioNetHdrLen))
 	return nil
 }
 
