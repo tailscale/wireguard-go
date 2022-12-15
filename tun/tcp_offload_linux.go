@@ -8,7 +8,7 @@ import (
 
 	"golang.org/x/sys/unix"
 	"golang.zx2c4.com/wireguard/conn"
-	"golang.zx2c4.com/wireguard/endian"
+	"golang.zx2c4.com/wireguard/native"
 )
 
 // virtioNetHdrFlags are defined in the kernel in include/uapi/linux/virtio_net.h.
@@ -52,10 +52,10 @@ func (v *virtioNetHdr) decode(b []byte) error {
 	}
 	v.flags = b[0]
 	v.gsoType = b[1]
-	v.hdrLen = endian.Native.Uint16(b[2:])
-	v.gsoSize = endian.Native.Uint16(b[4:])
-	v.csumStart = endian.Native.Uint16(b[6:])
-	v.csumOffset = endian.Native.Uint16(b[8:])
+	v.hdrLen = native.Endian.Uint16(b[2:])
+	v.gsoSize = native.Endian.Uint16(b[4:])
+	v.csumStart = native.Endian.Uint16(b[6:])
+	v.csumOffset = native.Endian.Uint16(b[8:])
 	return nil
 }
 
@@ -65,10 +65,10 @@ func (v *virtioNetHdr) encode(b []byte) error {
 	}
 	b[0] = v.flags
 	b[1] = v.gsoType
-	endian.Native.PutUint16(b[2:], v.hdrLen)
-	endian.Native.PutUint16(b[4:], v.gsoSize)
-	endian.Native.PutUint16(b[6:], v.csumStart)
-	endian.Native.PutUint16(b[8:], v.csumOffset)
+	native.Endian.PutUint16(b[2:], v.hdrLen)
+	native.Endian.PutUint16(b[4:], v.gsoSize)
+	native.Endian.PutUint16(b[6:], v.csumStart)
+	native.Endian.PutUint16(b[8:], v.csumOffset)
 	return nil
 }
 
