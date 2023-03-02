@@ -15,6 +15,15 @@ import (
 
 func init() {
 	controlFns = append(controlFns,
+		// Set SO_RCVBUF/SO_SNDBUF - this could be common with the _windows code except
+		// for the unfortunate type specificity of syscall.Handle.
+		func(network, address string, c syscall.RawConn) error {
+			return c.Control(func(fd uintptr) {
+				_ = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_RCVBUF, socketBufferSize)
+				_ = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_SNDBUF, socketBufferSize)
+			})
+		},
+
 		func(network, address string, c syscall.RawConn) error {
 			var err error
 			if network == "udp6" {
