@@ -60,7 +60,7 @@ func Test_setSrcControl(t *testing.T) {
 		}
 		setSrc(ep, netip.MustParseAddr("127.0.0.1"), 5)
 
-		control := make([]byte, srcControlSize)
+		control := make([]byte, controlSize)
 
 		setSrcControl(&control, ep)
 
@@ -89,7 +89,7 @@ func Test_setSrcControl(t *testing.T) {
 		}
 		setSrc(ep, netip.MustParseAddr("::1"), 5)
 
-		control := make([]byte, srcControlSize)
+		control := make([]byte, controlSize)
 
 		setSrcControl(&control, ep)
 
