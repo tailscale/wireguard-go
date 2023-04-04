@@ -26,7 +26,7 @@ func Test_setSrcControl(t *testing.T) {
 		ep.src.Addr = netip.MustParseAddr("127.0.0.1")
 		ep.src.ifidx = 5
 
-		control := make([]byte, srcControlSize)
+		control := make([]byte, controlSize)
 
 		setSrcControl(&control, ep)
 
@@ -56,7 +56,7 @@ func Test_setSrcControl(t *testing.T) {
 		ep.src.Addr = netip.MustParseAddr("::1")
 		ep.src.ifidx = 5
 
-		control := make([]byte, srcControlSize)
+		control := make([]byte, controlSize)
 
 		setSrcControl(&control, ep)
 
@@ -80,7 +80,7 @@ func Test_setSrcControl(t *testing.T) {
 	})
 
 	t.Run("ClearOnNoSrc", func(t *testing.T) {
-		control := make([]byte, srcControlSize)
+		control := make([]byte, controlSize)
 		hdr := (*unix.Cmsghdr)(unsafe.Pointer(&control[0]))
 		hdr.Level = 1
 		hdr.Type = 2
@@ -96,7 +96,7 @@ func Test_setSrcControl(t *testing.T) {
 
 func Test_getSrcFromControl(t *testing.T) {
 	t.Run("IPv4", func(t *testing.T) {
-		control := make([]byte, srcControlSize)
+		control := make([]byte, controlSize)
 		hdr := (*unix.Cmsghdr)(unsafe.Pointer(&control[0]))
 		hdr.Level = unix.IPPROTO_IP
 		hdr.Type = unix.IP_PKTINFO
@@ -116,7 +116,7 @@ func Test_getSrcFromControl(t *testing.T) {
 		}
 	})
 	t.Run("IPv6", func(t *testing.T) {
-		control := make([]byte, srcControlSize)
+		control := make([]byte, controlSize)
 		hdr := (*unix.Cmsghdr)(unsafe.Pointer(&control[0]))
 		hdr.Level = unix.IPPROTO_IPV6
 		hdr.Type = unix.IPV6_PKTINFO
@@ -136,7 +136,7 @@ func Test_getSrcFromControl(t *testing.T) {
 		}
 	})
 	t.Run("ClearOnEmpty", func(t *testing.T) {
-		control := make([]byte, srcControlSize)
+		control := make([]byte, controlSize)
 		ep := &StdNetEndpoint{}
 		ep.src.Addr = netip.MustParseAddr("::1")
 		ep.src.ifidx = 5
@@ -154,7 +154,7 @@ func Test_getSrcFromControl(t *testing.T) {
 		zeroHdr := (*unix.Cmsghdr)(unsafe.Pointer(&zeroControl[0]))
 		zeroHdr.SetLen(unix.CmsgLen(0))
 
-		control := make([]byte, srcControlSize)
+		control := make([]byte, controlSize)
 		hdr := (*unix.Cmsghdr)(unsafe.Pointer(&control[0]))
 		hdr.Level = unix.IPPROTO_IP
 		hdr.Type = unix.IP_PKTINFO
