@@ -459,8 +459,8 @@ func TestPseudoHeaderChecksumNoFold(t *testing.T) {
 			t.Run("reference", func(t *testing.T) {
 				got := header.PseudoHeaderChecksum(
 					tcpip.TransportProtocolNumber(tt.protocol),
-					tcpip.Address(tt.srcAddr),
-					tcpip.Address(tt.dstAddr),
+					tcpip.AddrFromSlice(tt.srcAddr),
+					tcpip.AddrFromSlice(tt.dstAddr),
 					tt.totalLen)
 				if got != tt.want {
 					t.Errorf("got %04x, want %04x", got, tt.want)
