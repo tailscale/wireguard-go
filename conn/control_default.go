@@ -7,6 +7,8 @@
 
 package conn
 
+import "net/netip"
+
 // TODO: macOS, FreeBSD and other BSDs likely do support the sticky sockets
 // ({get,set}srcControl feature set, but use alternatively named flags and need
 // ports and require testing.
@@ -35,3 +37,12 @@ func setGSOSize(control *[]byte, gsoSize uint16) {
 const controlSize = 0
 
 const StdNetSupportsStickySockets = false
+
+func (e *StdNetEndpoint) SrcIP() netip.Addr {
+	ip, _ := netip.AddrFromSlice(e.src)
+	return ip
+}
+
+func (e *StdNetEndpoint) SrcToString() string {
+	return e.SrcIP().String()
+}
