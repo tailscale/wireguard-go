@@ -748,7 +748,7 @@ const (
 	udp6GROCandidate
 )
 
-func packetIsGROCandidate(b []byte) groCandidateType {
+func packetIsGROCandidate(b []byte, canUDPGRO bool) groCandidateType {
 	if len(b) < 28 {
 		return notGROCandidate
 	}
@@ -760,14 +760,14 @@ func packetIsGROCandidate(b []byte) groCandidateType {
 		if b[9] == unix.IPPROTO_TCP && len(b) >= 40 {
 			return tcp4GROCandidate
 		}
-		if b[9] == unix.IPPROTO_UDP {
+		if b[9] == unix.IPPROTO_UDP && canUDPGRO {
 			return udp4GROCandidate
 		}
 	} else if b[0]>>4 == 6 {
 		if b[6] == unix.IPPROTO_TCP && len(b) >= 60 {
 			return tcp6GROCandidate
 		}
-		if b[6] == unix.IPPROTO_UDP && len(b) >= 48 {
+		if b[6] == unix.IPPROTO_UDP && len(b) >= 48 && canUDPGRO {
 			return udp6GROCandidate
 		}
 	}
@@ -860,14 +860,15 @@ func udpGRO(bufs [][]byte, offset int, pktI int, table *udpGROTable, isV6 bool) 
 // handleGRO evaluates bufs for GRO, and writes the indices of the resulting
 // packets into toWrite. toWrite, tcpTable, and udpTable should initially be
 // empty (but non-nil), and are passed in to save allocs as the caller may reset
-// and recycle them across vectors of packets.
-func handleGRO(bufs [][]byte, offset int, tcpTable *tcpGROTable, udpTable *udpGROTable, toWrite *[]int) error {
+// and recycle them across vectors of packets. canUDPGRO indicates if UDP GRO is
+// supported.
+func handleGRO(bufs [][]byte, offset int, tcpTable *tcpGROTable, udpTable *udpGROTable, canUDPGRO bool, toWrite *[]int) error {
 	for i := range bufs {
 		if offset < virtioNetHdrLen || offset > len(bufs[i])-1 {
 			return errors.New("invalid offset")
 		}
 		var result groResult
-		switch packetIsGROCandidate(bufs[i][offset:]) {
+		switch packetIsGROCandidate(bufs[i][offset:], canUDPGRO) {
 		case tcp4GROCandidate:
 			result = tcpGRO(bufs, offset, i, tcpTable, false)
 		case tcp6GROCandidate:
