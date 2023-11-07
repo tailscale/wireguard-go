@@ -11,9 +11,8 @@ func (device *Device) DisableSomeRoamingForBrokenMobileSemantics() {
 	device.net.brokenRoaming = true
 	device.peers.RLock()
 	for _, peer := range device.peers.keyMap {
-		peer.Lock()
-		peer.disableRoaming = peer.endpoint != nil
-		peer.Unlock()
+		ep := peer.endpoint.Load()
+		peer.disableRoaming.Store(ep != nil)
 	}
 	device.peers.RUnlock()
 }

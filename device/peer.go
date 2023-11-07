@@ -17,17 +17,16 @@ import (
 
 type Peer struct {
 	isRunning         atomic.Bool
-	sync.RWMutex      // Mostly protects endpoint, but is generally taken whenever we modify peer
 	keypairs          Keypairs
 	handshake         Handshake
 	device            *Device
-	endpoint          conn.Endpoint
+	endpoint          atomic.Value   // conn.Endpoint or nil
 	stopping          sync.WaitGroup // routines pending stop
 	txBytes           atomic.Uint64  // bytes send to peer (endpoint)
 	rxBytes           atomic.Uint64  // bytes received from peer
 	lastHandshakeNano atomic.Int64   // nano seconds since epoch
 
-	disableRoaming bool
+	disableRoaming atomic.Bool
 
 	timers struct {
 		retransmitHandshake     *Timer
@@ -74,8 +73,6 @@ func (device *Device) NewPeer(pk NoisePublicKey) (*Peer, error) {
 
 	// create peer
 	peer := new(Peer)
-	peer.Lock()
-	defer peer.Unlock()
 
 	peer.cookieGenerator.Init(pk)
 	peer.device = device
@@ -96,9 +93,6 @@ func (device *Device) NewPeer(pk NoisePublicKey) (*Peer, error) {
 	handshake.remoteStatic = pk
 	handshake.mutex.Unlock()
 
-	// reset endpoint
-	peer.endpoint = nil
-
 	// init timers
 	peer.timersInit()
 
@@ -116,14 +110,12 @@ func (peer *Peer) SendBuffers(buffers [][]byte) error {
 		return nil
 	}
 
-	peer.RLock()
-	defer peer.RUnlock()
-
-	if peer.endpoint == nil {
+	ep, _ := peer.endpoint.Load().(conn.Endpoint)
+	if ep == nil {
 		return errors.New("no known endpoint for peer")
 	}
 
-	err := peer.device.net.bind.Send(buffers, peer.endpoint)
+	err := peer.device.net.bind.Send(buffers, ep)
 	if err == nil {
 		var totalLen uint64
 		for _, b := range buffers {
@@ -267,10 +259,8 @@ func (peer *Peer) Stop() {
 }
 
 func (peer *Peer) SetEndpointFromPacket(endpoint conn.Endpoint) {
-	if peer.disableRoaming {
+	if peer.disableRoaming.Load() {
 		return
 	}
-	peer.Lock()
-	peer.endpoint = endpoint
-	peer.Unlock()
+	peer.endpoint.Store(endpoint)
 }

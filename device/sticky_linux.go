@@ -110,17 +110,15 @@ func (device *Device) routineRouteListener(bind conn.Bind, netlinkSock int, netl
 								if !ok {
 									break
 								}
-								pePtr.peer.Lock()
-								if &pePtr.peer.endpoint != pePtr.endpoint {
-									pePtr.peer.Unlock()
+								current, _ := pePtr.peer.endpoint.Load().(conn.Endpoint)
+								if &current != pePtr.endpoint {
 									break
 								}
-								if uint32(pePtr.peer.endpoint.(*conn.StdNetEndpoint).SrcIfidx()) == ifidx {
-									pePtr.peer.Unlock()
+								if uint32(current.(*conn.StdNetEndpoint).SrcIfidx()) == ifidx {
 									break
 								}
-								pePtr.peer.endpoint.(*conn.StdNetEndpoint).ClearSrc()
-								pePtr.peer.Unlock()
+								current.ClearSrc()
+								pePtr.peer.endpoint.Store(current)
 							}
 							attr = attr[attrhdr.Len:]
 						}
@@ -134,18 +132,15 @@ func (device *Device) routineRouteListener(bind conn.Bind, netlinkSock int, netl
 					device.peers.RLock()
 					i := uint32(1)
 					for _, peer := range device.peers.keyMap {
-						peer.RLock()
-						if peer.endpoint == nil {
-							peer.RUnlock()
+						ep, _ := peer.endpoint.Load().(conn.Endpoint)
+						if ep == nil {
 							continue
 						}
-						nativeEP, _ := peer.endpoint.(*conn.StdNetEndpoint)
+						nativeEP := ep.(*conn.StdNetEndpoint)
 						if nativeEP == nil {
-							peer.RUnlock()
 							continue
 						}
 						if nativeEP.DstIP().Is6() || nativeEP.SrcIfidx() == 0 {
-							peer.RUnlock()
 							break
 						}
 						nlmsg := struct {
@@ -188,10 +183,9 @@ func (device *Device) routineRouteListener(bind conn.Bind, netlinkSock int, netl
 						reqPeerLock.Lock()
 						reqPeer[i] = peerEndpointPtr{
 							peer:     peer,
-							endpoint: &peer.endpoint,
+							endpoint: &ep,
 						}
 						reqPeerLock.Unlock()
-						peer.RUnlock()
 						i++
 						_, err := netlinkCancel.Write((*[unsafe.Sizeof(nlmsg)]byte)(unsafe.Pointer(&nlmsg))[:])
 						if err != nil {
