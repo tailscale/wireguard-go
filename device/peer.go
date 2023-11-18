@@ -17,11 +17,12 @@ import (
 
 type Peer struct {
 	isRunning         atomic.Bool
-	sync.RWMutex      // Mostly protects endpoint, but is generally taken whenever we modify peer
+	sync.Mutex        // Mostly protects endpoint, but is generally taken whenever we modify peer
 	keypairs          Keypairs
 	handshake         Handshake
 	device            *Device
 	endpoint          conn.Endpoint
+	clearEndpointSrc  bool
 	stopping          sync.WaitGroup // routines pending stop
 	txBytes           atomic.Uint64  // bytes send to peer (endpoint)
 	rxBytes           atomic.Uint64  // bytes received from peer
@@ -108,6 +109,14 @@ func (device *Device) NewPeer(pk NoisePublicKey) (*Peer, error) {
 	return peer, nil
 }
 
+func (peer *Peer) markEndpointClearSrc() {
+	peer.Lock()
+	defer peer.Unlock()
+	if peer.endpoint != nil {
+		peer.clearEndpointSrc = true
+	}
+}
+
 func (peer *Peer) SendBuffers(buffers [][]byte) error {
 	peer.device.net.RLock()
 	defer peer.device.net.RUnlock()
@@ -116,14 +125,19 @@ func (peer *Peer) SendBuffers(buffers [][]byte) error {
 		return nil
 	}
 
-	peer.RLock()
-	defer peer.RUnlock()
+	peer.Lock()
+	endpoint := peer.endpoint
+	if peer.clearEndpointSrc {
+		endpoint.ClearSrc()
+		peer.clearEndpointSrc = false
+	}
+	peer.Unlock()
 
 	if peer.endpoint == nil {
 		return errors.New("no known endpoint for peer")
 	}
 
-	err := peer.device.net.bind.Send(buffers, peer.endpoint)
+	err := peer.device.net.bind.Send(buffers, endpoint)
 	if err == nil {
 		var totalLen uint64
 		for _, b := range buffers {

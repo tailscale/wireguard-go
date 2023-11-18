@@ -101,8 +101,8 @@ func (device *Device) IpcGetOperation(w io.Writer) error {
 			// Serialize peer state.
 			// Do the work in an anonymous function so that we can use defer.
 			func() {
-				peer.RLock()
-				defer peer.RUnlock()
+				peer.Lock()
+				defer peer.Unlock()
 
 				keyf("public_key", (*[32]byte)(&peer.handshake.remoteStatic))
 				keyf("preshared_key", (*[32]byte)(&peer.handshake.presharedKey))
