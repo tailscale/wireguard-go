@@ -76,7 +76,7 @@ type PeekLookAtSocketFd interface {
 //	dst: the remote address of a peer ("endpoint" in uapi terminology)
 //	src: the local address from which datagrams originate going to the peer
 type Endpoint interface {
-	ClearSrc()           // clears the source address
+	ClearSrc()           // clears the source address; MUST be internally synchronized, may be called concurrently
 	SrcToString() string // returns the local source address (ip:port)
 	DstToString() string // returns the destination address (ip:port)
 	DstToBytes() []byte  // used for mac2 cookie calculations

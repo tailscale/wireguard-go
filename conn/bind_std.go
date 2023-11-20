@@ -75,6 +75,8 @@ func NewStdNetBind() Bind {
 type StdNetEndpoint struct {
 	// AddrPort is the endpoint destination.
 	netip.AddrPort
+	// guards src
+	mu sync.Mutex
 	// src is the current sticky source address and interface index, if
 	// supported. Typically this is a PKTINFO structure from/for control
 	// messages, see unix.PKTINFO for an example.
@@ -96,11 +98,17 @@ func (*StdNetBind) ParseEndpoint(s string) (Endpoint, error) {
 	}, nil
 }
 
-func (e *StdNetEndpoint) ClearSrc() {
+func (e *StdNetEndpoint) clearSrcLocked() {
 	if e.src != nil {
 		// Truncate src, no need to reallocate.
 		e.src = e.src[:0]
 	}
+}
+
+func (e *StdNetEndpoint) ClearSrc() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.clearSrcLocked()
 }
 
 func (e *StdNetEndpoint) DstIP() netip.Addr {

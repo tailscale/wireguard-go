@@ -16,6 +16,8 @@ import (
 )
 
 func (e *StdNetEndpoint) SrcIP() netip.Addr {
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	switch len(e.src) {
 	case unix.CmsgSpace(unix.SizeofInet4Pktinfo):
 		info := (*unix.Inet4Pktinfo)(unsafe.Pointer(&e.src[unix.CmsgLen(0)]))
@@ -31,6 +33,8 @@ func (e *StdNetEndpoint) SrcIP() netip.Addr {
 }
 
 func (e *StdNetEndpoint) SrcIfidx() int32 {
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	switch len(e.src) {
 	case unix.CmsgSpace(unix.SizeofInet4Pktinfo):
 		info := (*unix.Inet4Pktinfo)(unsafe.Pointer(&e.src[unix.CmsgLen(0)]))
@@ -49,7 +53,9 @@ func (e *StdNetEndpoint) SrcToString() string {
 // getSrcFromControl parses the control for PKTINFO and if found updates ep with
 // the source information found.
 func getSrcFromControl(control []byte, ep *StdNetEndpoint) {
-	ep.ClearSrc()
+	ep.mu.Lock()
+	defer ep.mu.Unlock()
+	ep.clearSrcLocked()
 
 	var (
 		hdr  unix.Cmsghdr
@@ -99,6 +105,8 @@ func getSrcFromControl(control []byte, ep *StdNetEndpoint) {
 // and source ifindex found in ep. control's len will be set to 0 in the event
 // that ep is a default value.
 func setSrcControl(control *[]byte, ep *StdNetEndpoint) {
+	ep.mu.Lock()
+	defer ep.mu.Unlock()
 	if cap(*control) < len(ep.src) {
 		return
 	}

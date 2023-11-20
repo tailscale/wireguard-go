@@ -17,7 +17,7 @@ import (
 
 type Peer struct {
 	isRunning         atomic.Bool
-	sync.RWMutex      // Mostly protects endpoint, but is generally taken whenever we modify peer
+	sync.Mutex        // Mostly protects endpoint, but is generally taken whenever we modify peer
 	keypairs          Keypairs
 	handshake         Handshake
 	device            *Device
@@ -116,14 +116,15 @@ func (peer *Peer) SendBuffers(buffers [][]byte) error {
 		return nil
 	}
 
-	peer.RLock()
-	defer peer.RUnlock()
+	peer.Lock()
+	endpoint := peer.endpoint
+	peer.Unlock()
 
 	if peer.endpoint == nil {
 		return errors.New("no known endpoint for peer")
 	}
 
-	err := peer.device.net.bind.Send(buffers, peer.endpoint)
+	err := peer.device.net.bind.Send(buffers, endpoint)
 	if err == nil {
 		var totalLen uint64
 		for _, b := range buffers {
