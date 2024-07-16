@@ -169,20 +169,20 @@ func tcp6Packet(srcIPPort, dstIPPort netip.AddrPort, flags header.TCPFlags, segm
 func Test_handleVirtioRead(t *testing.T) {
 	tests := []struct {
 		name     string
-		hdr      virtioNetHdr
+		hdr      VirtioNetHdr
 		pktIn    []byte
 		wantLens []int
 		wantErr  bool
 	}{
 		{
 			"tcp4",
-			virtioNetHdr{
-				flags:      unix.VIRTIO_NET_HDR_F_NEEDS_CSUM,
-				gsoType:    unix.VIRTIO_NET_HDR_GSO_TCPV4,
-				gsoSize:    100,
-				hdrLen:     40,
-				csumStart:  20,
-				csumOffset: 16,
+			VirtioNetHdr{
+				Flags:      unix.VIRTIO_NET_HDR_F_NEEDS_CSUM,
+				GSOType:    unix.VIRTIO_NET_HDR_GSO_TCPV4,
+				GSOSize:    100,
+				HdrLen:     40,
+				CsumStart:  20,
+				CsumOffset: 16,
 			},
 			tcp4Packet(ip4PortA, ip4PortB, header.TCPFlagAck|header.TCPFlagPsh, 200, 1),
 			[]int{140, 140},
@@ -190,13 +190,13 @@ func Test_handleVirtioRead(t *testing.T) {
 		},
 		{
 			"tcp6",
-			virtioNetHdr{
-				flags:      unix.VIRTIO_NET_HDR_F_NEEDS_CSUM,
-				gsoType:    unix.VIRTIO_NET_HDR_GSO_TCPV6,
-				gsoSize:    100,
-				hdrLen:     60,
-				csumStart:  40,
-				csumOffset: 16,
+			VirtioNetHdr{
+				Flags:      unix.VIRTIO_NET_HDR_F_NEEDS_CSUM,
+				GSOType:    unix.VIRTIO_NET_HDR_GSO_TCPV6,
+				GSOSize:    100,
+				HdrLen:     60,
+				CsumStart:  40,
+				CsumOffset: 16,
 			},
 			tcp6Packet(ip6PortA, ip6PortB, header.TCPFlagAck|header.TCPFlagPsh, 200, 1),
 			[]int{160, 160},
@@ -204,13 +204,13 @@ func Test_handleVirtioRead(t *testing.T) {
 		},
 		{
 			"udp4",
-			virtioNetHdr{
-				flags:      unix.VIRTIO_NET_HDR_F_NEEDS_CSUM,
-				gsoType:    unix.VIRTIO_NET_HDR_GSO_UDP_L4,
-				gsoSize:    100,
-				hdrLen:     28,
-				csumStart:  20,
-				csumOffset: 6,
+			VirtioNetHdr{
+				Flags:      unix.VIRTIO_NET_HDR_F_NEEDS_CSUM,
+				GSOType:    unix.VIRTIO_NET_HDR_GSO_UDP_L4,
+				GSOSize:    100,
+				HdrLen:     28,
+				CsumStart:  20,
+				CsumOffset: 6,
 			},
 			udp4Packet(ip4PortA, ip4PortB, 200),
 			[]int{128, 128},
@@ -218,13 +218,13 @@ func Test_handleVirtioRead(t *testing.T) {
 		},
 		{
 			"udp6",
-			virtioNetHdr{
-				flags:      unix.VIRTIO_NET_HDR_F_NEEDS_CSUM,
-				gsoType:    unix.VIRTIO_NET_HDR_GSO_UDP_L4,
-				gsoSize:    100,
-				hdrLen:     48,
-				csumStart:  40,
-				csumOffset: 6,
+			VirtioNetHdr{
+				Flags:      unix.VIRTIO_NET_HDR_F_NEEDS_CSUM,
+				GSOType:    unix.VIRTIO_NET_HDR_GSO_UDP_L4,
+				GSOSize:    100,
+				HdrLen:     48,
+				CsumStart:  40,
+				CsumOffset: 6,
 			},
 			udp6Packet(ip6PortA, ip6PortB, 200),
 			[]int{148, 148},
@@ -435,7 +435,7 @@ func Test_handleGRO(t *testing.T) {
 			false,
 		},
 		{
-			"unequal flags more fragments set",
+			"unequal Flags more fragments set",
 			[][]byte{
 				tcp4Packet(ip4PortA, ip4PortB, header.TCPFlagAck, 100, 1),
 				tcp4PacketMutateIPFields(ip4PortA, ip4PortB, header.TCPFlagAck, 100, 101, func(fields *header.IPv4Fields) {
@@ -452,7 +452,7 @@ func Test_handleGRO(t *testing.T) {
 			false,
 		},
 		{
-			"unequal flags DF set",
+			"unequal Flags DF set",
 			[][]byte{
 				tcp4Packet(ip4PortA, ip4PortB, header.TCPFlagAck, 100, 1),
 				tcp4PacketMutateIPFields(ip4PortA, ip4PortB, header.TCPFlagAck, 100, 101, func(fields *header.IPv4Fields) {

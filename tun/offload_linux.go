@@ -24,18 +24,18 @@ const (
 	tcpFlagACK uint8 = 0x10
 )
 
-// virtioNetHdr is defined in the kernel in include/uapi/linux/virtio_net.h. The
+// VirtioNetHdr is defined in the kernel in include/uapi/linux/virtio_net.h. The
 // kernel symbol is virtio_net_hdr.
-type virtioNetHdr struct {
-	flags      uint8
-	gsoType    uint8
-	hdrLen     uint16
-	gsoSize    uint16
-	csumStart  uint16
-	csumOffset uint16
+type VirtioNetHdr struct {
+	Flags      uint8
+	GSOType    uint8
+	HdrLen     uint16
+	GSOSize    uint16
+	CsumStart  uint16
+	CsumOffset uint16
 }
 
-func (v *virtioNetHdr) decode(b []byte) error {
+func (v *VirtioNetHdr) decode(b []byte) error {
 	if len(b) < virtioNetHdrLen {
 		return io.ErrShortBuffer
 	}
@@ -43,7 +43,7 @@ func (v *virtioNetHdr) decode(b []byte) error {
 	return nil
 }
 
-func (v *virtioNetHdr) encode(b []byte) error {
+func (v *VirtioNetHdr) encode(b []byte) error {
 	if len(b) < virtioNetHdrLen {
 		return io.ErrShortBuffer
 	}
@@ -52,9 +52,9 @@ func (v *virtioNetHdr) encode(b []byte) error {
 }
 
 const (
-	// virtioNetHdrLen is the length in bytes of virtioNetHdr. This matches the
+	// virtioNetHdrLen is the length in bytes of VirtioNetHdr. This matches the
 	// shape of the C ABI for its kernel counterpart -- sizeof(virtio_net_hdr).
-	virtioNetHdrLen = int(unsafe.Sizeof(virtioNetHdr{}))
+	virtioNetHdrLen = int(unsafe.Sizeof(VirtioNetHdr{}))
 )
 
 // tcpFlowKey represents the key for a TCP flow.
@@ -308,7 +308,7 @@ func ipHeadersCanCoalesce(pktA, pktB []byte) bool {
 }
 
 // udpPacketsCanCoalesce evaluates if pkt can be coalesced with the packet
-// described by item. iphLen and gsoSize describe pkt. bufs is the vector of
+// described by item. iphLen and GSOSize describe pkt. bufs is the vector of
 // packets involved in the current GRO evaluation. bufsOffset is the offset at
 // which packet data begins within bufs.
 func udpPacketsCanCoalesce(pkt []byte, iphLen uint8, gsoSize uint16, item udpGROItem, bufs [][]byte, bufsOffset int) canCoalesce {
@@ -317,7 +317,7 @@ func udpPacketsCanCoalesce(pkt []byte, iphLen uint8, gsoSize uint16, item udpGRO
 		return coalesceUnavailable
 	}
 	if len(pktTarget[iphLen+udphLen:])%int(item.gsoSize) != 0 {
-		// A smaller than gsoSize packet has been appended previously.
+		// A smaller than GSOSize packet has been appended previously.
 		// Nothing can come after a smaller packet on the end.
 		return coalesceUnavailable
 	}
@@ -356,7 +356,7 @@ func tcpPacketsCanCoalesce(pkt []byte, iphLen, tcphLen uint8, seq uint32, pshSet
 			return coalesceUnavailable
 		}
 		if len(pktTarget[iphLen+tcphLen:])%int(item.gsoSize) != 0 {
-			// A smaller than gsoSize packet has been appended previously.
+			// A smaller than GSOSize packet has been appended previously.
 			// Nothing can come after a smaller packet on the end.
 			return coalesceUnavailable
 		}
@@ -565,7 +565,7 @@ func tcpGRO(bufs [][]byte, offset int, pktI int, table *tcpGROTable, isV6 bool) 
 	}
 	tcpFlags := pkt[iphLen+tcpFlagsOffset]
 	var pshSet bool
-	// not a candidate if any non-ACK flags (except PSH+ACK) are set
+	// not a candidate if any non-ACK Flags (except PSH+ACK) are set
 	if tcpFlags != tcpFlagACK {
 		if pkt[iphLen+tcpFlagsOffset] != tcpFlagACK|tcpFlagPSH {
 			return groResultNoop
@@ -626,22 +626,22 @@ func applyTCPCoalesceAccounting(bufs [][]byte, offset int, table *tcpGROTable) e
 	for _, items := range table.itemsByFlow {
 		for _, item := range items {
 			if item.numMerged > 0 {
-				hdr := virtioNetHdr{
-					flags:      unix.VIRTIO_NET_HDR_F_NEEDS_CSUM, // this turns into CHECKSUM_PARTIAL in the skb
-					hdrLen:     uint16(item.iphLen + item.tcphLen),
-					gsoSize:    item.gsoSize,
-					csumStart:  uint16(item.iphLen),
-					csumOffset: 16,
+				hdr := VirtioNetHdr{
+					Flags:      unix.VIRTIO_NET_HDR_F_NEEDS_CSUM, // this turns into CHECKSUM_PARTIAL in the skb
+					HdrLen:     uint16(item.iphLen + item.tcphLen),
+					GSOSize:    item.gsoSize,
+					CsumStart:  uint16(item.iphLen),
+					CsumOffset: 16,
 				}
 				pkt := bufs[item.bufsIndex][offset:]
 
 				// Recalculate the total len (IPv4) or payload len (IPv6).
 				// Recalculate the (IPv4) header checksum.
 				if item.key.isV6 {
-					hdr.gsoType = unix.VIRTIO_NET_HDR_GSO_TCPV6
+					hdr.GSOType = unix.VIRTIO_NET_HDR_GSO_TCPV6
 					binary.BigEndian.PutUint16(pkt[4:], uint16(len(pkt))-uint16(item.iphLen)) // set new IPv6 header payload len
 				} else {
-					hdr.gsoType = unix.VIRTIO_NET_HDR_GSO_TCPV4
+					hdr.GSOType = unix.VIRTIO_NET_HDR_GSO_TCPV4
 					pkt[10], pkt[11] = 0, 0
 					binary.BigEndian.PutUint16(pkt[2:], uint16(len(pkt))) // set new total length
 					iphCSum := ^checksum(pkt[:item.iphLen], 0)            // compute IPv4 header checksum
@@ -665,9 +665,9 @@ func applyTCPCoalesceAccounting(bufs [][]byte, offset int, table *tcpGROTable) e
 				srcAddr := bufs[item.bufsIndex][srcAddrAt : srcAddrAt+addrLen]
 				dstAddr := bufs[item.bufsIndex][srcAddrAt+addrLen : srcAddrAt+addrLen*2]
 				psum := pseudoHeaderChecksum(unix.IPPROTO_TCP, srcAddr, dstAddr, uint16(len(pkt)-int(item.iphLen)))
-				binary.BigEndian.PutUint16(pkt[hdr.csumStart+hdr.csumOffset:], checksum([]byte{}, psum))
+				binary.BigEndian.PutUint16(pkt[hdr.CsumStart+hdr.CsumOffset:], checksum([]byte{}, psum))
 			} else {
-				hdr := virtioNetHdr{}
+				hdr := VirtioNetHdr{}
 				err := hdr.encode(bufs[item.bufsIndex][offset-virtioNetHdrLen:])
 				if err != nil {
 					return err
@@ -684,18 +684,18 @@ func applyUDPCoalesceAccounting(bufs [][]byte, offset int, table *udpGROTable) e
 	for _, items := range table.itemsByFlow {
 		for _, item := range items {
 			if item.numMerged > 0 {
-				hdr := virtioNetHdr{
-					flags:      unix.VIRTIO_NET_HDR_F_NEEDS_CSUM, // this turns into CHECKSUM_PARTIAL in the skb
-					hdrLen:     uint16(item.iphLen + udphLen),
-					gsoSize:    item.gsoSize,
-					csumStart:  uint16(item.iphLen),
-					csumOffset: 6,
+				hdr := VirtioNetHdr{
+					Flags:      unix.VIRTIO_NET_HDR_F_NEEDS_CSUM, // this turns into CHECKSUM_PARTIAL in the skb
+					HdrLen:     uint16(item.iphLen + udphLen),
+					GSOSize:    item.gsoSize,
+					CsumStart:  uint16(item.iphLen),
+					CsumOffset: 6,
 				}
 				pkt := bufs[item.bufsIndex][offset:]
 
 				// Recalculate the total len (IPv4) or payload len (IPv6).
 				// Recalculate the (IPv4) header checksum.
-				hdr.gsoType = unix.VIRTIO_NET_HDR_GSO_UDP_L4
+				hdr.GSOType = unix.VIRTIO_NET_HDR_GSO_UDP_L4
 				if item.key.isV6 {
 					binary.BigEndian.PutUint16(pkt[4:], uint16(len(pkt))-uint16(item.iphLen)) // set new IPv6 header payload len
 				} else {
@@ -725,9 +725,9 @@ func applyUDPCoalesceAccounting(bufs [][]byte, offset int, table *udpGROTable) e
 				srcAddr := bufs[item.bufsIndex][srcAddrAt : srcAddrAt+addrLen]
 				dstAddr := bufs[item.bufsIndex][srcAddrAt+addrLen : srcAddrAt+addrLen*2]
 				psum := pseudoHeaderChecksum(unix.IPPROTO_UDP, srcAddr, dstAddr, uint16(len(pkt)-int(item.iphLen)))
-				binary.BigEndian.PutUint16(pkt[hdr.csumStart+hdr.csumOffset:], checksum([]byte{}, psum))
+				binary.BigEndian.PutUint16(pkt[hdr.CsumStart+hdr.CsumOffset:], checksum([]byte{}, psum))
 			} else {
-				hdr := virtioNetHdr{}
+				hdr := VirtioNetHdr{}
 				err := hdr.encode(bufs[item.bufsIndex][offset-virtioNetHdrLen:])
 				if err != nil {
 					return err
@@ -880,7 +880,7 @@ func handleGRO(bufs [][]byte, offset int, tcpTable *tcpGROTable, udpTable *udpGR
 		}
 		switch result {
 		case groResultNoop:
-			hdr := virtioNetHdr{}
+			hdr := VirtioNetHdr{}
 			err := hdr.encode(bufs[i][offset-virtioNetHdrLen:])
 			if err != nil {
 				return err
@@ -895,11 +895,11 @@ func handleGRO(bufs [][]byte, offset int, tcpTable *tcpGROTable, udpTable *udpGR
 	return errors.Join(errTCP, errUDP)
 }
 
-// gsoSplit splits packets from in into outBuffs, writing the size of each
+// GSOSplit splits packets from in into outBuffs, writing the size of each
 // element into sizes. It returns the number of buffers populated, and/or an
 // error.
-func gsoSplit(in []byte, hdr virtioNetHdr, outBuffs [][]byte, sizes []int, outOffset int, isV6 bool) (int, error) {
-	iphLen := int(hdr.csumStart)
+func GSOSplit(in []byte, hdr VirtioNetHdr, outBuffs [][]byte, sizes []int, outOffset int, isV6 bool) (int, error) {
+	iphLen := int(hdr.CsumStart)
 	srcAddrOffset := ipv6SrcAddrOffset
 	addrLen := 16
 	if !isV6 {
@@ -907,28 +907,28 @@ func gsoSplit(in []byte, hdr virtioNetHdr, outBuffs [][]byte, sizes []int, outOf
 		srcAddrOffset = ipv4SrcAddrOffset
 		addrLen = 4
 	}
-	transportCsumAt := int(hdr.csumStart + hdr.csumOffset)
+	transportCsumAt := int(hdr.CsumStart + hdr.CsumOffset)
 	in[transportCsumAt], in[transportCsumAt+1] = 0, 0 // clear tcp/udp checksum
 	var firstTCPSeqNum uint32
 	var protocol uint8
-	if hdr.gsoType == unix.VIRTIO_NET_HDR_GSO_TCPV4 || hdr.gsoType == unix.VIRTIO_NET_HDR_GSO_TCPV6 {
+	if hdr.GSOType == unix.VIRTIO_NET_HDR_GSO_TCPV4 || hdr.GSOType == unix.VIRTIO_NET_HDR_GSO_TCPV6 {
 		protocol = unix.IPPROTO_TCP
-		firstTCPSeqNum = binary.BigEndian.Uint32(in[hdr.csumStart+4:])
+		firstTCPSeqNum = binary.BigEndian.Uint32(in[hdr.CsumStart+4:])
 	} else {
 		protocol = unix.IPPROTO_UDP
 	}
-	nextSegmentDataAt := int(hdr.hdrLen)
+	nextSegmentDataAt := int(hdr.HdrLen)
 	i := 0
 	for ; nextSegmentDataAt < len(in); i++ {
 		if i == len(outBuffs) {
 			return i - 1, ErrTooManySegments
 		}
-		nextSegmentEnd := nextSegmentDataAt + int(hdr.gsoSize)
+		nextSegmentEnd := nextSegmentDataAt + int(hdr.GSOSize)
 		if nextSegmentEnd > len(in) {
 			nextSegmentEnd = len(in)
 		}
 		segmentDataLen := nextSegmentEnd - nextSegmentDataAt
-		totalLen := int(hdr.hdrLen) + segmentDataLen
+		totalLen := int(hdr.HdrLen) + segmentDataLen
 		sizes[i] = totalLen
 		out := outBuffs[i][outOffset:]
 
@@ -951,38 +951,38 @@ func gsoSplit(in []byte, hdr virtioNetHdr, outBuffs [][]byte, sizes []int, outOf
 		}
 
 		// copy transport header
-		copy(out[hdr.csumStart:hdr.hdrLen], in[hdr.csumStart:hdr.hdrLen])
+		copy(out[hdr.CsumStart:hdr.HdrLen], in[hdr.CsumStart:hdr.HdrLen])
 
 		if protocol == unix.IPPROTO_TCP {
-			// set TCP seq and adjust TCP flags
-			tcpSeq := firstTCPSeqNum + uint32(hdr.gsoSize*uint16(i))
-			binary.BigEndian.PutUint32(out[hdr.csumStart+4:], tcpSeq)
+			// set TCP seq and adjust TCP Flags
+			tcpSeq := firstTCPSeqNum + uint32(hdr.GSOSize*uint16(i))
+			binary.BigEndian.PutUint32(out[hdr.CsumStart+4:], tcpSeq)
 			if nextSegmentEnd != len(in) {
 				// FIN and PSH should only be set on last segment
 				clearFlags := tcpFlagFIN | tcpFlagPSH
-				out[hdr.csumStart+tcpFlagsOffset] &^= clearFlags
+				out[hdr.CsumStart+tcpFlagsOffset] &^= clearFlags
 			}
 		} else {
 			// set UDP header len
-			binary.BigEndian.PutUint16(out[hdr.csumStart+4:], uint16(segmentDataLen)+(hdr.hdrLen-hdr.csumStart))
+			binary.BigEndian.PutUint16(out[hdr.CsumStart+4:], uint16(segmentDataLen)+(hdr.HdrLen-hdr.CsumStart))
 		}
 
 		// payload
-		copy(out[hdr.hdrLen:], in[nextSegmentDataAt:nextSegmentEnd])
+		copy(out[hdr.HdrLen:], in[nextSegmentDataAt:nextSegmentEnd])
 
 		// transport checksum
-		transportHeaderLen := int(hdr.hdrLen - hdr.csumStart)
+		transportHeaderLen := int(hdr.HdrLen - hdr.CsumStart)
 		lenForPseudo := uint16(transportHeaderLen + segmentDataLen)
 		transportCSum := pseudoHeaderChecksum(protocol, in[srcAddrOffset:srcAddrOffset+addrLen], in[srcAddrOffset+addrLen:srcAddrOffset+addrLen*2], lenForPseudo)
-		transportCSum = ^checksum(out[hdr.csumStart:totalLen], transportCSum)
-		binary.BigEndian.PutUint16(out[hdr.csumStart+hdr.csumOffset:], transportCSum)
+		transportCSum = ^checksum(out[hdr.CsumStart:totalLen], transportCSum)
+		binary.BigEndian.PutUint16(out[hdr.CsumStart+hdr.CsumOffset:], transportCSum)
 
-		nextSegmentDataAt += int(hdr.gsoSize)
+		nextSegmentDataAt += int(hdr.GSOSize)
 	}
 	return i, nil
 }
 
-func gsoNoneChecksum(in []byte, cSumStart, cSumOffset uint16) error {
+func GSONoneChecksum(in []byte, cSumStart, cSumOffset uint16) error {
 	cSumAt := cSumStart + cSumOffset
 	// The initial value at the checksum offset should be summed with the
 	// checksum we compute. This is typically the pseudo-header checksum.
