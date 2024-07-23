@@ -410,8 +410,8 @@ func checksumValid(pkt []byte, iphLen, proto uint8, isV6 bool) bool {
 		addrSize = 16
 	}
 	lenForPseudo := uint16(len(pkt) - int(iphLen))
-	cSum := pseudoHeaderChecksum(proto, pkt[srcAddrAt:srcAddrAt+addrSize], pkt[srcAddrAt+addrSize:srcAddrAt+addrSize*2], lenForPseudo)
-	return ^checksum(pkt[iphLen:], cSum) == 0
+	cSum := PseudoHeaderChecksum(proto, pkt[srcAddrAt:srcAddrAt+addrSize], pkt[srcAddrAt+addrSize:srcAddrAt+addrSize*2], lenForPseudo)
+	return ^Checksum(pkt[iphLen:], cSum) == 0
 }
 
 // coalesceResult represents the result of attempting to coalesce two TCP
@@ -659,7 +659,7 @@ func applyTCPCoalesceAccounting(bufs [][]byte, offset int, table *tcpGROTable) e
 					hdr.gsoType = unix.VIRTIO_NET_HDR_GSO_TCPV4
 					pkt[10], pkt[11] = 0, 0
 					binary.BigEndian.PutUint16(pkt[2:], uint16(len(pkt))) // set new total length
-					iphCSum := ^checksum(pkt[:item.iphLen], 0)            // compute IPv4 header checksum
+					iphCSum := ^Checksum(pkt[:item.iphLen], 0)            // compute IPv4 header checksum
 					binary.BigEndian.PutUint16(pkt[10:], iphCSum)         // set IPv4 header checksum field
 				}
 				err := hdr.encode(bufs[item.bufsIndex][offset-virtioNetHdrLen:])
@@ -679,8 +679,8 @@ func applyTCPCoalesceAccounting(bufs [][]byte, offset int, table *tcpGROTable) e
 				srcAddrAt := offset + addrOffset
 				srcAddr := bufs[item.bufsIndex][srcAddrAt : srcAddrAt+addrLen]
 				dstAddr := bufs[item.bufsIndex][srcAddrAt+addrLen : srcAddrAt+addrLen*2]
-				psum := pseudoHeaderChecksum(unix.IPPROTO_TCP, srcAddr, dstAddr, uint16(len(pkt)-int(item.iphLen)))
-				binary.BigEndian.PutUint16(pkt[hdr.csumStart+hdr.csumOffset:], checksum([]byte{}, psum))
+				psum := PseudoHeaderChecksum(unix.IPPROTO_TCP, srcAddr, dstAddr, uint16(len(pkt)-int(item.iphLen)))
+				binary.BigEndian.PutUint16(pkt[hdr.csumStart+hdr.csumOffset:], Checksum([]byte{}, psum))
 			} else {
 				hdr := virtioNetHdr{}
 				err := hdr.encode(bufs[item.bufsIndex][offset-virtioNetHdrLen:])
@@ -716,7 +716,7 @@ func applyUDPCoalesceAccounting(bufs [][]byte, offset int, table *udpGROTable) e
 				} else {
 					pkt[10], pkt[11] = 0, 0
 					binary.BigEndian.PutUint16(pkt[2:], uint16(len(pkt))) // set new total length
-					iphCSum := ^checksum(pkt[:item.iphLen], 0)            // compute IPv4 header checksum
+					iphCSum := ^Checksum(pkt[:item.iphLen], 0)            // compute IPv4 header checksum
 					binary.BigEndian.PutUint16(pkt[10:], iphCSum)         // set IPv4 header checksum field
 				}
 				err := hdr.encode(bufs[item.bufsIndex][offset-virtioNetHdrLen:])
@@ -739,8 +739,8 @@ func applyUDPCoalesceAccounting(bufs [][]byte, offset int, table *udpGROTable) e
 				srcAddrAt := offset + addrOffset
 				srcAddr := bufs[item.bufsIndex][srcAddrAt : srcAddrAt+addrLen]
 				dstAddr := bufs[item.bufsIndex][srcAddrAt+addrLen : srcAddrAt+addrLen*2]
-				psum := pseudoHeaderChecksum(unix.IPPROTO_UDP, srcAddr, dstAddr, uint16(len(pkt)-int(item.iphLen)))
-				binary.BigEndian.PutUint16(pkt[hdr.csumStart+hdr.csumOffset:], checksum([]byte{}, psum))
+				psum := PseudoHeaderChecksum(unix.IPPROTO_UDP, srcAddr, dstAddr, uint16(len(pkt)-int(item.iphLen)))
+				binary.BigEndian.PutUint16(pkt[hdr.csumStart+hdr.csumOffset:], Checksum([]byte{}, psum))
 			} else {
 				hdr := virtioNetHdr{}
 				err := hdr.encode(bufs[item.bufsIndex][offset-virtioNetHdrLen:])

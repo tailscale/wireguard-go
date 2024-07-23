@@ -102,7 +102,7 @@ func GSOSplit(in []byte, options GSOOptions, outBufs [][]byte, sizes []int, outO
 			// the checksum we compute. This is typically the pseudo-header sum.
 			initial := binary.BigEndian.Uint16(in[cSumAt:])
 			in[cSumAt], in[cSumAt+1] = 0, 0
-			binary.BigEndian.PutUint16(in[cSumAt:], ^checksum(in[options.CsumStart:], initial))
+			binary.BigEndian.PutUint16(in[cSumAt:], ^Checksum(in[options.CsumStart:], initial))
 		}
 		sizes[0] = copy(outBufs[0][outOffset:], in)
 		return 1, nil
@@ -179,7 +179,7 @@ func GSOSplit(in []byte, options GSOOptions, outBufs [][]byte, sizes []int, outO
 			}
 			out[10], out[11] = 0, 0 // clear ipv4 header checksum
 			binary.BigEndian.PutUint16(out[2:], uint16(totalLen))
-			ipv4CSum := ^checksum(out[:iphLen], 0)
+			ipv4CSum := ^Checksum(out[:iphLen], 0)
 			binary.BigEndian.PutUint16(out[10:], ipv4CSum)
 		} else {
 			// For IPv6 we are responsible for updating the payload length field.
@@ -210,8 +210,8 @@ func GSOSplit(in []byte, options GSOOptions, outBufs [][]byte, sizes []int, outO
 		out[transportCsumAt], out[transportCsumAt+1] = 0, 0 // clear tcp/udp checksum
 		transportHeaderLen := int(options.HdrLen - options.CsumStart)
 		lenForPseudo := uint16(transportHeaderLen + segmentDataLen)
-		transportCSum := pseudoHeaderChecksum(protocol, in[srcAddrOffset:srcAddrOffset+addrLen], in[srcAddrOffset+addrLen:srcAddrOffset+addrLen*2], lenForPseudo)
-		transportCSum = ^checksum(out[options.CsumStart:totalLen], transportCSum)
+		transportCSum := PseudoHeaderChecksum(protocol, in[srcAddrOffset:srcAddrOffset+addrLen], in[srcAddrOffset+addrLen:srcAddrOffset+addrLen*2], lenForPseudo)
+		transportCSum = ^Checksum(out[options.CsumStart:totalLen], transportCSum)
 		binary.BigEndian.PutUint16(out[options.CsumStart+options.CsumOffset:], transportCSum)
 
 		nextSegmentDataAt += int(options.GSOSize)
