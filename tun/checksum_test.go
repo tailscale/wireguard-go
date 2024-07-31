@@ -21,26 +21,33 @@ type archChecksumDetails struct {
 	f         func([]byte, uint16) uint16
 }
 
-func deterministicRandomBytes(seed int64, length int) []byte {
+func fillRandomBuffer(seed int64, buf []byte) {
 	rng := rand.New(rand.NewSource(seed))
-	buf := make([]byte, length)
 	n, err := rng.Read(buf)
 	if err != nil {
 		panic(err)
 	}
-	if n != length {
+	if n != len(buf) {
 		panic("incomplete random buffer")
 	}
+}
+
+func deterministicRandomBytes(seed int64, length int) []byte {
+	buf := make([]byte, length)
+	fillRandomBuffer(seed, buf)
 	return buf
 }
 
 func getPageAlignedRandomBytes(seed int64, length int) []byte {
 	alignment := syscall.Getpagesize()
-	buf := deterministicRandomBytes(seed, length+(alignment-1))
+	buf := make([]byte, length+(alignment-1))
 	bufPtr := uintptr(unsafe.Pointer(&buf[0]))
 	alignedBufPtr := (bufPtr + uintptr(alignment-1)) & ^uintptr(alignment-1)
 	alignedStart := int(alignedBufPtr - bufPtr)
-	return buf[alignedStart:]
+
+	buf = buf[alignedStart : alignedStart+length]
+	fillRandomBuffer(seed, buf)
+	return buf
 }
 
 func TestChecksum(t *testing.T) {
