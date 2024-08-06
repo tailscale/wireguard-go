@@ -329,6 +329,9 @@ func ipHeadersCanCoalesce(pktA, pktB []byte) bool {
 // packets involved in the current GRO evaluation. bufsOffset is the offset at
 // which packet data begins within bufs.
 func udpPacketsCanCoalesce(pkt []byte, iphLen uint8, gsoSize uint16, item udpGROItem, bufs [][]byte, bufsOffset int) canCoalesce {
+	if gsoSize != item.gsoSize {
+		return coalesceUnavailable
+	}
 	pktTarget := bufs[item.bufsIndex][bufsOffset:]
 	if !ipHeadersCanCoalesce(pkt, pktTarget) {
 		return coalesceUnavailable
@@ -349,6 +352,9 @@ func udpPacketsCanCoalesce(pkt []byte, iphLen uint8, gsoSize uint16, item udpGRO
 // described by item. This function makes considerations that match the kernel's
 // GRO self tests, which can be found in tools/testing/selftests/net/gro.c.
 func tcpPacketsCanCoalesce(pkt []byte, iphLen, tcphLen uint8, seq uint32, pshSet bool, gsoSize uint16, item tcpGROItem, bufs [][]byte, bufsOffset int) canCoalesce {
+	if gsoSize != item.gsoSize {
+		return coalesceUnavailable
+	}
 	pktTarget := bufs[item.bufsIndex][bufsOffset:]
 	if tcphLen != item.tcphLen {
 		// cannot coalesce with unequal tcp options len
