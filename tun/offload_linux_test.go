@@ -286,11 +286,11 @@ func Fuzz_handleGRO(f *testing.F) {
 	pkt9 := udp6Packet(ip6PortA, ip6PortB, 100)
 	pkt10 := udp6Packet(ip6PortA, ip6PortB, 100)
 	pkt11 := udp6Packet(ip6PortA, ip6PortC, 100)
-	f.Add(pkt0, pkt1, pkt2, pkt3, pkt4, pkt5, pkt6, pkt7, pkt8, pkt9, pkt10, pkt11, true, offset)
-	f.Fuzz(func(t *testing.T, pkt0, pkt1, pkt2, pkt3, pkt4, pkt5, pkt6, pkt7, pkt8, pkt9, pkt10, pkt11 []byte, canUDPGRO bool, offset int) {
+	f.Add(pkt0, pkt1, pkt2, pkt3, pkt4, pkt5, pkt6, pkt7, pkt8, pkt9, pkt10, pkt11, 0, offset)
+	f.Fuzz(func(t *testing.T, pkt0, pkt1, pkt2, pkt3, pkt4, pkt5, pkt6, pkt7, pkt8, pkt9, pkt10, pkt11 []byte, gro int, offset int) {
 		pkts := [][]byte{pkt0, pkt1, pkt2, pkt3, pkt4, pkt5, pkt6, pkt7, pkt8, pkt9, pkt10, pkt11}
 		toWrite := make([]int, 0, len(pkts))
-		handleGRO(pkts, offset, newTCPGROTable(), newUDPGROTable(), canUDPGRO, &toWrite)
+		handleGRO(pkts, offset, newTCPGROTable(), newUDPGROTable(), groDisablementFlags(gro), &toWrite)
 		if len(toWrite) > len(pkts) {
 			t.Errorf("len(toWrite): %d > len(pkts): %d", len(toWrite), len(pkts))
 		}
@@ -311,7 +311,7 @@ func Test_handleGRO(t *testing.T) {
 	tests := []struct {
 		name        string
 		pktsIn      [][]byte
-		canUDPGRO   bool
+		gro         groDisablementFlags
 		wantToWrite []int
 		wantLens    []int
 		wantErr     bool
@@ -331,7 +331,7 @@ func Test_handleGRO(t *testing.T) {
 				udp6Packet(ip6PortA, ip6PortB, 100),                         // udp6 flow 1
 				udp6Packet(ip6PortA, ip6PortB, 100),                         // udp6 flow 1
 			},
-			true,
+			0,
 			[]int{0, 1, 2, 4, 5, 7, 9},
 			[]int{240, 228, 128, 140, 260, 160, 248},
 			false,
@@ -351,7 +351,7 @@ func Test_handleGRO(t *testing.T) {
 				udp6Packet(ip6PortA, ip6PortB, 100),                         // udp6 flow 1
 				udp6Packet(ip6PortA, ip6PortB, 100),                         // udp6 flow 1
 			},
-			false,
+			udpGRODisabled,
 			[]int{0, 1, 2, 4, 5, 7, 8, 9, 10},
 			[]int{240, 128, 128, 140, 260, 160, 128, 148, 148},
 			false,
@@ -368,7 +368,7 @@ func Test_handleGRO(t *testing.T) {
 				tcp6Packet(ip6PortA, ip6PortB, header.TCPFlagAck, 100, 201),                   // v6 flow 1
 				tcp6Packet(ip6PortA, ip6PortB, header.TCPFlagAck, 100, 301),                   // v6 flow 1
 			},
-			true,
+			0,
 			[]int{0, 2, 4, 6},
 			[]int{240, 240, 260, 260},
 			false,
@@ -383,7 +383,7 @@ func Test_handleGRO(t *testing.T) {
 				udp4Packet(ip4PortA, ip4PortB, 100),
 				udp4Packet(ip4PortA, ip4PortB, 100),
 			},
-			true,
+			0,
 			[]int{0, 1, 3, 4},
 			[]int{140, 240, 128, 228},
 			false,
@@ -395,7 +395,7 @@ func Test_handleGRO(t *testing.T) {
 				tcp4Packet(ip4PortA, ip4PortB, header.TCPFlagAck, 100, 1),   // v4 flow 1 seq 1 len 100
 				tcp4Packet(ip4PortA, ip4PortB, header.TCPFlagAck, 100, 201), // v4 flow 1 seq 201 len 100
 			},
-			true,
+			0,
 			[]int{0},
 			[]int{340},
 			false,
@@ -412,7 +412,7 @@ func Test_handleGRO(t *testing.T) {
 					fields.TTL++
 				}),
 			},
-			true,
+			0,
 			[]int{0, 1, 2, 3},
 			[]int{140, 140, 128, 128},
 			false,
@@ -429,7 +429,7 @@ func Test_handleGRO(t *testing.T) {
 					fields.TOS++
 				}),
 			},
-			true,
+			0,
 			[]int{0, 1, 2, 3},
 			[]int{140, 140, 128, 128},
 			false,
@@ -446,7 +446,7 @@ func Test_handleGRO(t *testing.T) {
 					fields.Flags = 1
 				}),
 			},
-			true,
+			0,
 			[]int{0, 1, 2, 3},
 			[]int{140, 140, 128, 128},
 			false,
@@ -463,7 +463,7 @@ func Test_handleGRO(t *testing.T) {
 					fields.Flags = 2
 				}),
 			},
-			true,
+			0,
 			[]int{0, 1, 2, 3},
 			[]int{140, 140, 128, 128},
 			false,
@@ -480,7 +480,7 @@ func Test_handleGRO(t *testing.T) {
 					fields.HopLimit++
 				}),
 			},
-			true,
+			0,
 			[]int{0, 1, 2, 3},
 			[]int{160, 160, 148, 148},
 			false,
@@ -497,7 +497,7 @@ func Test_handleGRO(t *testing.T) {
 					fields.TrafficClass++
 				}),
 			},
-			true,
+			0,
 			[]int{0, 1, 2, 3},
 			[]int{160, 160, 148, 148},
 			false,
@@ -507,7 +507,7 @@ func Test_handleGRO(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			toWrite := make([]int, 0, len(tt.pktsIn))
-			err := handleGRO(tt.pktsIn, offset, newTCPGROTable(), newUDPGROTable(), tt.canUDPGRO, &toWrite)
+			err := handleGRO(tt.pktsIn, offset, newTCPGROTable(), newUDPGROTable(), tt.gro, &toWrite)
 			if err != nil {
 				if tt.wantErr {
 					return
@@ -552,99 +552,111 @@ func Test_packetIsGROCandidate(t *testing.T) {
 	udp6TooShort := udp6[:47]
 
 	tests := []struct {
-		name      string
-		b         []byte
-		canUDPGRO bool
-		want      groCandidateType
+		name string
+		b    []byte
+		gro  groDisablementFlags
+		want groCandidateType
 	}{
 		{
 			"tcp4",
 			tcp4,
-			true,
+			0,
 			tcp4GROCandidate,
+		},
+		{
+			"tcp4 no support",
+			tcp4,
+			tcpGRODisabled,
+			notGROCandidate,
 		},
 		{
 			"tcp6",
 			tcp6,
-			true,
+			0,
 			tcp6GROCandidate,
+		},
+		{
+			"tcp6 no support",
+			tcp6,
+			tcpGRODisabled,
+			notGROCandidate,
 		},
 		{
 			"udp4",
 			udp4,
-			true,
+			0,
 			udp4GROCandidate,
 		},
 		{
 			"udp4 no support",
 			udp4,
-			false,
+			udpGRODisabled,
 			notGROCandidate,
 		},
 		{
 			"udp6",
 			udp6,
-			true,
+			0,
 			udp6GROCandidate,
 		},
 		{
 			"udp6 no support",
 			udp6,
-			false,
+			udpGRODisabled,
 			notGROCandidate,
 		},
 		{
 			"udp4 too short",
 			udp4TooShort,
-			true,
+			0,
 			notGROCandidate,
 		},
 		{
 			"udp6 too short",
 			udp6TooShort,
-			true,
+			0,
 			notGROCandidate,
 		},
 		{
 			"tcp4 too short",
 			tcp4TooShort,
-			true,
+			0,
 			notGROCandidate,
 		},
 		{
 			"tcp6 too short",
 			tcp6TooShort,
-			true,
+			0,
 			notGROCandidate,
 		},
 		{
 			"invalid IP version",
 			[]byte{0x00},
-			true,
+			0,
 			notGROCandidate,
 		},
 		{
 			"invalid IP header len",
 			ip4InvalidHeaderLen,
-			true,
+			0,
 			notGROCandidate,
 		},
 		{
 			"ip4 invalid protocol",
 			ip4InvalidProtocol,
-			true,
+			0,
 			notGROCandidate,
 		},
 		{
 			"ip6 invalid protocol",
 			ip6InvalidProtocol,
-			true,
+			0,
 			notGROCandidate,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := packetIsGROCandidate(tt.b, tt.canUDPGRO); got != tt.want {
+			if got := packetIsGROCandidate(tt.b, tt.gro); got != tt.want {
 				t.Errorf("packetIsGROCandidate() = %v, want %v", got, tt.want)
 			}
 		})
