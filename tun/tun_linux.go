@@ -269,21 +269,15 @@ func (tun *NativeTun) setMTU(n int) error {
 
 	defer unix.Close(fd)
 
-	// do ioctl call
-	var ifr [ifReqSize]byte
-	copy(ifr[:], name)
-	*(*uint32)(unsafe.Pointer(&ifr[unix.IFNAMSIZ])) = uint32(n)
-	_, _, errno := unix.Syscall(
-		unix.SYS_IOCTL,
-		uintptr(fd),
-		uintptr(unix.SIOCSIFMTU),
-		uintptr(unsafe.Pointer(&ifr[0])),
-	)
-
-	if errno != 0 {
-		return fmt.Errorf("failed to set MTU of TUN device: %w", errno)
+	req, err := unix.NewIfreq(name)
+	if err != nil {
+		return fmt.Errorf("unix.NewIfreq(%q): %w", name, err)
 	}
-
+	req.SetUint32(uint32(n))
+	err = unix.IoctlIfreq(fd, unix.SIOCSIFMTU, req)
+	if err != nil {
+		return fmt.Errorf("failed to set MTU of TUN device %q: %w", name, err)
+	}
 	return nil
 }
 
