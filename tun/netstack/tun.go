@@ -156,7 +156,7 @@ func (t *netTun) Write(buf [][]byte, offset int) (int, error) {
 
 func (t *netTun) WriteNotify() {
 	pkt := t.ep.Read()
-	if pkt.IsNil() {
+	if pkt == nil {
 		return
 	}
 
