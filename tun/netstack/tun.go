@@ -43,6 +43,7 @@ type netTun struct {
 	ep             *channel.Endpoint
 	stack          *stack.Stack
 	events         chan tun.Event
+	notifyHandle   *channel.NotificationHandle
 	incomingPacket chan *buffer.View
 	mtu            int
 	dnsServers     []netip.Addr
@@ -70,7 +71,7 @@ func CreateNetTUN(localAddresses, dnsServers []netip.Addr, mtu int) (tun.Device,
 	if tcpipErr != nil {
 		return nil, nil, fmt.Errorf("could not enable TCP SACK: %v", tcpipErr)
 	}
-	dev.ep.AddNotify(dev)
+	dev.notifyHandle = dev.ep.AddNotify(dev)
 	tcpipErr = dev.stack.CreateNIC(1, dev.ep)
 	if tcpipErr != nil {
 		return nil, nil, fmt.Errorf("CreateNIC: %v", tcpipErr)
@@ -168,12 +169,13 @@ func (t *netTun) WriteNotify() {
 
 func (t *netTun) Close() error {
 	t.stack.RemoveNIC(1)
+	t.stack.Close()
+	t.ep.RemoveNotify(t.notifyHandle)
+	t.ep.Close()
 
 	if t.events != nil {
 		close(t.events)
 	}
-
-	t.ep.Close()
 
 	if t.incomingPacket != nil {
 		close(t.incomingPacket)
