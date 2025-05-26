@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"filippo.io/mlkem768"
 	"golang.org/x/crypto/blake2s"
 	"golang.org/x/crypto/chacha20poly1305"
 	"golang.org/x/crypto/poly1305"
@@ -61,8 +62,8 @@ const (
 )
 
 const (
-	MessageInitiationSize             = 148                                           // size of handshake initiation message
-	MessageResponseSize               = 92                                            // size of response message
+	MessageInitiationSize             = 1332                                          // size of handshake initiation message
+	MessageResponseSize               = 1180                                          // size of response message
 	MessageCookieReplySize            = 64                                            // size of cookie reply message
 	MessageTransportHeaderSize        = 16                                            // size of data preceding content in transport message
 	MessageEncapsulatingTransportSize = 8                                             // size of optional, free (for use by conn.Bind.Send()) space preceding the transport header
@@ -84,23 +85,25 @@ const (
  */
 
 type MessageInitiation struct {
-	Type      uint32
-	Sender    uint32
-	Ephemeral NoisePublicKey
-	Static    [NoisePublicKeySize + poly1305.TagSize]byte
-	Timestamp [tai64n.TimestampSize + poly1305.TagSize]byte
-	MAC1      [blake2s.Size128]byte
-	MAC2      [blake2s.Size128]byte
+	Type        uint32
+	Sender      uint32
+	Ephemeral   NoisePublicKey
+	EphemeralPQ [mlkem768.EncapsulationKeySize]byte
+	Static      [NoisePublicKeySize + poly1305.TagSize]byte
+	Timestamp   [tai64n.TimestampSize + poly1305.TagSize]byte
+	MAC1        [blake2s.Size128]byte
+	MAC2        [blake2s.Size128]byte
 }
 
 type MessageResponse struct {
-	Type      uint32
-	Sender    uint32
-	Receiver  uint32
-	Ephemeral NoisePublicKey
-	Empty     [poly1305.TagSize]byte
-	MAC1      [blake2s.Size128]byte
-	MAC2      [blake2s.Size128]byte
+	Type         uint32
+	Sender       uint32
+	Receiver     uint32
+	Ephemeral    NoisePublicKey
+	CiphertextPQ [mlkem768.CiphertextSize]byte
+	Empty        [poly1305.TagSize]byte
+	MAC1         [blake2s.Size128]byte
+	MAC2         [blake2s.Size128]byte
 }
 
 type MessageTransport struct {
@@ -212,14 +215,16 @@ func (msg *MessageCookieReply) marshal(b []byte) error {
 type Handshake struct {
 	state                     handshakeState
 	mutex                     sync.RWMutex
-	hash                      [blake2s.Size]byte       // hash value
-	chainKey                  [blake2s.Size]byte       // chain key
-	presharedKey              NoisePresharedKey        // psk
-	localEphemeral            NoisePrivateKey          // ephemeral secret key
-	localIndex                uint32                   // used to clear hash-table
-	remoteIndex               uint32                   // index for sending
-	remoteStatic              NoisePublicKey           // long term key, never changes, can be accessed without mutex
-	remoteEphemeral           NoisePublicKey           // ephemeral public key
+	hash                      [blake2s.Size]byte      // hash value
+	chainKey                  [blake2s.Size]byte      // chain key
+	presharedKey              NoisePresharedKey       // psk
+	localEphemeral            NoisePrivateKey         // ephemeral secret key
+	localEphemeralPQ          [mlkem768.SeedSize]byte // ephemeral secret PQC key
+	localIndex                uint32                  // used to clear hash-table
+	remoteIndex               uint32                  // index for sending
+	remoteStatic              NoisePublicKey          // long term key, never changes, can be accessed without mutex
+	remoteEphemeral           NoisePublicKey          // ephemeral public key
+	remoteEphemeralPQ         [mlkem768.EncapsulationKeySize]byte
 	precomputedStaticStatic   [NoisePublicKeySize]byte // precomputed shared secret
 	lastTimestamp             tai64n.Timestamp
 	lastInitiationConsumption time.Time
@@ -287,9 +292,16 @@ func (device *Device) CreateMessageInitiation(peer *Peer) (*MessageInitiation, e
 
 	handshake.mixHash(handshake.remoteStatic[:])
 
+	dk, err := mlkem768.GenerateKey()
+	if err != nil {
+		return nil, err
+	}
+	handshake.localEphemeralPQ = [64]byte(dk.Bytes())
+
 	msg := MessageInitiation{
-		Type:      MessageInitiationType,
-		Ephemeral: handshake.localEphemeral.publicKey(),
+		Type:        MessageInitiationType,
+		Ephemeral:   handshake.localEphemeral.publicKey(),
+		EphemeralPQ: [mlkem768.EncapsulationKeySize]byte(dk.EncapsulationKey()),
 	}
 
 	handshake.mixKey(msg.Ephemeral[:])
@@ -425,6 +437,8 @@ func (device *Device) ConsumeMessageInitiation(msg *MessageInitiation) *Peer {
 	handshake.chainKey = chainKey
 	handshake.remoteIndex = msg.Sender
 	handshake.remoteEphemeral = msg.Ephemeral
+	handshake.remoteEphemeralPQ = msg.EphemeralPQ
+
 	if timestamp.After(handshake.lastTimestamp) {
 		handshake.lastTimestamp = timestamp
 	}
@@ -485,6 +499,16 @@ func (device *Device) CreateMessageResponse(peer *Peer) (*MessageResponse, error
 		return nil, err
 	}
 	handshake.mixKey(ss[:])
+
+	// set preshared key
+
+	ciphertext, sspq, err := mlkem768.Encapsulate(handshake.remoteEphemeralPQ[:])
+	if err != nil {
+		return nil, err
+	}
+	msg.CiphertextPQ = [mlkem768.CiphertextSize]byte(ciphertext)
+
+	handshake.presharedKey = NoisePresharedKey(sspq)
 
 	// add preshared key
 
@@ -561,6 +585,21 @@ func (device *Device) ConsumeMessageResponse(msg *MessageResponse) *Peer {
 		}
 		mixKey(&chainKey, &chainKey, ss[:])
 		setZero(ss[:])
+
+		// set preshared key
+
+		dk, err := mlkem768.NewKeyFromSeed(handshake.localEphemeralPQ[:])
+		if err != nil {
+			return false
+		}
+		sspq, err := mlkem768.Decapsulate(dk, msg.CiphertextPQ[:])
+		if err != nil {
+			return false
+		}
+		handshake.presharedKey = NoisePresharedKey(sspq)
+
+		setZero(sspq[:])
+		setZero(handshake.localEphemeralPQ[:])
 
 		// add preshared key (psk)
 
