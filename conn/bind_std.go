@@ -231,7 +231,7 @@ func (s *StdNetBind) receiveIP(
 	conn *net.UDPConn,
 	rxOffload bool,
 	bufs [][]byte,
-	sizes []int,
+	sizes [][2]int,
 	eps []Endpoint,
 ) (n int, err error) {
 	msgs := s.getMessages()
@@ -268,8 +268,8 @@ func (s *StdNetBind) receiveIP(
 	}
 	for i := 0; i < numMsgs; i++ {
 		msg := &(*msgs)[i]
-		sizes[i] = msg.N
-		if sizes[i] == 0 {
+		sizes[i][0], sizes[i][1] = 0, msg.N
+		if sizes[i][1] == 0 {
 			continue
 		}
 		addrPort := msg.Addr.(*net.UDPAddr).AddrPort()
@@ -281,13 +281,13 @@ func (s *StdNetBind) receiveIP(
 }
 
 func (s *StdNetBind) makeReceiveIPv4(pc *ipv4.PacketConn, conn *net.UDPConn, rxOffload bool) ReceiveFunc {
-	return func(bufs [][]byte, sizes []int, eps []Endpoint) (n int, err error) {
+	return func(bufs [][]byte, sizes [][2]int, eps []Endpoint) (n int, err error) {
 		return s.receiveIP(pc, conn, rxOffload, bufs, sizes, eps)
 	}
 }
 
 func (s *StdNetBind) makeReceiveIPv6(pc *ipv6.PacketConn, conn *net.UDPConn, rxOffload bool) ReceiveFunc {
-	return func(bufs [][]byte, sizes []int, eps []Endpoint) (n int, err error) {
+	return func(bufs [][]byte, sizes [][2]int, eps []Endpoint) (n int, err error) {
 		return s.receiveIP(pc, conn, rxOffload, bufs, sizes, eps)
 	}
 }

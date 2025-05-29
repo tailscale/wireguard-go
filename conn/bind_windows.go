@@ -416,20 +416,20 @@ retry:
 	return n, &ep, nil
 }
 
-func (bind *WinRingBind) receiveIPv4(bufs [][]byte, sizes []int, eps []Endpoint) (int, error) {
+func (bind *WinRingBind) receiveIPv4(bufs [][]byte, sizes [][2]int, eps []Endpoint) (int, error) {
 	bind.mu.RLock()
 	defer bind.mu.RUnlock()
 	n, ep, err := bind.v4.Receive(bufs[0], &bind.isOpen)
-	sizes[0] = n
+	sizes[0][0], sizes[0][1] = 0, n
 	eps[0] = ep
 	return 1, err
 }
 
-func (bind *WinRingBind) receiveIPv6(bufs [][]byte, sizes []int, eps []Endpoint) (int, error) {
+func (bind *WinRingBind) receiveIPv6(bufs [][]byte, sizes [][2]int, eps []Endpoint) (int, error) {
 	bind.mu.RLock()
 	defer bind.mu.RUnlock()
 	n, ep, err := bind.v6.Receive(bufs[0], &bind.isOpen)
-	sizes[0] = n
+	sizes[0][0], sizes[0][1] = 0, n
 	eps[0] = ep
 	return 1, err
 }

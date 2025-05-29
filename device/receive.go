@@ -86,7 +86,7 @@ func (device *Device) RoutineReceiveIncoming(maxBatchSize int, recv conn.Receive
 		bufsArrs    = make([]*[MaxMessageSize]byte, maxBatchSize)
 		bufs        = make([][]byte, maxBatchSize)
 		err         error
-		sizes       = make([]int, maxBatchSize)
+		sizes       = make([][2]int, maxBatchSize)
 		count       int
 		endpoints   = make([]conn.Endpoint, maxBatchSize)
 		deathSpiral int
@@ -127,13 +127,16 @@ func (device *Device) RoutineReceiveIncoming(maxBatchSize int, recv conn.Receive
 
 		// handle each packet in the batch
 		for i, size := range sizes[:count] {
-			if size < MinMessageSize {
+			if size[1] < size[0] {
+				continue
+			}
+			if size[1]-size[0] < MinMessageSize {
 				continue
 			}
 
 			// check size of packet
 
-			packet := bufsArrs[i][:size]
+			packet := bufsArrs[i][size[0]:size[1]]
 			msgType := binary.LittleEndian.Uint32(packet[:4])
 
 			switch msgType {

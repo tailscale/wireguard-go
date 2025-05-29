@@ -17,7 +17,7 @@ func TestStdNetBindReceiveFuncAfterClose(t *testing.T) {
 	bind.Close()
 	bufs := make([][]byte, 1)
 	bufs[0] = make([]byte, 1)
-	sizes := make([]int, 1)
+	sizes := make([][2]int, 1)
 	eps := make([]Endpoint, 1)
 	for _, fn := range fns {
 		// The ReceiveFuncs must not access conn-related fields on StdNetBind

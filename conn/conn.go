@@ -21,11 +21,13 @@ const (
 
 // A ReceiveFunc receives at least one packet from the network and writes them
 // into packets. On a successful read it returns the number of elements of
-// sizes, packets, and endpoints that should be evaluated. Some elements of
-// sizes may be zero, and callers should ignore them. Callers must pass a sizes
-// and eps slice with a length greater than or equal to the length of packets.
-// These lengths must not exceed the length of the associated Bind.BatchSize().
-type ReceiveFunc func(packets [][]byte, sizes []int, eps []Endpoint) (n int, err error)
+// sizes, packets, and endpoints that should be evaluated. A sizes element
+// includes both the starting and ending offset for an element of packets. Some
+// elements of sizes may be zero, and callers should ignore them. Callers must
+// pass a sizes and eps slice with a length greater than or equal to the length
+// of packets. These lengths must not exceed the length of the associated
+// Bind.BatchSize().
+type ReceiveFunc func(packets [][]byte, sizes [][2]int, eps []Endpoint) (n int, err error)
 
 // A Bind listens on a port for both IPv6 and IPv4 UDP traffic.
 //
