@@ -45,9 +45,11 @@ type Bind interface {
 	// This mark is passed to the kernel as the socket option SO_MARK.
 	SetMark(mark uint32) error
 
-	// Send writes one or more packets in bufs to address ep. The length of
-	// bufs must not exceed BatchSize().
-	Send(bufs [][]byte, ep Endpoint) error
+	// Send writes one or more packets in bufs to address ep. A nonzero offset
+	// can be used to instruct the Bind on where packet data begins in each
+	// element of the bufs slice. Space preceding offset is free to use for
+	// additional encapsulation. The length of bufs must not exceed BatchSize().
+	Send(bufs [][]byte, ep Endpoint, offset int) error
 
 	// ParseEndpoint creates a new endpoint from a string.
 	ParseEndpoint(s string) (Endpoint, error)

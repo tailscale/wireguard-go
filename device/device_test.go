@@ -426,11 +426,11 @@ type fakeBindSized struct {
 func (b *fakeBindSized) Open(port uint16) (fns []conn.ReceiveFunc, actualPort uint16, err error) {
 	return nil, 0, nil
 }
-func (b *fakeBindSized) Close() error                                  { return nil }
-func (b *fakeBindSized) SetMark(mark uint32) error                     { return nil }
-func (b *fakeBindSized) Send(bufs [][]byte, ep conn.Endpoint) error    { return nil }
-func (b *fakeBindSized) ParseEndpoint(s string) (conn.Endpoint, error) { return nil, nil }
-func (b *fakeBindSized) BatchSize() int                                { return b.size }
+func (b *fakeBindSized) Close() error                                           { return nil }
+func (b *fakeBindSized) SetMark(mark uint32) error                              { return nil }
+func (b *fakeBindSized) Send(bufs [][]byte, ep conn.Endpoint, offset int) error { return nil }
+func (b *fakeBindSized) ParseEndpoint(s string) (conn.Endpoint, error)          { return nil, nil }
+func (b *fakeBindSized) BatchSize() int                                         { return b.size }
 
 type fakeTUNDeviceSized struct {
 	size int

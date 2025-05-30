@@ -98,7 +98,7 @@ func Test_coalesceMessages(t *testing.T) {
 				msgs[i].Buffers = make([][]byte, 1)
 				msgs[i].OOB = make([]byte, 0, 2)
 			}
-			got := coalesceMessages(addr, &StdNetEndpoint{AddrPort: addr.AddrPort()}, tt.buffs, msgs, mockSetGSOSize)
+			got := coalesceMessages(addr, &StdNetEndpoint{AddrPort: addr.AddrPort()}, tt.buffs, 0, msgs, mockSetGSOSize)
 			if got != len(tt.wantLens) {
 				t.Fatalf("got len %d want: %d", got, len(tt.wantLens))
 			}
