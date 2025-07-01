@@ -282,13 +282,14 @@ func (peer *Peer) Stop() {
 func (peer *Peer) SetEndpointFromPacket(endpoint conn.Endpoint) {
 	peer.endpoint.Lock()
 	defer peer.endpoint.Unlock()
+	if ep, ok := endpoint.(conn.PeerAwareEndpoint); ok {
+		ep.FromPeer(peer.handshake.remoteStatic)
+		return
+	}
 	if peer.endpoint.disableRoaming {
 		return
 	}
 	peer.endpoint.clearSrcOnTx = false
-	if ep, ok := endpoint.(conn.PeerAwareEndpoint); ok {
-		endpoint = ep.GetPeerEndpoint(peer.handshake.remoteStatic)
-	}
 	peer.endpoint.val = endpoint
 }
 

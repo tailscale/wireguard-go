@@ -87,17 +87,21 @@ type Endpoint interface {
 }
 
 // PeerAwareEndpoint is an optional Endpoint specialization for
-// integrations that want to know about the outcome of cryptorouting
+// integrations that want to know about the outcome of Cryptokey Routing
 // identification.
 //
 // If they receive a packet from a source they had not pre-identified,
 // to learn the identification WireGuard can derive from the session
 // or handshake.
 //
-// If GetPeerEndpoint returns nil, WireGuard will be unable to respond
-// to the peer until a new endpoint is written by a later packet.
+// wireguard-go never installs a [PeerAwareEndpoint] as the [Endpoint] for a
+// [Peer].
 type PeerAwareEndpoint interface {
-	GetPeerEndpoint(peerPublicKey [32]byte) Endpoint
+	// FromPeer is called at least once per successfully Cryptokey Routing ID'd
+	// [ReceiveFunc] packets batch for a given node key. wireguard-go will
+	// always call it for the latest/tail packet in the batch, only ever
+	// suppressing calls for older packets.
+	FromPeer(peerPublicKey [32]byte)
 }
 
 var (
