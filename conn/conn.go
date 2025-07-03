@@ -86,6 +86,11 @@ type Endpoint interface {
 	SrcIP() netip.Addr
 }
 
+type PeerVerifyEndpoint interface {
+	PeerAwareEndpoint
+	MaybePeer() (peerPublicKey [32]byte)
+}
+
 // PeerAwareEndpoint is an optional Endpoint specialization for
 // integrations that want to know about the outcome of Cryptokey Routing
 // identification.

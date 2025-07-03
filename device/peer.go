@@ -283,6 +283,11 @@ func (peer *Peer) SetEndpointFromPacket(endpoint conn.Endpoint) {
 	peer.endpoint.Lock()
 	defer peer.endpoint.Unlock()
 	if ep, ok := endpoint.(conn.PeerAwareEndpoint); ok {
+		if vep, ok := endpoint.(conn.PeerVerifyEndpoint); ok {
+			if vep.MaybePeer() == peer.handshake.remoteStatic {
+				return
+			}
+		}
 		ep.FromPeer(peer.handshake.remoteStatic)
 		return
 	}
