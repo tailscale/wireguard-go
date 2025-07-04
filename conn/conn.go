@@ -86,6 +86,21 @@ type Endpoint interface {
 	SrcIP() netip.Addr
 }
 
+// InitiationAwareEndpoint is an optional [Endpoint] specialization for
+// integrations that want to know when a WireGuard handshake initiation
+// message has been received, enabling just-in-time peer configuration before
+// attempted decryption.
+//
+// It's most useful when used in combination with [PeerAwareEndpoint], enabling
+// JIT peer configuration and post-decryption peer verification from a single
+// implementer.
+type InitiationAwareEndpoint interface {
+	// InitiationMessagePublicKey is called when a handshake initiation message
+	// has been received, and the sender's public key has been identified, but
+	// BEFORE an attempt has been made to verify it.
+	InitiationMessagePublicKey(peerPublicKey [32]byte)
+}
+
 // PeerAwareEndpoint is an optional Endpoint specialization for
 // integrations that want to know about the outcome of Cryptokey Routing
 // identification.

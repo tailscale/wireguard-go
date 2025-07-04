@@ -8,6 +8,7 @@ package device
 import (
 	"bytes"
 	"encoding/binary"
+	"net/netip"
 	"testing"
 
 	"github.com/tailscale/wireguard-go/conn"
@@ -56,6 +57,26 @@ func assertEqual(t *testing.T, a, b []byte) {
 	}
 }
 
+type initAwareEP struct {
+	calledWith *[32]byte
+}
+
+var _ conn.Endpoint = (*initAwareEP)(nil)
+var _ conn.InitiationAwareEndpoint = (*initAwareEP)(nil)
+
+func (i *initAwareEP) ClearSrc()           {}
+func (i *initAwareEP) SrcToString() string { return "" }
+func (i *initAwareEP) DstToString() string { return "" }
+func (i *initAwareEP) DstToBytes() []byte  { return nil }
+func (i *initAwareEP) DstIP() netip.Addr   { return netip.Addr{} }
+func (i *initAwareEP) SrcIP() netip.Addr   { return netip.Addr{} }
+
+func (i *initAwareEP) InitiationMessagePublicKey(peerPublicKey [32]byte) {
+	calledWith := [32]byte{}
+	copy(calledWith[:], peerPublicKey[:])
+	i.calledWith = &calledWith
+}
+
 func TestNoiseHandshake(t *testing.T) {
 	dev1 := randDevice(t)
 	dev2 := randDevice(t)
@@ -93,9 +114,16 @@ func TestNoiseHandshake(t *testing.T) {
 	writer := bytes.NewBuffer(packet)
 	err = binary.Write(writer, binary.LittleEndian, msg1)
 	assertNil(t, err)
-	peer := dev2.ConsumeMessageInitiation(msg1)
+	initEP := &initAwareEP{}
+	peer := dev2.ConsumeMessageInitiation(msg1, initEP)
 	if peer == nil {
 		t.Fatal("handshake failed at initiation message")
+	}
+	if initEP.calledWith == nil {
+		t.Fatal("initAwareEP never called")
+	}
+	if *initEP.calledWith != dev1.staticIdentity.publicKey {
+		t.Fatal("initAwareEP called with unexpected public key")
 	}
 
 	assertEqual(
