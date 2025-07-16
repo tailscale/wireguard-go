@@ -109,8 +109,9 @@ type InitiationAwareEndpoint interface {
 // to learn the identification WireGuard can derive from the session
 // or handshake.
 //
-// wireguard-go never installs a [PeerAwareEndpoint] as the [Endpoint] for a
-// [Peer].
+// A [PeerAwareEndpoint] may be installed as the [conn.Endpoint] following
+// successful decryption unless endpoint roaming has been disabled for
+// the peer.
 type PeerAwareEndpoint interface {
 	// FromPeer is called at least once per successfully Cryptokey Routing ID'd
 	// [ReceiveFunc] packets batch for a given node key. wireguard-go will

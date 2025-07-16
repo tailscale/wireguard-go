@@ -460,6 +460,9 @@ func (peer *Peer) RoutineSequentialReceiver(maxBatchSize int) {
 				peer.timersHandshakeComplete()
 				peer.SendStagedPackets()
 			}
+			if ep, ok := elem.endpoint.(conn.PeerAwareEndpoint); ok {
+				ep.FromPeer(peer.handshake.remoteStatic)
+			}
 			rxBytesLen += uint64(len(elem.packet) + MinMessageSize)
 
 			if len(elem.packet) == 0 {
