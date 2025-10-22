@@ -7,14 +7,17 @@ package conn
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"net/netip"
 	"runtime"
 	"strconv"
 	"sync"
 	"syscall"
+	"time"
 
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
@@ -47,6 +50,19 @@ type StdNetBind struct {
 
 	blackhole4 bool
 	blackhole6 bool
+
+	tcpLis *net.TCPListener
+
+	closeOnce sync.Once
+	rxTCPCh   chan tcpRead
+
+	outboundConn *net.TCPConn
+}
+
+type tcpRead struct {
+	bufs       [][]byte
+	ep         Endpoint
+	doneCopyCh chan struct{}
 }
 
 func NewStdNetBind() Bind {
@@ -199,6 +215,17 @@ again:
 		return nil, 0, syscall.EAFNOSUPPORT
 	}
 
+	s.rxTCPCh = make(chan tcpRead)
+	s.closeOnce = sync.Once{}
+
+	log.Printf("trying to bind TCP listener on port %d", port)
+	s.tcpLis, err = net.ListenTCP("tcp4", &net.TCPAddr{Port: int(uport)})
+	if err != nil {
+		return nil, 0, err
+	}
+	go s.acceptTCP()
+	fns = append(fns, s.receiveTCP)
+
 	return fns, uint16(port), nil
 }
 
@@ -280,6 +307,150 @@ func (s *StdNetBind) receiveIP(
 	return numMsgs, nil
 }
 
+func (s *StdNetBind) readTCPFaster(conn *net.TCPConn) {
+	type readState int
+	const (
+		alignedRead         readState = iota // aligned on start of len field
+		partialFrameLenRead                  // we previously read one byte of the len field, we need at least one more byte
+		partialDataRead                      // we previously read both bytes of the len field, and potentially some data, but not all of it
+	)
+
+	const frameLenFieldSize = 2
+
+	var (
+		state          readState
+		readStartIndex int
+		dataLen        int
+		needDataBytes  int
+	)
+
+	readBuf := make([]byte, 1<<19) // 512KB
+
+	readEvent := tcpRead{
+		bufs: make([][]byte, 0, 128),
+		ep: &StdNetEndpoint{
+			AddrPort: conn.RemoteAddr().(*net.TCPAddr).AddrPort(),
+		},
+	}
+
+	iterPackets := func(endOfRead int, dataStart, dataEnd int) {
+		// we have at least one packet
+		readEvent.bufs = readEvent.bufs[:0]
+		readEvent.doneCopyCh = make(chan struct{})
+		for {
+			emit := func() {
+				s.rxTCPCh <- readEvent
+				<-readEvent.doneCopyCh
+			}
+
+			readEvent.bufs = append(readEvent.bufs, readBuf[dataStart:dataEnd])
+			if dataEnd == endOfRead {
+				// emit event
+				emit()
+				state = alignedRead
+				readStartIndex = 0
+				break
+			}
+
+			// remaining length of bytes to handle
+			rem := endOfRead - dataEnd
+
+			if rem < frameLenFieldSize {
+				state = partialFrameLenRead
+				emit()
+				readBuf[0] = readBuf[endOfRead-1]
+				readStartIndex = 1
+				break
+			}
+
+			dataLen = int(binary.BigEndian.Uint16(readBuf[dataEnd:]))
+			dataStart = dataEnd + frameLenFieldSize
+			dataEnd = dataStart + dataLen
+			if dataEnd > endOfRead || len(readEvent.bufs) == IdealBatchSize {
+				state = partialDataRead
+				emit()
+				n := copy(readBuf, readBuf[dataStart-frameLenFieldSize:endOfRead])
+				dataBytesRead := n - frameLenFieldSize
+				readStartIndex = n
+				needDataBytes = dataLen - dataBytesRead
+				break
+			}
+		}
+	}
+
+	// pktLen | pkt | pktLen | pkt
+	// For every read() we want to emit whatever full packets are contained on
+	// s.rxTCPCh. If a read() contains less than one full packet we need to
+	// read again. MSG_WAITALL might be worth considering here.
+	for {
+		bytesRead, err := conn.Read(readBuf[readStartIndex:])
+		if err != nil {
+			return
+		}
+
+		switch state {
+		case alignedRead:
+			// do we have at least 2 bytes for frame len?
+			if bytesRead == 1 {
+				state = partialFrameLenRead
+				readStartIndex += bytesRead
+				continue
+			}
+			dataLen = int(binary.BigEndian.Uint16(readBuf[readStartIndex : readStartIndex+2]))
+			dataBytesRead := bytesRead - frameLenFieldSize
+			if dataBytesRead < dataLen {
+				// we don't have enough bytes for 1 packet
+				state = partialDataRead
+				readStartIndex += bytesRead
+				needDataBytes = dataLen - dataBytesRead
+				continue
+			}
+
+			// we have at least one packet
+			readEvent.bufs = readEvent.bufs[:0]
+			dataStart := readStartIndex + frameLenFieldSize
+			dataEnd := dataStart + dataLen
+			iterPackets(readStartIndex+bytesRead, dataStart, dataEnd)
+		case partialFrameLenRead:
+			dataLen = int(binary.BigEndian.Uint16(readBuf[readStartIndex-1:]))
+		case partialDataRead:
+			if bytesRead < needDataBytes {
+				needDataBytes -= bytesRead
+				readStartIndex += bytesRead
+				continue
+			}
+			dataStart := frameLenFieldSize
+			dataEnd := dataStart + dataLen
+			iterPackets(readStartIndex+bytesRead, dataStart, dataEnd)
+		}
+	}
+}
+
+func (s *StdNetBind) acceptTCP() {
+	for {
+		conn, err := s.tcpLis.Accept()
+		if err != nil {
+			return
+		}
+		log.Printf("accepting TCP connection from %s", conn.RemoteAddr())
+		go s.readTCPFaster(conn.(*net.TCPConn))
+	}
+}
+
+func (s *StdNetBind) receiveTCP(bufs [][]byte, sizes []int, eps []Endpoint) (n int, err error) {
+	r, ok := <-s.rxTCPCh
+	if !ok {
+		return 0, net.ErrClosed
+	}
+	for i, buf := range r.bufs {
+		copy(bufs[i], buf)
+		eps[i] = r.ep
+		sizes[i] = len(buf)
+	}
+	close(r.doneCopyCh)
+	return len(r.bufs), nil
+}
+
 func (s *StdNetBind) makeReceiveIPv4(pc *ipv4.PacketConn, conn *net.UDPConn, rxOffload bool) ReceiveFunc {
 	return func(bufs [][]byte, sizes []int, eps []Endpoint) (n int, err error) {
 		return s.receiveIP(pc, conn, rxOffload, bufs, sizes, eps)
@@ -316,6 +487,14 @@ func (s *StdNetBind) Close() error {
 		s.ipv6 = nil
 		s.ipv6PC = nil
 	}
+	if s.tcpLis != nil {
+		s.tcpLis.Close()
+	}
+	if s.rxTCPCh != nil {
+		s.closeOnce.Do(func() {
+			close(s.rxTCPCh)
+		})
+	}
 	s.blackhole4 = false
 	s.blackhole6 = false
 	s.ipv4TxOffload = false
@@ -341,7 +520,33 @@ func (e ErrUDPGSODisabled) Unwrap() error {
 	return e.RetryErr
 }
 
+func (s *StdNetBind) sendTCP(bufs [][]byte, endpoint Endpoint, offset int) error {
+	// TODO: racey w/o lock, but testing with single peer
+	if s.outboundConn == nil {
+		dialer := &net.Dialer{
+			Timeout: 1 * time.Second,
+		}
+		conn, err := dialer.Dial("tcp4", endpoint.DstToString())
+		if err != nil {
+			return err
+		}
+		s.outboundConn = conn.(*net.TCPConn)
+	}
+
+	for _, buf := range bufs {
+		dataLen := uint16(len(buf[offset:]))
+		binary.BigEndian.PutUint16(buf[offset-2:], dataLen)
+		_, err := s.outboundConn.Write(buf[offset-2:])
+		if err != nil {
+			s.outboundConn.Close()
+			s.outboundConn = nil
+		}
+	}
+	return nil
+}
+
 func (s *StdNetBind) Send(bufs [][]byte, endpoint Endpoint, offset int) error {
+	return s.sendTCP(bufs, endpoint, offset)
 	s.mu.Lock()
 	blackhole := s.blackhole4
 	conn := s.ipv4
