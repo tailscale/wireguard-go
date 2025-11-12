@@ -126,6 +126,14 @@ func expiredNewHandshake(peer *Peer) {
 func expiredZeroKeyMaterial(peer *Peer) {
 	peer.device.log.Verbosef("%s - Removing all keys, since we haven't received a new one in %d seconds", peer, int((RejectAfterTime * 3).Seconds()))
 	peer.ZeroAndFlushAll()
+	if peer.deleteOnIdle {
+		peer.device.log.Verbosef("%s - Removing idle lazy peer", peer)
+		// Remove the peer from the device in a new goroutine as we're currently
+		// holding timer locks which RemovePeer also needs. This is TOCTOU, but
+		// acceptable since the worst case is we remove the peer and the lazy
+		// peerfunc created it again after. We might lose some packets.
+		go peer.device.RemovePeer(peer.handshake.remoteStatic)
+	}
 }
 
 func expiredPersistentKeepalive(peer *Peer) {
