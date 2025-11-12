@@ -223,10 +223,25 @@ func (table *AllowedIPs) EntriesForPeer(peer *Peer, cb func(prefix netip.Prefix)
 	}
 }
 
-func (table *AllowedIPs) RemoveByPeer(peer *Peer) {
+// setPeerPrefixes atomically removes all of peer's existing prefixes and adds
+// the provided ones.
+func (table *AllowedIPs) setPeerPrefixes(peer *Peer, prefixes []netip.Prefix) {
 	table.mu.Lock()
 	defer table.mu.Unlock()
 
+	table.removeByPeerLocked(peer)
+	for _, prefix := range prefixes {
+		table.insertLocked(prefix, peer)
+	}
+}
+
+func (table *AllowedIPs) RemoveByPeer(peer *Peer) {
+	table.mu.Lock()
+	defer table.mu.Unlock()
+	table.removeByPeerLocked(peer)
+}
+
+func (table *AllowedIPs) removeByPeerLocked(peer *Peer) {
 	var next *list.Element
 	for elem := peer.trieEntries.Front(); elem != nil; elem = next {
 		next = elem.Next()
@@ -268,7 +283,10 @@ func (table *AllowedIPs) RemoveByPeer(peer *Peer) {
 func (table *AllowedIPs) Insert(prefix netip.Prefix, peer *Peer) {
 	table.mu.Lock()
 	defer table.mu.Unlock()
+	table.insertLocked(prefix, peer)
+}
 
+func (table *AllowedIPs) insertLocked(prefix netip.Prefix, peer *Peer) {
 	if prefix.Addr().Is6() {
 		ip := prefix.Addr().As16()
 		parentIndirection{&table.ipv6, 2}.insert(ip[:], uint8(prefix.Bits()), peer)
