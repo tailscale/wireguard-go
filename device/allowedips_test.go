@@ -166,7 +166,7 @@ func TestTrieIPv4(t *testing.T) {
 	allowedIPs.RemoveByPeer(e)
 	allowedIPs.RemoveByPeer(g)
 	allowedIPs.RemoveByPeer(h)
-	if allowedIPs.IPv4 != nil || allowedIPs.IPv6 != nil {
+	if allowedIPs.ipv4 != nil || allowedIPs.ipv6 != nil {
 		t.Error("Expected removing all the peers to empty trie, but it did not")
 	}
 

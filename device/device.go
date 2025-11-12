@@ -6,6 +6,8 @@
 package device
 
 import (
+	"errors"
+	"net/netip"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -56,6 +58,7 @@ type Device struct {
 	peers struct {
 		sync.RWMutex // protects keyMap
 		keyMap       map[NoisePublicKey]*Peer
+		lookupFunc   PeerLookupFunc // or nil if unused
 	}
 
 	rate struct {
@@ -89,6 +92,10 @@ type Device struct {
 	ipcMutex sync.RWMutex
 	closed   chan struct{}
 	log      *Logger
+}
+
+func (device *Device) AllowedIPs() *AllowedIPs {
+	return &device.allowedips
 }
 
 // deviceState represents the state of a Device.
@@ -340,10 +347,34 @@ func (device *Device) BatchSize() int {
 
 func (device *Device) LookupPeer(pk NoisePublicKey) *Peer {
 	device.peers.RLock()
-	defer device.peers.RUnlock()
+	p, ok := device.peers.keyMap[pk]
+	lookupFunc := device.peers.lookupFunc
+	device.peers.RUnlock()
+	if ok || lookupFunc == nil {
+		return p
+	}
 
-	return device.peers.keyMap[pk]
+	allowedIPs := lookupFunc(pk)
+	if allowedIPs == nil {
+		return nil
+	}
+
+	p, err := device.NewPeer(pk)
+	if err != nil {
+		if errors.Is(err, errAddExistingPeer) {
+			device.peers.RLock()
+			defer device.peers.RUnlock()
+			return device.peers.keyMap[pk]
+		}
+		device.log.Errorf("Failed to create peer: %v", err)
+		return nil
+	}
+	p.SetAllowedIPs(allowedIPs)
+	p.Start()
+	return p
 }
+
+var errAddExistingPeer = errors.New("adding existing peer")
 
 func (device *Device) RemovePeer(key NoisePublicKey) {
 	device.peers.Lock()
@@ -365,6 +396,39 @@ func (device *Device) RemoveAllPeers() {
 	}
 
 	device.peers.keyMap = make(map[NoisePublicKey]*Peer)
+}
+
+// RemoveMatchingPeers removes all peers for which shouldRemove returns true.
+//
+// It returns the number of peers removed.
+func (device *Device) RemoveMatchingPeers(shouldRemove func(NoisePublicKey) bool) (numRemoved int) {
+	device.peers.Lock()
+	defer device.peers.Unlock()
+
+	for key, peer := range device.peers.keyMap {
+		if shouldRemove(key) {
+			removePeerLocked(device, peer, key)
+			numRemoved++
+		}
+	}
+	return numRemoved
+}
+
+// PeerLookupFunc is the type of function used to look up peers by public key
+// when receiving packets for unknown peers.
+//
+// If it returns nil, the peer is not known.
+//
+// Otherwise, returning non-nil signals that wireguard-go should create the peer
+// with the provided allowed IPs.
+type PeerLookupFunc func(NoisePublicKey) []netip.Prefix
+
+// SetPeerLookupFunc sets the function used to look up peers by public key
+// when receiving packets for unknown peers.
+func (device *Device) SetPeerLookupFunc(f PeerLookupFunc) {
+	device.peers.Lock()
+	defer device.peers.Unlock()
+	device.peers.lookupFunc = f
 }
 
 func (device *Device) Close() {

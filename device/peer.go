@@ -8,6 +8,8 @@ package device
 import (
 	"container/list"
 	"errors"
+	"net/netip"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -44,7 +46,9 @@ type Peer struct {
 	}
 
 	state struct {
-		sync.Mutex // protects against concurrent Start/Stop
+		sync.Mutex // protects against concurrent Start/Stop, and fields below
+
+		allowedIPs []netip.Prefix
 	}
 
 	queue struct {
@@ -87,7 +91,7 @@ func (device *Device) NewPeer(pk NoisePublicKey) (*Peer, error) {
 	// map public key
 	_, ok := device.peers.keyMap[pk]
 	if ok {
-		return nil, errors.New("adding existing peer")
+		return nil, errAddExistingPeer
 	}
 
 	// pre-compute DH
@@ -111,6 +115,18 @@ func (device *Device) NewPeer(pk NoisePublicKey) (*Peer, error) {
 	device.peers.keyMap[pk] = peer
 
 	return peer, nil
+}
+
+// SetAllowedIPs sets the allowed IP prefixes for this peer.
+func (p *Peer) SetAllowedIPs(allowedIPs []netip.Prefix) {
+	p.state.Lock()
+	defer p.state.Unlock()
+
+	if slices.Equal(p.state.allowedIPs, allowedIPs) {
+		return
+	}
+	p.device.allowedips.SetPeerPrefixes(p, allowedIPs)
+	p.state.allowedIPs = slices.Clone(allowedIPs)
 }
 
 // SendBuffers sends buffers to peer. WireGuard packet data in each element of

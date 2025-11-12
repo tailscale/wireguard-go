@@ -205,14 +205,14 @@ func (node *trieEntry) lookup(ip []byte) *Peer {
 }
 
 type AllowedIPs struct {
-	IPv4  *trieEntry
-	IPv6  *trieEntry
-	mutex sync.RWMutex
+	mu   sync.RWMutex
+	ipv4 *trieEntry
+	ipv6 *trieEntry
 }
 
 func (table *AllowedIPs) EntriesForPeer(peer *Peer, cb func(prefix netip.Prefix) bool) {
-	table.mutex.RLock()
-	defer table.mutex.RUnlock()
+	table.mu.RLock()
+	defer table.mu.RUnlock()
 
 	for elem := peer.trieEntries.Front(); elem != nil; elem = elem.Next() {
 		node := elem.Value.(*trieEntry)
@@ -223,10 +223,23 @@ func (table *AllowedIPs) EntriesForPeer(peer *Peer, cb func(prefix netip.Prefix)
 	}
 }
 
-func (table *AllowedIPs) RemoveByPeer(peer *Peer) {
-	table.mutex.Lock()
-	defer table.mutex.Unlock()
+func (table *AllowedIPs) SetPeerPrefixes(peer *Peer, prefixes []netip.Prefix) {
+	table.mu.Lock()
+	defer table.mu.Unlock()
 
+	table.removeByPeerLocked(peer)
+	for _, prefix := range prefixes {
+		table.insertLocked(prefix, peer)
+	}
+}
+
+func (table *AllowedIPs) RemoveByPeer(peer *Peer) {
+	table.mu.Lock()
+	defer table.mu.Unlock()
+	table.removeByPeerLocked(peer)
+}
+
+func (table *AllowedIPs) removeByPeerLocked(peer *Peer) {
 	var next *list.Element
 	for elem := peer.trieEntries.Front(); elem != nil; elem = next {
 		next = elem.Next()
@@ -266,28 +279,31 @@ func (table *AllowedIPs) RemoveByPeer(peer *Peer) {
 }
 
 func (table *AllowedIPs) Insert(prefix netip.Prefix, peer *Peer) {
-	table.mutex.Lock()
-	defer table.mutex.Unlock()
+	table.mu.Lock()
+	defer table.mu.Unlock()
+	table.insertLocked(prefix, peer)
+}
 
+func (table *AllowedIPs) insertLocked(prefix netip.Prefix, peer *Peer) {
 	if prefix.Addr().Is6() {
 		ip := prefix.Addr().As16()
-		parentIndirection{&table.IPv6, 2}.insert(ip[:], uint8(prefix.Bits()), peer)
+		parentIndirection{&table.ipv6, 2}.insert(ip[:], uint8(prefix.Bits()), peer)
 	} else if prefix.Addr().Is4() {
 		ip := prefix.Addr().As4()
-		parentIndirection{&table.IPv4, 2}.insert(ip[:], uint8(prefix.Bits()), peer)
+		parentIndirection{&table.ipv4, 2}.insert(ip[:], uint8(prefix.Bits()), peer)
 	} else {
 		panic(errors.New("inserting unknown address type"))
 	}
 }
 
 func (table *AllowedIPs) Lookup(ip []byte) *Peer {
-	table.mutex.RLock()
-	defer table.mutex.RUnlock()
+	table.mu.RLock()
+	defer table.mu.RUnlock()
 	switch len(ip) {
 	case net.IPv6len:
-		return table.IPv6.lookup(ip)
+		return table.ipv6.lookup(ip)
 	case net.IPv4len:
-		return table.IPv4.lookup(ip)
+		return table.ipv4.lookup(ip)
 	default:
 		panic(errors.New("looking up unknown address type"))
 	}
