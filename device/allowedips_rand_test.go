@@ -135,7 +135,7 @@ func TestTrieRandom(t *testing.T) {
 		allowedIPs.RemoveByPeer(peers[p])
 	}
 
-	if allowedIPs.IPv4 != nil || allowedIPs.IPv6 != nil {
+	if allowedIPs.ipv4 != nil || allowedIPs.ipv6 != nil {
 		t.Error("Failed to remove all nodes from trie by peer")
 	}
 }
