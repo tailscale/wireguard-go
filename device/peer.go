@@ -55,6 +55,11 @@ type Peer struct {
 		sync.Mutex // protects against concurrent Start/Stop, and fields below
 
 		allowedIPs []netip.Prefix
+
+		// testAllowedIP, if non-nil, is used to test whether the peer is
+		// allowed to send a packet from the given IP address. It can be read
+		// without locking, but must be set with the state mutex locked.
+		testAllowedIP atomic.Pointer[func(netip.Addr) bool]
 	}
 
 	queue struct {
@@ -136,7 +141,12 @@ func (p *Peer) SetAllowedIPs(allowedIPs []netip.Prefix) {
 		return
 	}
 	p.device.allowedips.setPeerPrefixes(p, allowedIPs)
-	p.state.allowedIPs = slices.Clone(allowedIPs) // avoid retaining caller's slice
+
+	allowedIPs = slices.Clone(allowedIPs) // avoid retaining caller's slice
+	p.state.allowedIPs = allowedIPs
+
+	f := mkIPInCIDRsTestFunc(allowedIPs)
+	p.state.testAllowedIP.Store(&f)
 }
 
 // SendBuffers sends buffers to peer. WireGuard packet data in each element of

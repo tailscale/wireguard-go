@@ -361,8 +361,8 @@ func (device *Device) LookupPeer(pk NoisePublicKey) *Peer {
 		return p
 	}
 
-	allowedIPs := lookupFunc(pk)
-	if allowedIPs == nil {
+	conf, ok := lookupFunc(pk)
+	if !ok || conf == nil {
 		return nil
 	}
 
@@ -376,8 +376,11 @@ func (device *Device) LookupPeer(pk NoisePublicKey) *Peer {
 		device.log.Errorf("Failed to create peer: %v", err)
 		return nil
 	}
-	p.SetAllowedIPs(allowedIPs)
+	p.SetAllowedIPs(conf.AllowedIPs)
 	p.deleteOnIdle = true
+	if conf.Endpoint != nil {
+		p.SetEndpointFromPacket(conf.Endpoint)
+	}
 	p.Start()
 	return p
 }
@@ -436,6 +439,17 @@ func (device *Device) RemoveMatchingPeers(shouldRemove func(NoisePublicKey) bool
 	return numRemoved
 }
 
+// NewPeerConfig are the configuration parameters for a new peer created via a
+// [PeerLookupFunc] func.
+type NewPeerConfig struct {
+	// AllowedIPs is the initial set of allowed IPs for the new peer.
+	AllowedIPs []netip.Prefix
+
+	// Endpoint, if non-nil, sets the initial endpoint for newly
+	// created peers.
+	Endpoint conn.Endpoint
+}
+
 // PeerLookupFunc is the type of function used to look up peers by public key
 // when receiving packets for unknown peers.
 //
@@ -445,7 +459,21 @@ func (device *Device) RemoveMatchingPeers(shouldRemove func(NoisePublicKey) bool
 // with the provided allowed IPs.
 //
 // See [Device.SetPeerLookupFunc] and [Device.LookupPeer].
-type PeerLookupFunc func(NoisePublicKey) (allowedIPs []netip.Prefix)
+type PeerLookupFunc func(NoisePublicKey) (_ *NewPeerConfig, ok bool)
+
+// PeerByIPPacketFunc is the type of function used to look up a peer to send to
+// for a given src/dst IP pair. The ipPkt parameter is the raw IP packet being
+// routed; callers needing transport-layer ports or other header fields may parse
+// them from ipPkt, but must handle IP fragmentation (ports may be absent on
+// non-first fragments) and protocols that do not use ports (e.g. ICMP).
+//
+// Except for experimental use cases, dst is the only address
+// that should be relied upon when looking up a peer.
+//
+// If it returns ok=false, the peer is not known.
+//
+// See [Device.SetPeerByIPPacketFunc] and [Device.SetPeerLookupFunc].
+type PeerByIPPacketFunc func(src, dst netip.Addr, ipPkt []byte) (_ NoisePublicKey, ok bool)
 
 // SetPeerLookupFunc sets the function used to look up peers by public key
 // when receiving packets for unknown peers.
@@ -453,6 +481,15 @@ func (device *Device) SetPeerLookupFunc(f PeerLookupFunc) {
 	device.peers.Lock()
 	defer device.peers.Unlock()
 	device.peers.lookupFunc = f
+}
+
+// SetPeerByIPPacketFunc sets the function used to look up peers by IP address
+// when sending packets to unknown peers.
+func (device *Device) SetPeerByIPPacketFunc(f PeerByIPPacketFunc) {
+	device.allowedips.mu.Lock()
+	defer device.allowedips.mu.Unlock()
+	device.allowedips.peerByIPPacketFunc = f
+	device.allowedips.device = device
 }
 
 func (device *Device) Close() {

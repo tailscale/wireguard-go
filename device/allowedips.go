@@ -55,6 +55,25 @@ func commonBits(ip1, ip2 []byte) uint8 {
 	}
 }
 
+func commonBits4(ip1 []byte, ip2 [4]byte) uint8 {
+	a := binary.BigEndian.Uint32(ip1)
+	b := binary.BigEndian.Uint32(ip2[:])
+	return uint8(bits.LeadingZeros32(a ^ b))
+}
+
+func commonBits6(ip1 []byte, ip2 [16]byte) uint8 {
+	a := binary.BigEndian.Uint64(ip1)
+	b := binary.BigEndian.Uint64(ip2[:])
+	x := a ^ b
+	if x != 0 {
+		return uint8(bits.LeadingZeros64(x))
+	}
+	a = binary.BigEndian.Uint64(ip1[8:])
+	b = binary.BigEndian.Uint64(ip2[8:])
+	x = a ^ b
+	return 64 + uint8(bits.LeadingZeros64(x))
+}
+
 func (node *trieEntry) addToPeerEntries() {
 	node.perPeerElem = node.peer.trieEntries.PushBack(node)
 }
@@ -188,7 +207,37 @@ func (trie parentIndirection) insert(ip []byte, cidr uint8, peer *Peer) {
 	}
 }
 
-func (node *trieEntry) lookup(ip []byte) *Peer {
+func (node *trieEntry) lookup4(ip [4]byte) *Peer {
+	var found *Peer
+	for node != nil && commonBits4(node.bits, ip) >= node.cidr {
+		if node.peer != nil {
+			found = node.peer
+		}
+		if node.bitAtByte == 4 {
+			break
+		}
+		bit := (ip[node.bitAtByte] >> node.bitAtShift) & 1
+		node = node.child[bit]
+	}
+	return found
+}
+
+func (node *trieEntry) lookup6(ip [16]byte) *Peer {
+	var found *Peer
+	for node != nil && commonBits6(node.bits, ip) >= node.cidr {
+		if node.peer != nil {
+			found = node.peer
+		}
+		if node.bitAtByte == 16 {
+			break
+		}
+		bit := (ip[node.bitAtByte] >> node.bitAtShift) & 1
+		node = node.child[bit]
+	}
+	return found
+}
+
+func (node *trieEntry) lookup(ip net.IP) *Peer {
 	var found *Peer
 	size := uint8(len(ip))
 	for node != nil && commonBits(node.bits, ip) >= node.cidr {
@@ -208,6 +257,9 @@ type AllowedIPs struct {
 	mu   sync.RWMutex
 	ipv4 *trieEntry
 	ipv6 *trieEntry
+
+	peerByIPPacketFunc PeerByIPPacketFunc // if non-nil, called to look up peers by IP
+	device             *Device            // back-reference to parent device; non-nil only if peerByIPPacketFunc is set
 }
 
 func (table *AllowedIPs) EntriesForPeer(peer *Peer, cb func(prefix netip.Prefix) bool) {
@@ -298,9 +350,53 @@ func (table *AllowedIPs) insertLocked(prefix netip.Prefix, peer *Peer) {
 	}
 }
 
+// LookupFromPacket looks up the peer to which an outbound IP packet should be
+// sent. It lives on [AllowedIPs] for legacy/structural reasons: historically
+// WireGuard's only peer-selection mechanism was the AllowedIPs trie, and the
+// send path already had a reference to the table. When a [PeerByIPPacketFunc]
+// has been registered via [Device.SetPeerByIPPacketFunc], that callback is used
+// instead of the trie and the AllowedIPs table is not consulted at all.
+//
+// When no callback is registered, only dst is used (standard WireGuard
+// AllowedIPs trie lookup). When a callback is registered, all three
+// parameters are forwarded to it; see [PeerByIPPacketFunc] for details.
+func (table *AllowedIPs) LookupFromPacket(src, dst netip.Addr, ipPkt []byte) *Peer {
+	table.mu.RLock()
+	if f := table.peerByIPPacketFunc; f != nil {
+		device := table.device
+		table.mu.RUnlock()
+
+		if pubk, ok := f(src, dst, ipPkt); ok {
+			return device.LookupPeer(pubk)
+		}
+		return nil
+	}
+	defer table.mu.RUnlock()
+
+	switch {
+	case dst.Is6():
+		return table.ipv6.lookup6(dst.As16())
+	case dst.Is4():
+		return table.ipv4.lookup4(dst.As4())
+	default:
+		panic(errors.New("looking up unknown address type"))
+	}
+}
+
+// Deprecated: Lookup is only used by legacy tests. It does not call
+// [PeerByIPPacketFunc]; use [AllowedIPs.LookupFromPacket] for production lookups.
 func (table *AllowedIPs) Lookup(ip []byte) *Peer {
 	table.mu.RLock()
 	defer table.mu.RUnlock()
+	return table.lookupLocked(ip)
+}
+
+// lookupLocked looks up the peer associated with the given IP address.
+// It assumes the caller holds the read lock (or doesn't hold it, but also
+// doesn't concurrently mutate AllowedIP).
+//
+// It returns nil if no peer is associated with the given IP address.
+func (table *AllowedIPs) lookupLocked(ip []byte) *Peer {
 	switch len(ip) {
 	case net.IPv6len:
 		return table.ipv6.lookup(ip)
@@ -308,5 +404,64 @@ func (table *AllowedIPs) Lookup(ip []byte) *Peer {
 		return table.ipv4.lookup(ip)
 	default:
 		panic(errors.New("looking up unknown address type"))
+	}
+}
+
+// AllowedPeerSourceIP reports whether the given source IP address is allowed
+// for the given peer.
+func (peer *Peer) AllowedPeerSourceIP(src netip.Addr) bool {
+	if f := peer.state.testAllowedIP.Load(); f != nil {
+		return (*f)(src)
+	}
+
+	table := &peer.device.allowedips
+	table.mu.RLock()
+	defer table.mu.RUnlock()
+	switch {
+	case src.Is6():
+		return table.ipv6.lookup6(src.As16()) == peer
+	case src.Is4():
+		return table.ipv4.lookup4(src.As4()) == peer
+	}
+	return false
+}
+
+// fakePeer is a zero Peer used only as a placeholder in tries used by mkIPInCIDRsTestFunc.
+var fakePeer Peer
+
+// mkIPInCIDRsTestFunc returns a function that tests whether an IP address is
+// contained in any of the given CIDRs.
+func mkIPInCIDRsTestFunc(cidrs []netip.Prefix) func(netip.Addr) bool {
+	if len(cidrs) == 0 {
+		return func(netip.Addr) bool { return false }
+	}
+	if len(cidrs) == 1 {
+		return func(addr netip.Addr) bool { return cidrs[0].Contains(addr) }
+	}
+	if len(cidrs) <= 4 {
+		// For small numbers of CIDRs, just do a linear search. The trie construction
+		// is more expensive than the linear search, and the test function is faster
+		// than the trie lookup, so this is a net win.
+		return func(addr netip.Addr) bool {
+			for _, c := range cidrs {
+				if c.Contains(addr) {
+					return true
+				}
+			}
+			return false
+		}
+	}
+	// Make a trie for faster lookups. We use a dummy Peer.
+	var a AllowedIPs
+	for _, c := range cidrs {
+		a.Insert(c, &fakePeer)
+	}
+	return func(addr netip.Addr) bool {
+		switch {
+		case addr.Is4():
+			return a.ipv4.lookup4(addr.As4()) == &fakePeer
+		default:
+			return a.ipv6.lookup6(addr.As16()) == &fakePeer
+		}
 	}
 }

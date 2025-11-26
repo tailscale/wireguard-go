@@ -9,6 +9,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"net"
+	"net/netip"
 	"sync"
 	"time"
 
@@ -483,7 +484,8 @@ func (peer *Peer) RoutineSequentialReceiver(maxBatchSize int) {
 				}
 				elem.packet = elem.packet[:length]
 				src := elem.packet[IPv4offsetSrc : IPv4offsetSrc+net.IPv4len]
-				if device.allowedips.Lookup(src) != peer {
+				srcAddr, _ := netip.AddrFromSlice(src)
+				if !peer.AllowedPeerSourceIP(srcAddr) {
 					device.log.Verbosef("IPv4 packet with disallowed source address from %v", peer)
 					continue
 				}
@@ -500,7 +502,8 @@ func (peer *Peer) RoutineSequentialReceiver(maxBatchSize int) {
 				}
 				elem.packet = elem.packet[:length]
 				src := elem.packet[IPv6offsetSrc : IPv6offsetSrc+net.IPv6len]
-				if device.allowedips.Lookup(src) != peer {
+				srcAddr, _ := netip.AddrFromSlice(src)
+				if !peer.AllowedPeerSourceIP(srcAddr) {
 					device.log.Verbosef("IPv6 packet with disallowed source address from %v", peer)
 					continue
 				}
