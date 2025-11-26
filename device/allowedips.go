@@ -188,7 +188,7 @@ func (trie parentIndirection) insert(ip []byte, cidr uint8, peer *Peer) {
 	}
 }
 
-func (node *trieEntry) lookup(ip []byte) *Peer {
+func (node *trieEntry) lookup(ip net.IP) *Peer {
 	var found *Peer
 	size := uint8(len(ip))
 	for node != nil && commonBits(node.bits, ip) >= node.cidr {
@@ -208,6 +208,9 @@ type AllowedIPs struct {
 	mu   sync.RWMutex
 	ipv4 *trieEntry
 	ipv6 *trieEntry
+
+	peerByIPLookupFunc PeerByIPLookupFunc // if non-nil, called to look up peers by IP
+	device             *Device            // back-reference to parent device; non-nil only if peerByIPLookupFunc is set
 }
 
 func (table *AllowedIPs) EntriesForPeer(peer *Peer, cb func(prefix netip.Prefix) bool) {
@@ -300,6 +303,18 @@ func (table *AllowedIPs) insertLocked(prefix netip.Prefix, peer *Peer) {
 
 func (table *AllowedIPs) Lookup(ip []byte) *Peer {
 	table.mu.RLock()
+	if f := table.peerByIPLookupFunc; f != nil {
+		device := table.device
+		table.mu.RUnlock()
+
+		if addr, ok := netip.AddrFromSlice(ip); ok {
+			if pubk, ok := f(addr); ok {
+				return device.LookupPeer(pubk)
+			}
+		}
+		return nil
+	}
+
 	defer table.mu.RUnlock()
 	switch len(ip) {
 	case net.IPv6len:
@@ -308,5 +323,30 @@ func (table *AllowedIPs) Lookup(ip []byte) *Peer {
 		return table.ipv4.lookup(ip)
 	default:
 		panic(errors.New("looking up unknown address type"))
+	}
+}
+
+// AllowedPeerSourceIP reports whether the given source IP address is allowed
+// for the given peer.
+//
+// If a PeerByIPLookupFunc is set on the AllowedIPs table, then this always
+// returns true, as the caller is assumed to be handling all packet delivery
+// (e.g. through a NAT traversal mechanism).
+func (table *AllowedIPs) AllowedPeerSourceIP(peer *Peer, src net.IP) bool {
+	table.mu.RLock()
+	defer table.mu.RUnlock()
+	if f := table.peerByIPLookupFunc; f != nil {
+		// If a PeerByIPLookupFunc is set, we assume the caller is handling
+		// all packet delivery and don't enforce source IP checks here.
+		return true
+	}
+
+	switch len(src) {
+	case net.IPv6len:
+		return table.ipv6.lookup(src) == peer
+	case net.IPv4len:
+		return table.ipv4.lookup(src) == peer
+	default:
+		return false
 	}
 }
