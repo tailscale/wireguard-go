@@ -9,6 +9,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"net"
+	"net/netip"
 	"os"
 	"sync"
 	"time"
@@ -262,15 +263,17 @@ func (device *Device) RoutineReadFromTUN() {
 				if len(elem.packet) < ipv4.HeaderLen {
 					continue
 				}
-				dst := elem.packet[IPv4offsetDst : IPv4offsetDst+net.IPv4len]
-				peer = device.allowedips.Lookup(dst)
+				src := netip.AddrFrom4([4]byte(elem.packet[IPv4offsetSrc : IPv4offsetSrc+net.IPv4len]))
+				dst := netip.AddrFrom4([4]byte(elem.packet[IPv4offsetDst : IPv4offsetDst+net.IPv4len]))
+				peer = device.allowedips.LookupFromPacket(src, dst, elem.packet)
 
 			case 6:
 				if len(elem.packet) < ipv6.HeaderLen {
 					continue
 				}
-				dst := elem.packet[IPv6offsetDst : IPv6offsetDst+net.IPv6len]
-				peer = device.allowedips.Lookup(dst)
+				src := netip.AddrFrom16([16]byte(elem.packet[IPv6offsetSrc : IPv6offsetSrc+net.IPv6len]))
+				dst := netip.AddrFrom16([16]byte(elem.packet[IPv6offsetDst : IPv6offsetDst+net.IPv6len]))
+				peer = device.allowedips.LookupFromPacket(src, dst, elem.packet)
 
 			default:
 				device.log.Verbosef("Received packet with unknown IP version")
