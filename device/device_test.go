@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/tailscale/wireguard-go/buffer"
 	"github.com/tailscale/wireguard-go/conn"
 	"github.com/tailscale/wireguard-go/conn/bindtest"
 	"github.com/tailscale/wireguard-go/tun"
@@ -437,7 +438,7 @@ type fakeTUNDeviceSized struct {
 }
 
 func (t *fakeTUNDeviceSized) File() *os.File { return nil }
-func (t *fakeTUNDeviceSized) Read(bufs [][]byte, sizes []int, offset int) (n int, err error) {
+func (t *fakeTUNDeviceSized) Read(bufs []*buffer.Buffer, sizes []int, offset int) (n int, err error) {
 	return 0, nil
 }
 func (t *fakeTUNDeviceSized) Write(bufs [][]byte, offset int) (int, error) { return 0, nil }

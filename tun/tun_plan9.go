@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/tailscale/wireguard-go/buffer"
 )
 
 type NativeTun struct {
@@ -81,13 +83,17 @@ func (tun *NativeTun) Events() <-chan Event {
 	return tun.events
 }
 
-func (tun *NativeTun) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
+func (tun *NativeTun) Read(bufs []*buffer.Buffer, sizes []int, offset int) (int, error) {
 	select {
 	case err := <-tun.errors:
 		return 0, err
 	default:
-		n, err := tun.dataFile.Read(bufs[0][offset:])
-		if n == 1 && bufs[0][offset] == 0 {
+		if bufs[0] == nil {
+			bufs[0] = buffer.New(make([]byte, buffer.MaxMessageSize))
+		}
+		data := bufs[0].Data()
+		n, err := tun.dataFile.Read(data[offset:])
+		if n == 1 && data[offset] == 0 {
 			// EOF
 			err = io.EOF
 			n = 0

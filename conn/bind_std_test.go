@@ -1,10 +1,12 @@
 package conn
 
 import (
+	"bytes"
 	"encoding/binary"
 	"net"
 	"testing"
 
+	"github.com/tailscale/wireguard-go/buffer"
 	"golang.org/x/net/ipv6"
 )
 
@@ -15,10 +17,10 @@ func TestStdNetBindReceiveFuncAfterClose(t *testing.T) {
 		t.Fatal(err)
 	}
 	bind.Close()
-	bufs := make([][]byte, 1)
-	bufs[0] = make([]byte, 1)
-	sizes := make([]int, 1)
-	eps := make([]Endpoint, 1)
+	bufs := make([]*buffer.Buffer, IdealBatchSize)
+	bufs[0] = buffer.New(make([]byte, buffer.MaxMessageSize))
+	sizes := make([]int, IdealBatchSize)
+	eps := make([]Endpoint, IdealBatchSize)
 	for _, fn := range fns {
 		// The ReceiveFuncs must not access conn-related fields on StdNetBind
 		// unguarded. Close() nils the conn-related fields resulting in a panic
@@ -82,8 +84,8 @@ func Test_coalesceMessages(t *testing.T) {
 				make([]byte, 2, 2),
 				make([]byte, 2, 2),
 			},
-			wantLens: []int{4, 2},
-			wantGSO:  []int{2, 0},
+			wantLens: []int{6},
+			wantGSO:  []int{2},
 		},
 	}
 
@@ -106,9 +108,12 @@ func Test_coalesceMessages(t *testing.T) {
 				if msgs[i].Addr != addr {
 					t.Errorf("msgs[%d].Addr != passed addr", i)
 				}
-				gotLen := len(msgs[i].Buffers[0])
+				var gotLen int
+				for _, b := range msgs[i].Buffers {
+					gotLen += len(b)
+				}
 				if gotLen != tt.wantLens[i] {
-					t.Errorf("len(msgs[%d].Buffers[0]) %d != %d", i, gotLen, tt.wantLens[i])
+					t.Errorf("len(msgs[%d].Buffers) %d != %d", i, gotLen, tt.wantLens[i])
 				}
 				gotGSO, err := mockGetGSOSize(msgs[i].OOB)
 				if err != nil {
@@ -233,7 +238,11 @@ func Test_splitCoalescedMessages(t *testing.T) {
 
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := splitCoalescedMessages(tt.msgs, 2, mockGetGSOSize)
+			bufs := make([]*buffer.Buffer, len(tt.msgs))
+			for i := range tt.msgs {
+				bufs[i] = buffer.New(tt.msgs[i].Buffers[0])
+			}
+			got, err := splitCoalescedMessages(tt.msgs, 2, mockGetGSOSize, bufs, buffer.NewFragmentPool())
 			if err != nil && !tt.wantErr {
 				t.Fatalf("err: %v", err)
 			}
@@ -243,6 +252,11 @@ func Test_splitCoalescedMessages(t *testing.T) {
 			for i, msg := range tt.msgs {
 				if msg.N != tt.wantMsgLens[i] {
 					t.Fatalf("msg[%d].N: %d want: %d", i, msg.N, tt.wantMsgLens[i])
+				}
+			}
+			for i := range got {
+				if !bytes.Equal(bufs[i].Data(), tt.msgs[i].Buffers[0]) {
+					t.Fatalf("bufs[%d].Data() and tt.msgs[%d] unequal", i, i)
 				}
 			}
 		})

@@ -22,6 +22,7 @@ import (
 	"syscall"
 	"time"
 
+	wgbuf "github.com/tailscale/wireguard-go/buffer"
 	"github.com/tailscale/wireguard-go/tun"
 
 	"golang.org/x/net/dns/dnsmessage"
@@ -119,13 +120,16 @@ func (tun *netTun) Events() <-chan tun.Event {
 	return tun.events
 }
 
-func (tun *netTun) Read(buf [][]byte, sizes []int, offset int) (int, error) {
+func (tun *netTun) Read(bufs []*wgbuf.Buffer, sizes []int, offset int) (int, error) {
 	view, ok := <-tun.incomingPacket
 	if !ok {
 		return 0, os.ErrClosed
 	}
 
-	n, err := view.Read(buf[0][offset:])
+	if bufs[0] == nil {
+		bufs[0] = wgbuf.New(make([]byte, wgbuf.MaxMessageSize))
+	}
+	n, err := view.Read(bufs[0].Data()[offset:])
 	if err != nil {
 		return 0, err
 	}

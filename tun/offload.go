@@ -3,6 +3,8 @@ package tun
 import (
 	"encoding/binary"
 	"fmt"
+
+	"github.com/tailscale/wireguard-go/buffer"
 )
 
 // GSOType represents the type of segmentation offload.
@@ -81,7 +83,7 @@ const (
 // value of options.NeedsCsum. Length of each outBufs element must be greater
 // than or equal to the length of 'in', otherwise output may be silently
 // truncated.
-func GSOSplit(in []byte, options GSOOptions, outBufs [][]byte, sizes []int, outOffset int) (int, error) {
+func GSOSplit(in []byte, options GSOOptions, outBufs []*buffer.Buffer, pool buffer.Source, outOffset int) (int, error) {
 	cSumAt := int(options.CsumStart) + int(options.CsumOffset)
 	if cSumAt+1 >= len(in) {
 		return 0, fmt.Errorf("end of checksum offset (%d) exceeds packet length (%d)", cSumAt+1, len(in))
@@ -94,8 +96,9 @@ func GSOSplit(in []byte, options GSOOptions, outBufs [][]byte, sizes []int, outO
 	// Handle the conditions where we are copying a single element to outBuffs.
 	payloadLen := len(in) - int(options.HdrLen)
 	if options.GSOType == GSONone || payloadLen < int(options.GSOSize) {
-		if len(in) > len(outBufs[0][outOffset:]) {
-			return 0, fmt.Errorf("length of packet (%d) exceeds output element length (%d)", len(in), len(outBufs[0][outOffset:]))
+		needed := outOffset + len(in)
+		if outBufs[0] == nil {
+			outBufs[0] = pool.Get(needed)
 		}
 		if options.NeedsCsum {
 			// The initial value at the checksum offset should be summed with
@@ -104,7 +107,7 @@ func GSOSplit(in []byte, options GSOOptions, outBufs [][]byte, sizes []int, outO
 			in[cSumAt], in[cSumAt+1] = 0, 0
 			binary.BigEndian.PutUint16(in[cSumAt:], ^Checksum(in[options.CsumStart:], initial))
 		}
-		sizes[0] = copy(outBufs[0][outOffset:], in)
+		copy(outBufs[0].Data()[outOffset:], in)
 		return 1, nil
 	}
 
@@ -164,8 +167,11 @@ func GSOSplit(in []byte, options GSOOptions, outBufs [][]byte, sizes []int, outO
 		}
 		segmentDataLen := nextSegmentEnd - nextSegmentDataAt
 		totalLen := int(options.HdrLen) + segmentDataLen
-		sizes[i] = totalLen
-		out := outBufs[i][outOffset:]
+		needed := outOffset + totalLen
+		if outBufs[i] == nil {
+			outBufs[i] = pool.Get(needed)
+		}
+		out := outBufs[i].Data()[outOffset:]
 
 		copy(out, in[:iphLen])
 		if ipVersion == 4 {

@@ -7,6 +7,8 @@ package tun
 
 import (
 	"os"
+
+	"github.com/tailscale/wireguard-go/buffer"
 )
 
 type Event int
@@ -24,9 +26,10 @@ type Device interface {
 	// Read one or more packets from the Device (without any additional headers).
 	// On a successful read it returns the number of packets read, and sets
 	// packet lengths within the sizes slice. len(sizes) must be >= len(bufs).
+	// Nil entries in bufs are allocated by the implementation.
 	// A nonzero offset can be used to instruct the Device on where to begin
 	// reading into each element of the bufs slice.
-	Read(bufs [][]byte, sizes []int, offset int) (n int, err error)
+	Read(bufs []*buffer.Buffer, sizes []int, offset int) (n int, err error)
 
 	// Write one or more packets to the device (without any additional headers).
 	// On a successful write it returns the number of packets written. A nonzero

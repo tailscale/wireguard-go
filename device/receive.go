@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/tailscale/wireguard-go/buffer"
 	"github.com/tailscale/wireguard-go/conn"
 	"golang.org/x/crypto/chacha20poly1305"
 	"golang.org/x/net/ipv4"
@@ -23,11 +24,11 @@ type QueueHandshakeElement struct {
 	msgType  uint32
 	packet   []byte
 	endpoint conn.Endpoint
-	buffer   *[MaxMessageSize]byte
+	buf      *buffer.Buffer
 }
 
 type QueueInboundElement struct {
-	buffer   *[MaxMessageSize]byte
+	buf      *buffer.Buffer
 	packet   []byte
 	counter  uint64
 	keypair  *Keypair
@@ -44,7 +45,7 @@ type QueueInboundElementsContainer struct {
 // avoids accidentally keeping other objects around unnecessarily.
 // It also reduces the possible collateral damage from use-after-free bugs.
 func (elem *QueueInboundElement) clearPointers() {
-	elem.buffer = nil
+	elem.buf = nil
 	elem.packet = nil
 	elem.keypair = nil
 	elem.endpoint = nil
@@ -84,27 +85,17 @@ func (device *Device) RoutineReceiveIncoming(maxBatchSize int, recv conn.Receive
 	// receive datagrams until conn is closed
 
 	var (
-		bufsArrs    = make([]*[MaxMessageSize]byte, maxBatchSize)
-		bufs        = make([][]byte, maxBatchSize)
-		err         error
+		bufs        = make([]*buffer.Buffer, maxBatchSize) // nil entries; recv allocates
 		sizes       = make([]int, maxBatchSize)
+		err         error
 		count       int
 		endpoints   = make([]conn.Endpoint, maxBatchSize)
 		deathSpiral int
 		elemsByPeer = make(map[*Peer]*QueueInboundElementsContainer, maxBatchSize)
 	)
 
-	for i := range bufsArrs {
-		bufsArrs[i] = device.GetMessageBuffer()
-		bufs[i] = bufsArrs[i][:]
-	}
-
 	defer func() {
-		for i := 0; i < maxBatchSize; i++ {
-			if bufsArrs[i] != nil {
-				device.PutMessageBuffer(bufsArrs[i])
-			}
-		}
+		buffer.ReleaseAll(bufs)
 	}()
 
 	for {
@@ -134,7 +125,7 @@ func (device *Device) RoutineReceiveIncoming(maxBatchSize int, recv conn.Receive
 
 			// check size of packet
 
-			packet := bufsArrs[i][:size]
+			packet := bufs[i].Data()[:size]
 			msgType := binary.LittleEndian.Uint32(packet[:4])
 
 			switch msgType {
@@ -170,7 +161,7 @@ func (device *Device) RoutineReceiveIncoming(maxBatchSize int, recv conn.Receive
 				peer := value.peer
 				elem := device.GetInboundElement()
 				elem.packet = packet
-				elem.buffer = bufsArrs[i]
+				elem.buf = bufs[i]
 				elem.keypair = keypair
 				elem.endpoint = endpoints[i]
 				elem.counter = 0
@@ -182,8 +173,7 @@ func (device *Device) RoutineReceiveIncoming(maxBatchSize int, recv conn.Receive
 					elemsByPeer[peer] = elemsForPeer
 				}
 				elemsForPeer.elems = append(elemsForPeer.elems, elem)
-				bufsArrs[i] = device.GetMessageBuffer()
-				bufs[i] = bufsArrs[i][:]
+				bufs[i] = nil // consumed; next recv allocates fresh
 				continue
 
 			// otherwise it is a fixed size & handshake related packet
@@ -211,13 +201,18 @@ func (device *Device) RoutineReceiveIncoming(maxBatchSize int, recv conn.Receive
 			select {
 			case device.queue.handshake.c <- QueueHandshakeElement{
 				msgType:  msgType,
-				buffer:   bufsArrs[i],
+				buf:      bufs[i],
 				packet:   packet,
 				endpoint: endpoints[i],
 			}:
-				bufsArrs[i] = device.GetMessageBuffer()
-				bufs[i] = bufsArrs[i][:]
+				bufs[i] = nil // consumed; next recv allocates fresh
 			default:
+			}
+		}
+		for i := 0; i < count; i++ {
+			if bufs[i] != nil {
+				bufs[i].Release()
+				bufs[i] = nil
 			}
 		}
 		for peer, elemsContainer := range elemsByPeer {
@@ -226,7 +221,7 @@ func (device *Device) RoutineReceiveIncoming(maxBatchSize int, recv conn.Receive
 				device.queue.decryption.c <- elemsContainer
 			} else {
 				for _, elem := range elemsContainer.elems {
-					device.PutMessageBuffer(elem.buffer)
+					elem.buf.Release()
 					device.PutInboundElement(elem)
 				}
 				device.PutInboundElementsContainer(elemsContainer)
@@ -423,7 +418,7 @@ func (device *Device) RoutineHandshake(id int) {
 			peer.SendKeepalive()
 		}
 	skip:
-		device.PutMessageBuffer(elem.buffer)
+		elem.buf.Release()
 	}
 }
 
@@ -435,7 +430,8 @@ func (peer *Peer) RoutineSequentialReceiver(maxBatchSize int) {
 	}()
 	device.log.Verbosef("%v - Routine: sequential receiver - started", peer)
 
-	bufs := make([][]byte, 0, maxBatchSize)
+	writeBufs := make([]*buffer.Buffer, 0, maxBatchSize)
+	legacyBufs := make([][]byte, 0, maxBatchSize)
 
 	for elemsContainer := range peer.queue.inbound.c {
 		if elemsContainer == nil {
@@ -513,7 +509,9 @@ func (peer *Peer) RoutineSequentialReceiver(maxBatchSize int) {
 				continue
 			}
 
-			bufs = append(bufs, elem.buffer[:MessageTransportOffsetContent+len(elem.packet)])
+			legacyBufs = append(legacyBufs, elem.buf.Data()[:MessageTransportOffsetContent+len(elem.packet)])
+			writeBufs = append(writeBufs, elem.buf)
+			elem.buf = nil // ownership transferred to writeBufs
 		}
 
 		peer.rxBytes.Add(rxBytesLen)
@@ -526,17 +524,22 @@ func (peer *Peer) RoutineSequentialReceiver(maxBatchSize int) {
 		if dataPacketReceived {
 			peer.timersDataReceived()
 		}
-		if len(bufs) > 0 {
-			_, err := device.tun.device.Write(bufs, MessageTransportOffsetContent)
+		if len(writeBufs) > 0 {
+			_, err := device.tun.device.Write(legacyBufs, MessageTransportOffsetContent)
 			if err != nil && !device.isClosed() {
 				device.log.Errorf("Failed to write packets to TUN device: %v", err)
 			}
+			buffer.ReleaseAll(writeBufs)
 		}
+		// Release buffers for skipped elements (not transferred to writeBufs).
 		for _, elem := range elemsContainer.elems {
-			device.PutMessageBuffer(elem.buffer)
+			if elem.buf != nil {
+				elem.buf.Release()
+			}
 			device.PutInboundElement(elem)
 		}
-		bufs = bufs[:0]
+		writeBufs = writeBufs[:0]
+		legacyBufs = legacyBufs[:0]
 		device.PutInboundElementsContainer(elemsContainer)
 	}
 }

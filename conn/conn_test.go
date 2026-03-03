@@ -7,11 +7,13 @@ package conn
 
 import (
 	"testing"
+
+	"github.com/tailscale/wireguard-go/buffer"
 )
 
 func TestPrettyName(t *testing.T) {
 	var (
-		recvFunc ReceiveFunc = func(bufs [][]byte, sizes []int, eps []Endpoint) (n int, err error) { return }
+		recvFunc ReceiveFunc = func(bufs []*buffer.Buffer, sizes []int, eps []Endpoint) (n int, err error) { return }
 	)
 
 	const want = "TestPrettyName"

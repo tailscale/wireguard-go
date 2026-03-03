@@ -12,6 +12,7 @@ import (
 	"net/netip"
 	"os"
 
+	"github.com/tailscale/wireguard-go/buffer"
 	"github.com/tailscale/wireguard-go/conn"
 )
 
@@ -94,12 +95,15 @@ func (c *ChannelBind) BatchSize() int { return 1 }
 func (c *ChannelBind) SetMark(mark uint32) error { return nil }
 
 func (c *ChannelBind) makeReceiveFunc(ch chan []byte) conn.ReceiveFunc {
-	return func(bufs [][]byte, sizes []int, eps []conn.Endpoint) (n int, err error) {
+	return func(bufs []*buffer.Buffer, sizes []int, eps []conn.Endpoint) (n int, err error) {
 		select {
 		case <-c.closeSignal:
 			return 0, net.ErrClosed
 		case rx := <-ch:
-			copied := copy(bufs[0], rx)
+			if bufs[0] == nil {
+				bufs[0] = buffer.New(make([]byte, buffer.MaxMessageSize))
+			}
+			copied := copy(bufs[0].Data(), rx)
 			sizes[0] = copied
 			eps[0] = c.target6
 			return 1, nil

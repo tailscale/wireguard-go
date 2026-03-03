@@ -16,6 +16,7 @@ import (
 	"sync"
 	"syscall"
 
+	"github.com/tailscale/wireguard-go/buffer"
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
 )
@@ -44,6 +45,7 @@ type StdNetBind struct {
 	// these two fields are not guarded by mu
 	udpAddrPool sync.Pool
 	msgsPool    sync.Pool
+	bufPool     *buffer.FragmentPool
 
 	blackhole4 bool
 	blackhole6 bool
@@ -63,12 +65,14 @@ func NewStdNetBind() Bind {
 			New: func() any {
 				msgs := make([]ipv6.Message, IdealBatchSize)
 				for i := range msgs {
-					msgs[i].Buffers = make(net.Buffers, 1)
+					msgs[i].Buffers = make(net.Buffers, 1, udpSegmentMaxDatagrams)
 					msgs[i].OOB = make([]byte, controlSize)
 				}
 				return &msgs
 			},
 		},
+
+		bufPool: buffer.NewFragmentPool(),
 	}
 }
 
@@ -204,7 +208,7 @@ again:
 
 func (s *StdNetBind) putMessages(msgs *[]ipv6.Message) {
 	for i := range *msgs {
-		(*msgs)[i] = ipv6.Message{Buffers: (*msgs)[i].Buffers, OOB: (*msgs)[i].OOB}
+		(*msgs)[i] = ipv6.Message{Buffers: (*msgs)[i].Buffers[:1], OOB: (*msgs)[i].OOB}
 	}
 	s.msgsPool.Put(msgs)
 }
@@ -230,36 +234,52 @@ func (s *StdNetBind) receiveIP(
 	br batchReader,
 	conn *net.UDPConn,
 	rxOffload bool,
-	bufs [][]byte,
+	bufs []*buffer.Buffer,
 	sizes []int,
 	eps []Endpoint,
 ) (n int, err error) {
 	msgs := s.getMessages()
-	for i := range bufs {
-		(*msgs)[i].Buffers[0] = bufs[i]
-		(*msgs)[i].OOB = (*msgs)[i].OOB[:cap((*msgs)[i].OOB)]
-	}
 	defer s.putMessages(msgs)
 	var numMsgs int
 	if runtime.GOOS == "linux" {
 		if rxOffload {
-			readAt := len(*msgs) - 2
+			const readBatch = 2
+			readAt := len(*msgs) - readBatch
+			for i := readAt; i < readAt+readBatch; i++ {
+				if bufs[i] == nil {
+					bufs[i] = s.bufPool.Get(buffer.MaxMessageSize)
+				}
+				(*msgs)[i].Buffers[0] = bufs[i].Data()
+				(*msgs)[i].OOB = (*msgs)[i].OOB[:cap((*msgs)[i].OOB)]
+			}
 			numMsgs, err = br.ReadBatch((*msgs)[readAt:], 0)
 			if err != nil {
 				return 0, err
 			}
-			numMsgs, err = splitCoalescedMessages(*msgs, readAt, getGSOSize)
+			numMsgs, err = splitCoalescedMessages(*msgs, readAt, getGSOSize, bufs, s.bufPool)
 			if err != nil {
 				return 0, err
 			}
 		} else {
+			for i := range bufs {
+				if bufs[i] == nil {
+					bufs[i] = s.bufPool.Get(buffer.MaxMessageSize)
+				}
+				(*msgs)[i].Buffers[0] = bufs[i].Data()
+				(*msgs)[i].OOB = (*msgs)[i].OOB[:cap((*msgs)[i].OOB)]
+			}
 			numMsgs, err = br.ReadBatch(*msgs, 0)
 			if err != nil {
 				return 0, err
 			}
 		}
 	} else {
+		if bufs[0] == nil {
+			bufs[0] = s.bufPool.Get(buffer.MaxMessageSize)
+		}
 		msg := &(*msgs)[0]
+		msg.Buffers[0] = bufs[0].Data()
+		msg.OOB = msg.OOB[:cap(msg.OOB)]
 		msg.N, msg.NN, _, msg.Addr, err = conn.ReadMsgUDP(msg.Buffers[0], msg.OOB)
 		if err != nil {
 			return 0, err
@@ -281,13 +301,13 @@ func (s *StdNetBind) receiveIP(
 }
 
 func (s *StdNetBind) makeReceiveIPv4(pc *ipv4.PacketConn, conn *net.UDPConn, rxOffload bool) ReceiveFunc {
-	return func(bufs [][]byte, sizes []int, eps []Endpoint) (n int, err error) {
+	return func(bufs []*buffer.Buffer, sizes []int, eps []Endpoint) (n int, err error) {
 		return s.receiveIP(pc, conn, rxOffload, bufs, sizes, eps)
 	}
 }
 
 func (s *StdNetBind) makeReceiveIPv6(pc *ipv6.PacketConn, conn *net.UDPConn, rxOffload bool) ReceiveFunc {
-	return func(bufs [][]byte, sizes []int, eps []Endpoint) (n int, err error) {
+	return func(bufs []*buffer.Buffer, sizes []int, eps []Endpoint) (n int, err error) {
 		return s.receiveIP(pc, conn, rxOffload, bufs, sizes, eps)
 	}
 }
@@ -452,10 +472,11 @@ type setGSOFunc func(control *[]byte, gsoSize uint16)
 
 func coalesceMessages(addr *net.UDPAddr, ep *StdNetEndpoint, bufs [][]byte, offset int, msgs []ipv6.Message, setGSO setGSOFunc) int {
 	var (
-		base     = -1 // index of msg we are currently coalescing into
-		gsoSize  int  // segmentation size of msgs[base]
-		dgramCnt int  // number of dgrams coalesced into msgs[base]
-		endBatch bool // tracking flag to start a new batch on next iteration of bufs
+		base         = -1 // index of msg we are currently coalescing into
+		gsoSize      int  // segmentation size of msgs[base]
+		dgramCnt     int  // number of dgrams coalesced into msgs[base]
+		endBatch     bool // tracking flag to start a new batch on next iteration of bufs
+		coalescedLen int  // bytes coalesced into msgs[base]
 	)
 	maxPayloadLen := maxIPv4PayloadLen
 	if ep.DstIP().Is6() {
@@ -465,18 +486,16 @@ func coalesceMessages(addr *net.UDPAddr, ep *StdNetEndpoint, bufs [][]byte, offs
 		buf = buf[offset:]
 		if i > 0 {
 			msgLen := len(buf)
-			baseLenBefore := len(msgs[base].Buffers[0])
-			freeBaseCap := cap(msgs[base].Buffers[0]) - baseLenBefore
-			if msgLen+baseLenBefore <= maxPayloadLen &&
+			if msgLen+coalescedLen <= maxPayloadLen &&
 				msgLen <= gsoSize &&
-				msgLen <= freeBaseCap &&
 				dgramCnt < udpSegmentMaxDatagrams &&
 				!endBatch {
-				msgs[base].Buffers[0] = append(msgs[base].Buffers[0], buf...)
+				msgs[base].Buffers = append(msgs[base].Buffers, buf)
 				if i == len(bufs)-1 {
 					setGSO(&msgs[base].OOB, uint16(gsoSize))
 				}
 				dgramCnt++
+				coalescedLen += msgLen
 				if msgLen < gsoSize {
 					// A smaller than gsoSize packet on the tail is legal, but
 					// it must end the batch.
@@ -497,13 +516,14 @@ func coalesceMessages(addr *net.UDPAddr, ep *StdNetEndpoint, bufs [][]byte, offs
 		msgs[base].Buffers[0] = buf
 		msgs[base].Addr = addr
 		dgramCnt = 1
+		coalescedLen = gsoSize
 	}
 	return base + 1
 }
 
 type getGSOFunc func(control []byte) (int, error)
 
-func splitCoalescedMessages(msgs []ipv6.Message, firstMsgAt int, getGSO getGSOFunc) (n int, err error) {
+func splitCoalescedMessages(msgs []ipv6.Message, firstMsgAt int, getGSO getGSOFunc, bufs []*buffer.Buffer, pool buffer.Source) (n int, err error) {
 	for i := firstMsgAt; i < len(msgs); i++ {
 		msg := &msgs[i]
 		if msg.N == 0 {
@@ -527,6 +547,12 @@ func splitCoalescedMessages(msgs []ipv6.Message, firstMsgAt int, getGSO getGSOFu
 			if n > i {
 				return n, errors.New("splitting coalesced packet resulted in overflow")
 			}
+			segLen := end - start
+			if bufs[n] == nil {
+				bufs[n] = pool.Get(segLen)
+			}
+			msgs[n].Buffers[0] = bufs[n].Data()
+			msgs[n].OOB = msgs[n].OOB[:cap(msgs[n].OOB)]
 			copied := copy(msgs[n].Buffers[0], msg.Buffers[0][start:end])
 			msgs[n].N = copied
 			msgs[n].Addr = msg.Addr

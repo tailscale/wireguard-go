@@ -14,6 +14,7 @@ import (
 	"time"
 	_ "unsafe"
 
+	"github.com/tailscale/wireguard-go/buffer"
 	"golang.org/x/sys/windows"
 	"golang.zx2c4.com/wintun"
 )
@@ -144,7 +145,7 @@ func (tun *NativeTun) BatchSize() int {
 
 // Note: Read() and Write() assume the caller comes only from a single thread; there's no locking.
 
-func (tun *NativeTun) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
+func (tun *NativeTun) Read(bufs []*buffer.Buffer, sizes []int, offset int) (int, error) {
 	tun.running.Add(1)
 	defer tun.running.Done()
 retry:
@@ -160,8 +161,11 @@ retry:
 		packet, err := tun.session.ReceivePacket()
 		switch err {
 		case nil:
+			if bufs[0] == nil {
+				bufs[0] = buffer.New(make([]byte, buffer.MaxMessageSize))
+			}
 			packetSize := len(packet)
-			copy(bufs[0][offset:], packet)
+			copy(bufs[0].Data()[offset:], packet)
 			sizes[0] = packetSize
 			tun.session.ReleaseReceivePacket(packet)
 			tun.rate.update(uint64(packetSize))

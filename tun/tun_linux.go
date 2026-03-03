@@ -17,6 +17,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/tailscale/wireguard-go/buffer"
 	"github.com/tailscale/wireguard-go/conn"
 	"github.com/tailscale/wireguard-go/rwcancel"
 	"golang.org/x/sys/unix"
@@ -53,6 +54,9 @@ type NativeTun struct {
 	tcpGROTable *tcpGROTable
 	udpGROTable *udpGROTable
 	gro         groDisablementFlags
+
+	bufPool       *buffer.FragmentPool
+	coalescedBufs buffer.Arena
 }
 
 type groDisablementFlags int
@@ -354,6 +358,7 @@ func (tun *NativeTun) Write(bufs [][]byte, offset int) (int, error) {
 	defer func() {
 		tun.tcpGROTable.reset()
 		tun.udpGROTable.reset()
+		tun.coalescedBufs.Flush()
 		tun.writeOpMu.Unlock()
 	}()
 	var (
@@ -362,7 +367,7 @@ func (tun *NativeTun) Write(bufs [][]byte, offset int) (int, error) {
 	)
 	tun.toWrite = tun.toWrite[:0]
 	if tun.vnetHdr {
-		err := handleGRO(bufs, offset, tun.tcpGROTable, tun.udpGROTable, tun.gro, &tun.toWrite)
+		err := handleGRO(bufs, offset, tun.tcpGROTable, tun.udpGROTable, tun.gro, &tun.toWrite, &tun.coalescedBufs)
 		if err != nil {
 			return 0, err
 		}
@@ -389,7 +394,7 @@ func (tun *NativeTun) Write(bufs [][]byte, offset int) (int, error) {
 // handleVirtioRead splits in into bufs, leaving offset bytes at the front of
 // each buffer. It mutates sizes to reflect the size of each element of bufs,
 // and returns the number of packets read.
-func handleVirtioRead(in []byte, bufs [][]byte, sizes []int, offset int) (int, error) {
+func handleVirtioRead(in []byte, bufs []*buffer.Buffer, pool buffer.Source, offset int) (int, error) {
 	var hdr virtioNetHdr
 	err := hdr.decode(in)
 	if err != nil {
@@ -421,19 +426,24 @@ func handleVirtioRead(in []byte, bufs [][]byte, sizes []int, offset int) (int, e
 		options.HdrLen = options.CsumStart + tcpHLen
 	}
 
-	return GSOSplit(in, options, bufs, sizes, offset)
+	return GSOSplit(in, options, bufs, pool, offset)
 }
 
-func (tun *NativeTun) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
+func (tun *NativeTun) Read(bufs []*buffer.Buffer, sizes []int, offset int) (int, error) {
 	tun.readOpMu.Lock()
 	defer tun.readOpMu.Unlock()
 	select {
 	case err := <-tun.errors:
 		return 0, err
 	default:
-		readInto := bufs[0][offset:]
+		var readInto []byte
 		if tun.vnetHdr {
 			readInto = tun.readBuff[:]
+		} else {
+			if bufs[0] == nil {
+				bufs[0] = tun.bufPool.Get(buffer.MaxMessageSize)
+			}
+			readInto = bufs[0].Data()[offset:]
 		}
 		n, err := tun.tunFile.Read(readInto)
 		if errors.Is(err, syscall.EBADFD) {
@@ -443,7 +453,14 @@ func (tun *NativeTun) Read(bufs [][]byte, sizes []int, offset int) (int, error) 
 			return 0, err
 		}
 		if tun.vnetHdr {
-			return handleVirtioRead(readInto[:n], bufs, sizes, offset)
+			count, err := handleVirtioRead(readInto[:n], bufs, tun.bufPool, offset)
+			if err != nil {
+				return 0, err
+			}
+			for i := 0; i < count; i++ {
+				sizes[i] = bufs[i].Len() - offset
+			}
+			return count, nil
 		} else {
 			sizes[0] = n
 			return 1, nil
@@ -577,6 +594,7 @@ func CreateTUN(name string, mtu int) (Device, error) {
 
 // CreateTUNFromFile creates a Device from an os.File with the provided MTU.
 func CreateTUNFromFile(file *os.File, mtu int) (Device, error) {
+	bufPool := buffer.NewFragmentPool()
 	tun := &NativeTun{
 		tunFile:                 file,
 		events:                  make(chan Event, 5),
@@ -585,6 +603,8 @@ func CreateTUNFromFile(file *os.File, mtu int) (Device, error) {
 		tcpGROTable:             newTCPGROTable(),
 		udpGROTable:             newUDPGROTable(),
 		toWrite:                 make([]int, 0, conn.IdealBatchSize),
+		bufPool:                 bufPool,
+		coalescedBufs:           buffer.Arena{Buffer: bufPool.Get(32 * 16 << 10)},
 	}
 
 	name, err := tun.Name()
@@ -634,6 +654,7 @@ func CreateUnmonitoredTUNFromFD(fd int) (Device, string, error) {
 		return nil, "", err
 	}
 	file := os.NewFile(uintptr(fd), "/dev/tun")
+	bufPool := buffer.NewFragmentPool()
 	tun := &NativeTun{
 		tunFile:     file,
 		events:      make(chan Event, 5),
@@ -641,6 +662,8 @@ func CreateUnmonitoredTUNFromFD(fd int) (Device, string, error) {
 		tcpGROTable: newTCPGROTable(),
 		udpGROTable: newUDPGROTable(),
 		toWrite:     make([]int, 0, conn.IdealBatchSize),
+		bufPool:       bufPool,
+		coalescedBufs: buffer.Arena{Buffer: bufPool.Get(32 * 16 << 10)},
 	}
 	name, err := tun.Name()
 	if err != nil {

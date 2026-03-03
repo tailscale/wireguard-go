@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"unsafe"
 
+	"github.com/tailscale/wireguard-go/buffer"
 	"golang.org/x/sys/unix"
 )
 
@@ -204,12 +205,15 @@ func (tun *NativeTun) Events() <-chan Event {
 	return tun.events
 }
 
-func (tun *NativeTun) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
+func (tun *NativeTun) Read(bufs []*buffer.Buffer, sizes []int, offset int) (int, error) {
 	select {
 	case err := <-tun.errors:
 		return 0, err
 	default:
-		buf := bufs[0][offset-4:]
+		if bufs[0] == nil {
+			bufs[0] = buffer.New(make([]byte, buffer.MaxMessageSize))
+		}
+		buf := bufs[0].Data()[offset-4:]
 		n, err := tun.tunFile.Read(buf[:])
 		if n < 4 {
 			return 0, err

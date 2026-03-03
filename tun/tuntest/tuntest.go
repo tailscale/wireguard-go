@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"os"
 
+	"github.com/tailscale/wireguard-go/buffer"
 	"github.com/tailscale/wireguard-go/tun"
 )
 
@@ -110,12 +111,15 @@ type chTun struct {
 
 func (t *chTun) File() *os.File { return nil }
 
-func (t *chTun) Read(packets [][]byte, sizes []int, offset int) (int, error) {
+func (t *chTun) Read(bufs []*buffer.Buffer, sizes []int, offset int) (int, error) {
 	select {
 	case <-t.c.closed:
 		return 0, os.ErrClosed
 	case msg := <-t.c.Outbound:
-		n := copy(packets[0][offset:], msg)
+		if bufs[0] == nil {
+			bufs[0] = buffer.New(make([]byte, buffer.MaxMessageSize))
+		}
+		n := copy(bufs[0].Data()[offset:], msg)
 		sizes[0] = n
 		return 1, nil
 	}

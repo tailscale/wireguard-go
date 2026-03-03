@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/tailscale/wireguard-go/buffer"
 	"github.com/tailscale/wireguard-go/conn"
 	"github.com/tailscale/wireguard-go/ratelimiter"
 	"github.com/tailscale/wireguard-go/rwcancel"
@@ -73,10 +74,11 @@ type Device struct {
 	pool struct {
 		inboundElementsContainer  *WaitPool
 		outboundElementsContainer *WaitPool
-		messageBuffers            *WaitPool
 		inboundElements           *WaitPool
 		outboundElements          *WaitPool
 	}
+
+	internalPool *buffer.FragmentPool
 
 	queue struct {
 		encryption *outboundQueue
@@ -302,6 +304,7 @@ func NewDevice(tunDevice tun.Device, bind conn.Bind, logger *Logger) *Device {
 	device.indexTable.Init()
 
 	device.PopulatePools()
+	device.internalPool = buffer.NewFragmentPool()
 
 	// create queues
 

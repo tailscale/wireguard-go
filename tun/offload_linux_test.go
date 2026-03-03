@@ -9,6 +9,7 @@ import (
 	"net/netip"
 	"testing"
 
+	"github.com/tailscale/wireguard-go/buffer"
 	"github.com/tailscale/wireguard-go/conn"
 	"golang.org/x/sys/unix"
 	"gvisor.dev/gvisor/pkg/tcpip"
@@ -234,13 +235,9 @@ func Test_handleVirtioRead(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			out := make([][]byte, conn.IdealBatchSize)
-			sizes := make([]int, conn.IdealBatchSize)
-			for i := range out {
-				out[i] = make([]byte, 65535)
-			}
+			out := make([]*buffer.Buffer, conn.IdealBatchSize)
 			tt.hdr.encode(tt.pktIn)
-			n, err := handleVirtioRead(tt.pktIn, out, sizes, offset)
+			n, err := handleVirtioRead(tt.pktIn, out, buffer.NewFragmentPool(), offset)
 			if err != nil {
 				if tt.wantErr {
 					return
@@ -251,8 +248,8 @@ func Test_handleVirtioRead(t *testing.T) {
 				t.Fatalf("got %d packets, wanted %d", n, len(tt.wantLens))
 			}
 			for i := range tt.wantLens {
-				if tt.wantLens[i] != sizes[i] {
-					t.Fatalf("wantLens[%d]: %d != outSizes: %d", i, tt.wantLens[i], sizes[i])
+				if tt.wantLens[i]+offset != out[i].Len() {
+					t.Fatalf("wantLens[%d]: %d != outSizes: %d", i, tt.wantLens[i]+offset, out[i].Len())
 				}
 			}
 		})
@@ -290,7 +287,8 @@ func Fuzz_handleGRO(f *testing.F) {
 	f.Fuzz(func(t *testing.T, pkt0, pkt1, pkt2, pkt3, pkt4, pkt5, pkt6, pkt7, pkt8, pkt9, pkt10, pkt11 []byte, gro int, offset int) {
 		pkts := [][]byte{pkt0, pkt1, pkt2, pkt3, pkt4, pkt5, pkt6, pkt7, pkt8, pkt9, pkt10, pkt11}
 		toWrite := make([]int, 0, len(pkts))
-		handleGRO(pkts, offset, newTCPGROTable(), newUDPGROTable(), groDisablementFlags(gro), &toWrite)
+		arena := &buffer.Arena{Buffer: buffer.New(make([]byte, 1<<20))}
+		handleGRO(pkts, offset, newTCPGROTable(), newUDPGROTable(), groDisablementFlags(gro), &toWrite, arena)
 		if len(toWrite) > len(pkts) {
 			t.Errorf("len(toWrite): %d > len(pkts): %d", len(toWrite), len(pkts))
 		}
@@ -507,7 +505,8 @@ func Test_handleGRO(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			toWrite := make([]int, 0, len(tt.pktsIn))
-			err := handleGRO(tt.pktsIn, offset, newTCPGROTable(), newUDPGROTable(), tt.gro, &toWrite)
+			arena := &buffer.Arena{Buffer: buffer.New(make([]byte, 1<<20))}
+			err := handleGRO(tt.pktsIn, offset, newTCPGROTable(), newUDPGROTable(), tt.gro, &toWrite, arena)
 			if err != nil {
 				if tt.wantErr {
 					return
