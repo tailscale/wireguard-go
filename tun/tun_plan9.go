@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/tailscale/wireguard-go/iobuf"
 )
 
 type NativeTun struct {
@@ -81,18 +83,19 @@ func (tun *NativeTun) Events() <-chan Event {
 	return tun.events
 }
 
-func (tun *NativeTun) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
+func (tun *NativeTun) Read(bufs []iobuf.View, offset int) (n int, err error) {
 	select {
 	case err := <-tun.errors:
 		return 0, err
 	default:
-		n, err := tun.dataFile.Read(bufs[0][offset:])
-		if n == 1 && bufs[0][offset] == 0 {
+		iobuf.EnsureAllocated(bufs[:1])
+		n, err := tun.dataFile.Read(bufs[0].Bytes[offset:])
+		if n == 1 && bufs[0].Bytes[offset] == 0 {
 			// EOF
 			err = io.EOF
 			n = 0
 		}
-		sizes[0] = n
+		bufs[0].Bytes = bufs[0].Bytes[:offset+n]
 		return 1, err
 	}
 }

@@ -6,25 +6,23 @@
 package device
 
 import (
+	"github.com/tailscale/wireguard-go/iobuf"
 	"github.com/tailscale/wireguard-go/waitpool"
 )
 
 func (device *Device) PopulatePools() {
-	device.pool.inboundElementsContainer = waitpool.New(PreallocatedBuffersPerPool, func() any {
+	device.pool.inboundElementsContainer = waitpool.New(iobuf.MaxPooledBuffers, func() any {
 		s := make([]*QueueInboundElement, 0, device.BatchSize())
 		return &QueueInboundElementsContainer{elems: s}
 	})
-	device.pool.outboundElementsContainer = waitpool.New(PreallocatedBuffersPerPool, func() any {
+	device.pool.outboundElementsContainer = waitpool.New(iobuf.MaxPooledBuffers, func() any {
 		s := make([]*QueueOutboundElement, 0, device.BatchSize())
 		return &QueueOutboundElementsContainer{elems: s}
 	})
-	device.pool.messageBuffers = waitpool.New(PreallocatedBuffersPerPool, func() any {
-		return new([MaxMessageSize]byte)
-	})
-	device.pool.inboundElements = waitpool.New(PreallocatedBuffersPerPool, func() any {
+	device.pool.inboundElements = waitpool.New(iobuf.MaxPooledBuffers, func() any {
 		return new(QueueInboundElement)
 	})
-	device.pool.outboundElements = waitpool.New(PreallocatedBuffersPerPool, func() any {
+	device.pool.outboundElements = waitpool.New(iobuf.MaxPooledBuffers, func() any {
 		return new(QueueOutboundElement)
 	})
 }
@@ -55,14 +53,6 @@ func (device *Device) PutOutboundElementsContainer(c *QueueOutboundElementsConta
 	device.pool.outboundElementsContainer.Put(c)
 }
 
-func (device *Device) GetMessageBuffer() *[MaxMessageSize]byte {
-	return device.pool.messageBuffers.Get().(*[MaxMessageSize]byte)
-}
-
-func (device *Device) PutMessageBuffer(msg *[MaxMessageSize]byte) {
-	device.pool.messageBuffers.Put(msg)
-}
-
 func (device *Device) GetInboundElement() *QueueInboundElement {
 	return device.pool.inboundElements.Get().(*QueueInboundElement)
 }
@@ -78,5 +68,6 @@ func (device *Device) GetOutboundElement() *QueueOutboundElement {
 
 func (device *Device) PutOutboundElement(elem *QueueOutboundElement) {
 	elem.clearPointers()
+	elem.nonce = 0
 	device.pool.outboundElements.Put(elem)
 }

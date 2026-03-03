@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/tailscale/wireguard-go/conn"
+	"github.com/tailscale/wireguard-go/iobuf"
 	"golang.org/x/crypto/chacha20poly1305"
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
@@ -24,11 +25,11 @@ type QueueHandshakeElement struct {
 	msgType  uint32
 	packet   []byte
 	endpoint conn.Endpoint
-	buffer   *[MaxMessageSize]byte
+	buffer   iobuf.View
 }
 
 type QueueInboundElement struct {
-	buffer   *[MaxMessageSize]byte
+	buffer   iobuf.View
 	packet   []byte
 	counter  uint64
 	keypair  *Keypair
@@ -50,7 +51,7 @@ type QueueInboundElementsContainer struct {
 // avoids accidentally keeping other objects around unnecessarily.
 // It also reduces the possible collateral damage from use-after-free bugs.
 func (elem *QueueInboundElement) clearPointers() {
-	elem.buffer = nil
+	elem.buffer = iobuf.View{}
 	elem.packet = nil
 	elem.keypair = nil
 	elem.endpoint = nil
@@ -90,31 +91,18 @@ func (device *Device) RoutineReceiveIncoming(maxBatchSize int, recv conn.Receive
 	// receive datagrams until conn is closed
 
 	var (
-		bufsArrs    = make([]*[MaxMessageSize]byte, maxBatchSize)
-		bufs        = make([][]byte, maxBatchSize)
+		bufs        = make([]iobuf.View, maxBatchSize) // nil entries; recv allocates
 		err         error
-		sizes       = make([]int, maxBatchSize)
 		count       int
 		endpoints   = make([]conn.Endpoint, maxBatchSize)
 		deathSpiral int
 		elemsByPeer = make(map[*Peer]*QueueInboundElementsContainer, maxBatchSize)
 	)
 
-	for i := range bufsArrs {
-		bufsArrs[i] = device.GetMessageBuffer()
-		bufs[i] = bufsArrs[i][:]
-	}
-
-	defer func() {
-		for i := 0; i < maxBatchSize; i++ {
-			if bufsArrs[i] != nil {
-				device.PutMessageBuffer(bufsArrs[i])
-			}
-		}
-	}()
+	defer iobuf.ReleaseAll(bufs)
 
 	for {
-		count, err = recv(bufs, sizes, endpoints)
+		count, err = recv(bufs, endpoints)
 		if err != nil {
 			if errors.Is(err, net.ErrClosed) {
 				return
@@ -133,14 +121,14 @@ func (device *Device) RoutineReceiveIncoming(maxBatchSize int, recv conn.Receive
 		deathSpiral = 0
 
 		// handle each packet in the batch
-		for i, size := range sizes[:count] {
-			if size < MinMessageSize {
+		for i := 0; i < count; i++ {
+			if len(bufs[i].Bytes) < MinMessageSize {
 				continue
 			}
 
 			// check size of packet
 
-			packet := bufsArrs[i][:size]
+			packet := bufs[i].Bytes
 			msgType := binary.LittleEndian.Uint32(packet[:4])
 
 			switch msgType {
@@ -176,7 +164,7 @@ func (device *Device) RoutineReceiveIncoming(maxBatchSize int, recv conn.Receive
 				peer := value.peer
 				elem := device.GetInboundElement()
 				elem.packet = packet
-				elem.buffer = bufsArrs[i]
+				elem.buffer = bufs[i].Claim()
 				elem.keypair = keypair
 				elem.endpoint = endpoints[i]
 				elem.counter = 0
@@ -187,8 +175,6 @@ func (device *Device) RoutineReceiveIncoming(maxBatchSize int, recv conn.Receive
 					elemsByPeer[peer] = elemsForPeer
 				}
 				elemsForPeer.elems = append(elemsForPeer.elems, elem)
-				bufsArrs[i] = device.GetMessageBuffer()
-				bufs[i] = bufsArrs[i][:]
 				continue
 
 			// otherwise it is a fixed size & handshake related packet
@@ -213,18 +199,19 @@ func (device *Device) RoutineReceiveIncoming(maxBatchSize int, recv conn.Receive
 				continue
 			}
 
+			claimed := bufs[i].Claim()
 			select {
 			case device.queue.handshake.c <- QueueHandshakeElement{
 				msgType:  msgType,
-				buffer:   bufsArrs[i],
+				buffer:   claimed,
 				packet:   packet,
 				endpoint: endpoints[i],
 			}:
-				bufsArrs[i] = device.GetMessageBuffer()
-				bufs[i] = bufsArrs[i][:]
 			default:
+				claimed.Release()
 			}
 		}
+		iobuf.ReleaseAll(bufs[:count]) // release unclaimed
 		for peer, elemsContainer := range elemsByPeer {
 			if peer.isRunning.Load() {
 				elemsContainer.filling.Add(1)
@@ -232,7 +219,7 @@ func (device *Device) RoutineReceiveIncoming(maxBatchSize int, recv conn.Receive
 				device.queue.decryption.c <- elemsContainer
 			} else {
 				for _, elem := range elemsContainer.elems {
-					device.PutMessageBuffer(elem.buffer)
+					elem.buffer.Release()
 					device.PutInboundElement(elem)
 				}
 				device.PutInboundElementsContainer(elemsContainer)
@@ -423,7 +410,7 @@ func (device *Device) RoutineHandshake(id int) {
 			peer.SendKeepalive()
 		}
 	skip:
-		device.PutMessageBuffer(elem.buffer)
+		elem.buffer.Release()
 	}
 }
 
@@ -541,7 +528,7 @@ func (peer *Peer) processInboundContainer(elemsContainer *QueueInboundElementsCo
 			continue
 		}
 
-		scratch = append(scratch, elem.buffer[:MessageTransportOffsetContent+len(elem.packet)])
+		scratch = append(scratch, elem.buffer.Bytes[:MessageTransportOffsetContent+len(elem.packet)])
 	}
 
 	peer.rxBytes.Add(rxBytesLen)
@@ -560,7 +547,7 @@ func (peer *Peer) processInboundContainer(elemsContainer *QueueInboundElementsCo
 		}
 	}
 	for _, elem := range elems {
-		device.PutMessageBuffer(elem.buffer)
+		elem.buffer.Release()
 		device.PutInboundElement(elem)
 	}
 }

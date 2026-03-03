@@ -18,6 +18,7 @@ import (
 	"golang.org/x/sys/windows"
 
 	"github.com/tailscale/wireguard-go/conn/winrio"
+	"github.com/tailscale/wireguard-go/iobuf"
 )
 
 const (
@@ -416,20 +417,22 @@ retry:
 	return n, &ep, nil
 }
 
-func (bind *WinRingBind) receiveIPv4(bufs [][]byte, sizes []int, eps []Endpoint) (int, error) {
+func (bind *WinRingBind) receiveIPv4(bufs []iobuf.View, eps []Endpoint) (int, error) {
 	bind.mu.RLock()
 	defer bind.mu.RUnlock()
-	n, ep, err := bind.v4.Receive(bufs[0], &bind.isOpen)
-	sizes[0] = n
+	iobuf.EnsureAllocated(bufs[:1])
+	n, ep, err := bind.v4.Receive(bufs[0].Bytes, &bind.isOpen)
+	bufs[0].Bytes = bufs[0].Bytes[:n]
 	eps[0] = ep
 	return 1, err
 }
 
-func (bind *WinRingBind) receiveIPv6(bufs [][]byte, sizes []int, eps []Endpoint) (int, error) {
+func (bind *WinRingBind) receiveIPv6(bufs []iobuf.View, eps []Endpoint) (int, error) {
 	bind.mu.RLock()
 	defer bind.mu.RUnlock()
-	n, ep, err := bind.v6.Receive(bufs[0], &bind.isOpen)
-	sizes[0] = n
+	iobuf.EnsureAllocated(bufs[:1])
+	n, ep, err := bind.v6.Receive(bufs[0].Bytes, &bind.isOpen)
+	bufs[0].Bytes = bufs[0].Bytes[:n]
 	eps[0] = ep
 	return 1, err
 }

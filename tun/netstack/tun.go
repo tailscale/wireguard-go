@@ -22,6 +22,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/tailscale/wireguard-go/iobuf"
 	"github.com/tailscale/wireguard-go/tun"
 
 	"golang.org/x/net/dns/dnsmessage"
@@ -119,17 +120,19 @@ func (tun *netTun) Events() <-chan tun.Event {
 	return tun.events
 }
 
-func (tun *netTun) Read(buf [][]byte, sizes []int, offset int) (int, error) {
+func (tun *netTun) Read(bufs []iobuf.View, offset int) (int, error) {
 	view, ok := <-tun.incomingPacket
 	if !ok {
 		return 0, os.ErrClosed
 	}
-
-	n, err := view.Read(buf[0][offset:])
+	// TODO: If not the offset, could use view.AsSlice() and wrap view.Release() in a [buffer.Recycler].
+	// TODO: Allocate view.Size() buffer.
+	iobuf.EnsureAllocated(bufs[:1])
+	n, err := view.Read(bufs[0].Bytes[offset:])
 	if err != nil {
 		return 0, err
 	}
-	sizes[0] = n
+	bufs[0].Bytes = bufs[0].Bytes[:offset+n]
 	return 1, nil
 }
 

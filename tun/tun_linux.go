@@ -18,6 +18,7 @@ import (
 	"unsafe"
 
 	"github.com/tailscale/wireguard-go/conn"
+	"github.com/tailscale/wireguard-go/iobuf"
 	"github.com/tailscale/wireguard-go/rwcancel"
 	"golang.org/x/sys/unix"
 )
@@ -410,9 +411,9 @@ func (tun *NativeTun) Write(bufs [][]byte, offset int) (int, error) {
 }
 
 // handleVirtioRead splits in into bufs, leaving offset bytes at the front of
-// each buffer. It mutates sizes to reflect the size of each element of bufs,
-// and returns the number of packets read.
-func handleVirtioRead(in []byte, bufs [][]byte, sizes []int, offset int) (int, error) {
+// each buffer. It sets each buffer's Bytes length to reflect the size of each
+// element of bufs, and returns the number of packets read.
+func handleVirtioRead(in []byte, bufs []iobuf.View, offset int) (int, error) {
 	var hdr virtioNetHdr
 	err := hdr.decode(in)
 	if err != nil {
@@ -444,17 +445,19 @@ func handleVirtioRead(in []byte, bufs [][]byte, sizes []int, offset int) (int, e
 		options.HdrLen = options.CsumStart + tcpHLen
 	}
 
-	return GSOSplit(in, options, bufs, sizes, offset)
+	return GSOSplit(in, options, bufs, offset)
 }
 
-func (tun *NativeTun) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
+func (tun *NativeTun) Read(bufs []iobuf.View, offset int) (int, error) {
 	tun.readOpMu.Lock()
 	defer tun.readOpMu.Unlock()
 	select {
 	case err := <-tun.errors:
 		return 0, err
 	default:
-		readInto := bufs[0][offset:]
+		// TODO: placeholder until tun implements right-sized buffers.
+		iobuf.EnsureAllocated(bufs)
+		readInto := bufs[0].Bytes[offset:]
 		if tun.vnetHdr {
 			readInto = tun.readBuff[:]
 		}
@@ -466,9 +469,9 @@ func (tun *NativeTun) Read(bufs [][]byte, sizes []int, offset int) (int, error) 
 			return 0, err
 		}
 		if tun.vnetHdr {
-			return handleVirtioRead(readInto[:n], bufs, sizes, offset)
+			return handleVirtioRead(readInto[:n], bufs, offset)
 		} else {
-			sizes[0] = n
+			bufs[0].Bytes = bufs[0].Bytes[:n+offset]
 			return 1, nil
 		}
 	}

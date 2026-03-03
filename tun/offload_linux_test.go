@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/tailscale/wireguard-go/conn"
+	"github.com/tailscale/wireguard-go/iobuf"
 	"golang.org/x/sys/unix"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
@@ -235,13 +236,12 @@ func Test_handleVirtioRead(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			out := make([][]byte, conn.IdealBatchSize)
-			sizes := make([]int, conn.IdealBatchSize)
+			out := make([]iobuf.View, conn.IdealBatchSize)
 			for i := range out {
-				out[i] = make([]byte, 65535)
+				out[i] = iobuf.View{Bytes: make([]byte, 65535)}
 			}
 			tt.hdr.encode(tt.pktIn)
-			n, err := handleVirtioRead(tt.pktIn, out, sizes, offset)
+			n, err := handleVirtioRead(tt.pktIn, out, offset)
 			if err != nil {
 				if tt.wantErr {
 					return
@@ -252,8 +252,8 @@ func Test_handleVirtioRead(t *testing.T) {
 				t.Fatalf("got %d packets, wanted %d", n, len(tt.wantLens))
 			}
 			for i := range tt.wantLens {
-				if tt.wantLens[i] != sizes[i] {
-					t.Fatalf("wantLens[%d]: %d != outSizes: %d", i, tt.wantLens[i], sizes[i])
+				if size := len(out[i].Bytes) - offset; tt.wantLens[i] != size {
+					t.Fatalf("wantLens[%d]: %d != size: %d", i, tt.wantLens[i], size)
 				}
 			}
 		})

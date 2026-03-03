@@ -7,6 +7,8 @@ package device
 
 import (
 	"time"
+
+	"github.com/tailscale/wireguard-go/iobuf"
 )
 
 /* Specification constants */
@@ -27,9 +29,9 @@ const (
 )
 
 const (
-	MinMessageSize = MessageKeepaliveSize                                                      // minimum size of transport message (keepalive)
-	MaxMessageSize = MaxSegmentSize                                                            // maximum size of transport message
-	MaxContentSize = MaxSegmentSize - MessageTransportSize - MessageEncapsulatingTransportSize // maximum size of transport message content
+	MinMessageSize = MessageKeepaliveSize                                                            // minimum size of transport message (keepalive)
+	MaxMessageSize = iobuf.MaxSegmentSize                                                            // maximum size of transport message
+	MaxContentSize = iobuf.MaxSegmentSize - MessageTransportSize - MessageEncapsulatingTransportSize // maximum size of transport message content
 )
 
 /* Implementation constants */

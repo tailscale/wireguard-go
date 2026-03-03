@@ -8,6 +8,7 @@ package device
 import (
 	"testing"
 
+	"github.com/tailscale/wireguard-go/iobuf"
 	"github.com/tailscale/wireguard-go/waitpool"
 )
 
@@ -15,8 +16,12 @@ func TestAutodrainingQueueFinalizerNeedTracksPoolAccounting(t *testing.T) {
 	unbounded := func() *waitpool.WaitPool { return waitpool.New(0, func() any { return nil }) }
 	bounded := func() *waitpool.WaitPool { return waitpool.New(1, func() any { return nil }) }
 
+	// Force the default raw pool unbounded for the bulk of the test.
+	origPool := iobuf.DefaultRawPool
+	iobuf.DefaultRawPool = iobuf.NewRawPool(0)
+	t.Cleanup(func() { iobuf.DefaultRawPool = origPool })
+
 	device := &Device{}
-	device.pool.messageBuffers = unbounded()
 	device.pool.inboundElements = unbounded()
 	device.pool.inboundElementsContainer = unbounded()
 	device.pool.outboundElements = unbounded()
@@ -47,11 +52,11 @@ func TestAutodrainingQueueFinalizerNeedTracksPoolAccounting(t *testing.T) {
 	}
 
 	device.pool.outboundElementsContainer = unbounded()
-	device.pool.messageBuffers = bounded()
+	iobuf.DefaultRawPool = iobuf.NewRawPool(1)
 	if !device.needsInboundQueueFinalizer() {
-		t.Fatal("bounded message buffer pool should need inbound queue finalizer")
+		t.Fatal("bounded raw buffer pool should need inbound queue finalizer")
 	}
 	if !device.needsOutboundQueueFinalizer() {
-		t.Fatal("bounded message buffer pool should need outbound queue finalizer")
+		t.Fatal("bounded raw buffer pool should need outbound queue finalizer")
 	}
 }

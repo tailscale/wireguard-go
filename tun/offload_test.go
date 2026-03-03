@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/tailscale/wireguard-go/conn"
+	"github.com/tailscale/wireguard-go/iobuf"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
 )
@@ -67,11 +68,10 @@ func Fuzz_GSOSplit(f *testing.F) {
 	})
 	header.UDP(gsoUDPv6[20:]).Encode(udpFields)
 
-	out := make([][]byte, conn.IdealBatchSize)
+	out := make([]iobuf.View, conn.IdealBatchSize)
 	for i := range out {
-		out[i] = make([]byte, 65535)
+		out[i] = iobuf.View{Bytes: make([]byte, 65535)}
 	}
-	sizes := make([]int, conn.IdealBatchSize)
 
 	f.Add(gsoTCPv4, int(GSOTCPv4), uint16(40), uint16(20), uint16(16), uint16(100), false)
 	f.Add(gsoUDPv4, int(GSOUDPL4), uint16(28), uint16(20), uint16(6), uint16(100), false)
@@ -87,9 +87,9 @@ func Fuzz_GSOSplit(f *testing.F) {
 			GSOSize:    gsoSize,
 			NeedsCsum:  needsCsum,
 		}
-		n, _ := GSOSplit(pkt, options, out, sizes, 0)
-		if n > len(sizes) {
-			t.Errorf("n (%d) > len(sizes): %d", n, len(sizes))
+		n, _ := GSOSplit(pkt, options, out, 0)
+		if n > len(out) {
+			t.Errorf("n (%d) > len(out): %d", n, len(out))
 		}
 	})
 }

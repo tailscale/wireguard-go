@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"os"
 
+	"github.com/tailscale/wireguard-go/iobuf"
 	"github.com/tailscale/wireguard-go/tun"
 )
 
@@ -110,13 +111,15 @@ type chTun struct {
 
 func (t *chTun) File() *os.File { return nil }
 
-func (t *chTun) Read(packets [][]byte, sizes []int, offset int) (int, error) {
+func (t *chTun) Read(bufs []iobuf.View, offset int) (int, error) {
 	select {
 	case <-t.c.closed:
 		return 0, os.ErrClosed
 	case msg := <-t.c.Outbound:
-		n := copy(packets[0][offset:], msg)
-		sizes[0] = n
+		// TODO: Allocate len(msg) buffer.
+		iobuf.EnsureAllocated(bufs[:1])
+		n := copy(bufs[0].Bytes[offset:], msg)
+		bufs[0].Bytes = bufs[0].Bytes[:offset+n]
 		return 1, nil
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"net"
 	"testing"
 
+	"github.com/tailscale/wireguard-go/iobuf"
 	"golang.org/x/net/ipv6"
 )
 
@@ -15,15 +16,14 @@ func TestStdNetBindReceiveFuncAfterClose(t *testing.T) {
 		t.Fatal(err)
 	}
 	bind.Close()
-	bufs := make([][]byte, 1)
-	bufs[0] = make([]byte, 1)
-	sizes := make([]int, 1)
+	bufs := make([]iobuf.View, 1)
+	bufs[0] = iobuf.View{Bytes: make([]byte, 1)}
 	eps := make([]Endpoint, 1)
 	for _, fn := range fns {
 		// The ReceiveFuncs must not access conn-related fields on StdNetBind
 		// unguarded. Close() nils the conn-related fields resulting in a panic
 		// if they violate the mutex.
-		fn(bufs, sizes, eps)
+		fn(bufs, eps)
 	}
 }
 

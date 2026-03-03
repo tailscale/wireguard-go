@@ -13,6 +13,7 @@ import (
 	"os"
 
 	"github.com/tailscale/wireguard-go/conn"
+	"github.com/tailscale/wireguard-go/iobuf"
 )
 
 type ChannelBind struct {
@@ -94,13 +95,14 @@ func (c *ChannelBind) BatchSize() int { return 1 }
 func (c *ChannelBind) SetMark(mark uint32) error { return nil }
 
 func (c *ChannelBind) makeReceiveFunc(ch chan []byte) conn.ReceiveFunc {
-	return func(bufs [][]byte, sizes []int, eps []conn.Endpoint) (n int, err error) {
+	return func(bufs []iobuf.View, eps []conn.Endpoint) (n int, err error) {
 		select {
 		case <-c.closeSignal:
 			return 0, net.ErrClosed
 		case rx := <-ch:
-			copied := copy(bufs[0], rx)
-			sizes[0] = copied
+			iobuf.EnsureAllocated(bufs[:1])
+			n := copy(bufs[0].Bytes, rx)
+			bufs[0].Bytes = bufs[0].Bytes[:n]
 			eps[0] = c.target6
 			return 1, nil
 		}

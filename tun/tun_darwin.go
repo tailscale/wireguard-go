@@ -16,6 +16,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/tailscale/wireguard-go/iobuf"
 	"golang.org/x/sys/unix"
 )
 
@@ -217,7 +218,7 @@ func (tun *NativeTun) Events() <-chan Event {
 	return tun.events
 }
 
-func (tun *NativeTun) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
+func (tun *NativeTun) Read(bufs []iobuf.View, offset int) (n int, err error) {
 	// TODO: the BSDs look very similar in Read() and Write(). They should be
 	// collapsed, with platform-specific files containing the varying parts of
 	// their implementations.
@@ -225,12 +226,12 @@ func (tun *NativeTun) Read(bufs [][]byte, sizes []int, offset int) (int, error) 
 	case err := <-tun.errors:
 		return 0, err
 	default:
-		buf := bufs[0][offset-4:]
-		n, err := tun.tunFile.Read(buf[:])
+		iobuf.EnsureAllocated(bufs[:1])
+		n, err := tun.tunFile.Read(bufs[0].Bytes[offset-4:])
 		if n < 4 {
 			return 0, err
 		}
-		sizes[0] = n - 4
+		bufs[0].Bytes = bufs[0].Bytes[:offset+n-4]
 		return 1, err
 	}
 }

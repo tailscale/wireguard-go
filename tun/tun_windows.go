@@ -14,6 +14,7 @@ import (
 	"time"
 	_ "unsafe"
 
+	"github.com/tailscale/wireguard-go/iobuf"
 	"golang.org/x/sys/windows"
 	"golang.zx2c4.com/wintun"
 )
@@ -144,7 +145,7 @@ func (tun *NativeTun) BatchSize() int {
 
 // Note: Read() and Write() assume the caller comes only from a single thread; there's no locking.
 
-func (tun *NativeTun) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
+func (tun *NativeTun) Read(bufs []iobuf.View, offset int) (n int, err error) {
 	tun.running.Add(1)
 	defer tun.running.Done()
 retry:
@@ -161,8 +162,9 @@ retry:
 		switch err {
 		case nil:
 			packetSize := len(packet)
-			copy(bufs[0][offset:], packet)
-			sizes[0] = packetSize
+			iobuf.EnsureAllocated(bufs[:1])
+			n := copy(bufs[0].Bytes[offset:], packet)
+			bufs[0].Bytes = bufs[0].Bytes[:offset+n]
 			tun.session.ReleaseReceivePacket(packet)
 			tun.rate.update(uint64(packetSize))
 			return 1, nil

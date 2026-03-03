@@ -16,6 +16,7 @@ import (
 	"sync"
 	"syscall"
 
+	"github.com/tailscale/wireguard-go/iobuf"
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
 )
@@ -233,13 +234,14 @@ func (s *StdNetBind) receiveIP(
 	br batchReader,
 	conn *net.UDPConn,
 	rxOffload bool,
-	bufs [][]byte,
-	sizes []int,
+	bufs []iobuf.View,
 	eps []Endpoint,
 ) (n int, err error) {
 	msgs := s.getMessages()
+	// TODO: placeholder until bind implements right-sized buffers.
+	iobuf.EnsureAllocated(bufs)
 	for i := range bufs {
-		(*msgs)[i].Buffers[0] = bufs[i]
+		(*msgs)[i].Buffers[0] = bufs[i].Bytes
 		(*msgs)[i].OOB = (*msgs)[i].OOB[:cap((*msgs)[i].OOB)]
 	}
 	defer s.putMessages(msgs)
@@ -271,8 +273,8 @@ func (s *StdNetBind) receiveIP(
 	}
 	for i := 0; i < numMsgs; i++ {
 		msg := &(*msgs)[i]
-		sizes[i] = msg.N
-		if sizes[i] == 0 {
+		bufs[i].Bytes = bufs[i].Bytes[:msg.N]
+		if len(bufs[i].Bytes) == 0 {
 			continue
 		}
 		addrPort := msg.Addr.(*net.UDPAddr).AddrPort()
@@ -284,14 +286,14 @@ func (s *StdNetBind) receiveIP(
 }
 
 func (s *StdNetBind) makeReceiveIPv4(pc *ipv4.PacketConn, conn *net.UDPConn, rxOffload bool) ReceiveFunc {
-	return func(bufs [][]byte, sizes []int, eps []Endpoint) (n int, err error) {
-		return s.receiveIP(pc, conn, rxOffload, bufs, sizes, eps)
+	return func(bufs []iobuf.View, eps []Endpoint) (n int, err error) {
+		return s.receiveIP(pc, conn, rxOffload, bufs, eps)
 	}
 }
 
 func (s *StdNetBind) makeReceiveIPv6(pc *ipv6.PacketConn, conn *net.UDPConn, rxOffload bool) ReceiveFunc {
-	return func(bufs [][]byte, sizes []int, eps []Endpoint) (n int, err error) {
-		return s.receiveIP(pc, conn, rxOffload, bufs, sizes, eps)
+	return func(bufs []iobuf.View, eps []Endpoint) (n int, err error) {
+		return s.receiveIP(pc, conn, rxOffload, bufs, eps)
 	}
 }
 

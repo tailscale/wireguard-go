@@ -8,6 +8,8 @@ package device
 import (
 	"runtime"
 	"sync"
+
+	"github.com/tailscale/wireguard-go/iobuf"
 )
 
 // An outboundQueue is a channel of QueueOutboundElements awaiting encryption.
@@ -90,7 +92,7 @@ func newAutodrainingInboundQueue(device *Device) *autodrainingInboundQueue {
 }
 
 func (device *Device) needsInboundQueueFinalizer() bool {
-	return device.pool.messageBuffers.HasAccounting() ||
+	return iobuf.HasAccounting() ||
 		device.pool.inboundElements.HasAccounting() ||
 		device.pool.inboundElementsContainer.HasAccounting()
 }
@@ -101,7 +103,7 @@ func (device *Device) flushInboundQueue(q *autodrainingInboundQueue) {
 		case elemsContainer := <-q.c:
 			elemsContainer.filling.Wait()
 			for _, elem := range elemsContainer.elems {
-				device.PutMessageBuffer(elem.buffer)
+				elem.buffer.Release()
 				device.PutInboundElement(elem)
 			}
 			device.PutInboundElementsContainer(elemsContainer)
@@ -131,7 +133,7 @@ func newAutodrainingOutboundQueue(device *Device) *autodrainingOutboundQueue {
 }
 
 func (device *Device) needsOutboundQueueFinalizer() bool {
-	return device.pool.messageBuffers.HasAccounting() ||
+	return iobuf.HasAccounting() ||
 		device.pool.outboundElements.HasAccounting() ||
 		device.pool.outboundElementsContainer.HasAccounting()
 }
@@ -142,7 +144,7 @@ func (device *Device) flushOutboundQueue(q *autodrainingOutboundQueue) {
 		case elemsContainer := <-q.c:
 			elemsContainer.filling.Wait()
 			for _, elem := range elemsContainer.elems {
-				device.PutMessageBuffer(elem.buffer)
+				elem.buffer.Release()
 				device.PutOutboundElement(elem)
 			}
 			device.PutOutboundElementsContainer(elemsContainer)
