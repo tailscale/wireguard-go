@@ -17,7 +17,8 @@ import (
 func TestWaitPool(t *testing.T) {
 	var wg sync.WaitGroup
 	var trials atomic.Int32
-	startTrials := int32(100000)
+	n := int32(runtime.NumCPU())
+	startTrials := 125 * n * n
 	if raceEnabled {
 		// This test can be very slow with -race.
 		startTrials /= 10
@@ -63,7 +64,7 @@ func TestWaitPool(t *testing.T) {
 	}
 	wg.Wait()
 	if max.Load() != p.max {
-		t.Errorf("Actual maximum count (%d) != ideal maximum count (%d)", max, p.max)
+		t.Errorf("Actual maximum count (%d) != ideal maximum count (%d)", max.Load(), p.max)
 	}
 }
 
