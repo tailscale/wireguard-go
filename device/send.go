@@ -188,16 +188,17 @@ func (peer *Peer) SendHandshakeResponse() error {
 func (device *Device) SendHandshakeCookie(initiatingElem *QueueHandshakeElement) error {
 	device.log.Verbosef("Sending cookie response for denied handshake message for %v", initiatingElem.endpoint.DstToString())
 
-	sender := binary.LittleEndian.Uint32(initiatingElem.packet[4:8])
-	reply, err := device.cookieChecker.CreateReply(initiatingElem.packet, sender, initiatingElem.endpoint.DstToBytes())
+	packet := initiatingElem.stack.Data()
+	sender := binary.LittleEndian.Uint32(packet[4:8])
+	reply, err := device.cookieChecker.CreateReply(packet, sender, initiatingElem.endpoint.DstToBytes())
 	if err != nil {
 		device.log.Errorf("Failed to create cookie reply: %v", err)
 		return err
 	}
 
 	buf := device.internalPool.Get(MessageEncapsulatingTransportSize + MessageCookieReplySize)
-	packet := buf.Data()[MessageEncapsulatingTransportSize:]
-	_ = reply.marshal(packet)
+	cookiePacket := buf.Data()[MessageEncapsulatingTransportSize:]
+	_ = reply.marshal(cookiePacket)
 
 	device.net.bind.Send([][]byte{buf.Data()}, initiatingElem.endpoint, MessageEncapsulatingTransportSize)
 	buf.Release()

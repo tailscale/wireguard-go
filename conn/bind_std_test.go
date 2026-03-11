@@ -1,7 +1,6 @@
 package conn
 
 import (
-	"bytes"
 	"encoding/binary"
 	"net"
 	"testing"
@@ -17,15 +16,14 @@ func TestStdNetBindReceiveFuncAfterClose(t *testing.T) {
 		t.Fatal(err)
 	}
 	bind.Close()
-	bufs := make([]*buffer.Buffer, IdealBatchSize)
-	bufs[0] = buffer.New(make([]byte, buffer.MaxMessageSize))
-	sizes := make([]int, IdealBatchSize)
+	stacks := make([]buffer.Stack, IdealBatchSize)
+	stacks[0] = buffer.NewStack(buffer.New(make([]byte, buffer.MaxMessageSize)), 0)
 	eps := make([]Endpoint, IdealBatchSize)
 	for _, fn := range fns {
 		// The ReceiveFuncs must not access conn-related fields on StdNetBind
 		// unguarded. Close() nils the conn-related fields resulting in a panic
 		// if they violate the mutex.
-		fn(bufs, sizes, eps)
+		fn(stacks, eps)
 	}
 }
 
@@ -132,133 +130,4 @@ func mockGetGSOSize(control []byte) (int, error) {
 		return 0, nil
 	}
 	return int(binary.LittleEndian.Uint16(control)), nil
-}
-
-func Test_splitCoalescedMessages(t *testing.T) {
-	newMsg := func(n, gso int) ipv6.Message {
-		msg := ipv6.Message{
-			Buffers: [][]byte{make([]byte, 1<<16-1)},
-			N:       n,
-			OOB:     make([]byte, 2),
-		}
-		binary.LittleEndian.PutUint16(msg.OOB, uint16(gso))
-		if gso > 0 {
-			msg.NN = 2
-		}
-		return msg
-	}
-
-	cases := []struct {
-		name        string
-		msgs        []ipv6.Message
-		firstMsgAt  int
-		wantNumEval int
-		wantMsgLens []int
-		wantErr     bool
-	}{
-		{
-			name: "second last split last empty",
-			msgs: []ipv6.Message{
-				newMsg(0, 0),
-				newMsg(0, 0),
-				newMsg(3, 1),
-				newMsg(0, 0),
-			},
-			firstMsgAt:  2,
-			wantNumEval: 3,
-			wantMsgLens: []int{1, 1, 1, 0},
-			wantErr:     false,
-		},
-		{
-			name: "second last no split last empty",
-			msgs: []ipv6.Message{
-				newMsg(0, 0),
-				newMsg(0, 0),
-				newMsg(1, 0),
-				newMsg(0, 0),
-			},
-			firstMsgAt:  2,
-			wantNumEval: 1,
-			wantMsgLens: []int{1, 0, 0, 0},
-			wantErr:     false,
-		},
-		{
-			name: "second last no split last no split",
-			msgs: []ipv6.Message{
-				newMsg(0, 0),
-				newMsg(0, 0),
-				newMsg(1, 0),
-				newMsg(1, 0),
-			},
-			firstMsgAt:  2,
-			wantNumEval: 2,
-			wantMsgLens: []int{1, 1, 0, 0},
-			wantErr:     false,
-		},
-		{
-			name: "second last no split last split",
-			msgs: []ipv6.Message{
-				newMsg(0, 0),
-				newMsg(0, 0),
-				newMsg(1, 0),
-				newMsg(3, 1),
-			},
-			firstMsgAt:  2,
-			wantNumEval: 4,
-			wantMsgLens: []int{1, 1, 1, 1},
-			wantErr:     false,
-		},
-		{
-			name: "second last split last split",
-			msgs: []ipv6.Message{
-				newMsg(0, 0),
-				newMsg(0, 0),
-				newMsg(2, 1),
-				newMsg(2, 1),
-			},
-			firstMsgAt:  2,
-			wantNumEval: 4,
-			wantMsgLens: []int{1, 1, 1, 1},
-			wantErr:     false,
-		},
-		{
-			name: "second last no split last split overflow",
-			msgs: []ipv6.Message{
-				newMsg(0, 0),
-				newMsg(0, 0),
-				newMsg(1, 0),
-				newMsg(4, 1),
-			},
-			firstMsgAt:  2,
-			wantNumEval: 4,
-			wantMsgLens: []int{1, 1, 1, 1},
-			wantErr:     true,
-		},
-	}
-
-	for _, tt := range cases {
-		t.Run(tt.name, func(t *testing.T) {
-			bufs := make([]*buffer.Buffer, len(tt.msgs))
-			for i := range tt.msgs {
-				bufs[i] = buffer.New(tt.msgs[i].Buffers[0])
-			}
-			got, err := splitCoalescedMessages(tt.msgs, 2, mockGetGSOSize, bufs, buffer.NewFragmentPool())
-			if err != nil && !tt.wantErr {
-				t.Fatalf("err: %v", err)
-			}
-			if got != tt.wantNumEval {
-				t.Fatalf("got to eval: %d want: %d", got, tt.wantNumEval)
-			}
-			for i, msg := range tt.msgs {
-				if msg.N != tt.wantMsgLens[i] {
-					t.Fatalf("msg[%d].N: %d want: %d", i, msg.N, tt.wantMsgLens[i])
-				}
-			}
-			for i := range got {
-				if !bytes.Equal(bufs[i].Data(), tt.msgs[i].Buffers[0]) {
-					t.Fatalf("bufs[%d].Data() and tt.msgs[%d] unequal", i, i)
-				}
-			}
-		})
-	}
 }

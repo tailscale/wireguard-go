@@ -27,7 +27,7 @@ const (
 // sizes may be zero, and callers should ignore them. Callers must pass a sizes
 // and eps slice with a length greater than or equal to the length of packets.
 // These lengths must not exceed the length of the associated Bind.BatchSize().
-type ReceiveFunc func(bufs []*buffer.Buffer, sizes []int, eps []Endpoint) (n int, err error)
+type ReceiveFunc func(stacks []buffer.Stack, eps []Endpoint) (n int, err error)
 
 // A Bind listens on a port for both IPv6 and IPv4 UDP traffic.
 //

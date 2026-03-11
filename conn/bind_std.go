@@ -181,6 +181,7 @@ again:
 		return nil, 0, err
 	}
 	var fns []ReceiveFunc
+
 	if v4conn != nil {
 		s.ipv4TxOffload, s.ipv4RxOffload = supportsUDPOffload(v4conn)
 		if runtime.GOOS == "linux" {
@@ -234,8 +235,7 @@ func (s *StdNetBind) receiveIP(
 	br batchReader,
 	conn *net.UDPConn,
 	rxOffload bool,
-	bufs []*buffer.Buffer,
-	sizes []int,
+	stacks []buffer.Stack,
 	eps []Endpoint,
 ) (n int, err error) {
 	msgs := s.getMessages()
@@ -243,29 +243,51 @@ func (s *StdNetBind) receiveIP(
 	var numMsgs int
 	if runtime.GOOS == "linux" {
 		if rxOffload {
-			const readBatch = 2
-			readAt := len(*msgs) - readBatch
-			for i := readAt; i < readAt+readBatch; i++ {
-				if bufs[i] == nil {
-					bufs[i] = s.bufPool.Get(buffer.MaxMessageSize)
+			readBatch := len(stacks)
+			if readBatch > len(*msgs) {
+				readBatch = len(*msgs)
+			}
+			for i := 0; i < readBatch; i++ {
+				if stacks[i].Buffer() == nil {
+					stacks[i] = buffer.NewStack(s.bufPool.Get(buffer.MaxMessageSize), 0)
 				}
-				(*msgs)[i].Buffers[0] = bufs[i].Data()
+				(*msgs)[i].Buffers[0] = stacks[i].Buffer().Data()
 				(*msgs)[i].OOB = (*msgs)[i].OOB[:cap((*msgs)[i].OOB)]
 			}
-			numMsgs, err = br.ReadBatch((*msgs)[readAt:], 0)
+			numMsgs, err = br.ReadBatch((*msgs)[:readBatch], 0)
 			if err != nil {
 				return 0, err
 			}
-			numMsgs, err = splitCoalescedMessages(*msgs, readAt, getGSOSize, bufs, s.bufPool)
-			if err != nil {
-				return 0, err
-			}
-		} else {
-			for i := range bufs {
-				if bufs[i] == nil {
-					bufs[i] = s.bufPool.Get(buffer.MaxMessageSize)
+			n := 0
+			for i := 0; i < numMsgs; i++ {
+				msg := &(*msgs)[i]
+				if msg.N == 0 {
+					continue
 				}
-				(*msgs)[i].Buffers[0] = bufs[i].Data()
+				gsoSize, gsoErr := getGSOSize(msg.OOB[:msg.NN])
+				if gsoErr != nil {
+					return 0, gsoErr
+				}
+				stacks[i] = buffer.NewStack(stacks[i].Buffer(), msg.N)
+				if gsoSize > 0 {
+					stacks[i].SetGSO(gsoSize)
+				}
+				addrPort := msg.Addr.(*net.UDPAddr).AddrPort()
+				ep := &StdNetEndpoint{AddrPort: addrPort}
+				getSrcFromControl(msg.OOB[:msg.NN], ep)
+				if n != i {
+					stacks[n], stacks[i] = stacks[i], stacks[n]
+				}
+				eps[n] = ep
+				n++
+			}
+			return n, nil
+		} else {
+			for i := range stacks {
+				if stacks[i].Buffer() == nil {
+					stacks[i] = buffer.NewStack(s.bufPool.Get(buffer.MaxMessageSize), 0)
+				}
+				(*msgs)[i].Buffers[0] = stacks[i].Buffer().Data()
 				(*msgs)[i].OOB = (*msgs)[i].OOB[:cap((*msgs)[i].OOB)]
 			}
 			numMsgs, err = br.ReadBatch(*msgs, 0)
@@ -274,11 +296,11 @@ func (s *StdNetBind) receiveIP(
 			}
 		}
 	} else {
-		if bufs[0] == nil {
-			bufs[0] = s.bufPool.Get(buffer.MaxMessageSize)
+		if stacks[0].Buffer() == nil {
+			stacks[0] = buffer.NewStack(s.bufPool.Get(buffer.MaxMessageSize), 0)
 		}
 		msg := &(*msgs)[0]
-		msg.Buffers[0] = bufs[0].Data()
+		msg.Buffers[0] = stacks[0].Buffer().Data()
 		msg.OOB = msg.OOB[:cap(msg.OOB)]
 		msg.N, msg.NN, _, msg.Addr, err = conn.ReadMsgUDP(msg.Buffers[0], msg.OOB)
 		if err != nil {
@@ -288,10 +310,7 @@ func (s *StdNetBind) receiveIP(
 	}
 	for i := 0; i < numMsgs; i++ {
 		msg := &(*msgs)[i]
-		sizes[i] = msg.N
-		if sizes[i] == 0 {
-			continue
-		}
+		stacks[i].SetSize(msg.N)
 		addrPort := msg.Addr.(*net.UDPAddr).AddrPort()
 		ep := &StdNetEndpoint{AddrPort: addrPort} // TODO: remove allocation
 		getSrcFromControl(msg.OOB[:msg.NN], ep)
@@ -301,14 +320,14 @@ func (s *StdNetBind) receiveIP(
 }
 
 func (s *StdNetBind) makeReceiveIPv4(pc *ipv4.PacketConn, conn *net.UDPConn, rxOffload bool) ReceiveFunc {
-	return func(bufs []*buffer.Buffer, sizes []int, eps []Endpoint) (n int, err error) {
-		return s.receiveIP(pc, conn, rxOffload, bufs, sizes, eps)
+	return func(stacks []buffer.Stack, eps []Endpoint) (n int, err error) {
+		return s.receiveIP(pc, conn, rxOffload, stacks, eps)
 	}
 }
 
 func (s *StdNetBind) makeReceiveIPv6(pc *ipv6.PacketConn, conn *net.UDPConn, rxOffload bool) ReceiveFunc {
-	return func(bufs []*buffer.Buffer, sizes []int, eps []Endpoint) (n int, err error) {
-		return s.receiveIP(pc, conn, rxOffload, bufs, sizes, eps)
+	return func(stacks []buffer.Stack, eps []Endpoint) (n int, err error) {
+		return s.receiveIP(pc, conn, rxOffload, stacks, eps)
 	}
 }
 
@@ -522,53 +541,3 @@ func coalesceMessages(addr *net.UDPAddr, ep *StdNetEndpoint, bufs [][]byte, offs
 }
 
 type getGSOFunc func(control []byte) (int, error)
-
-func splitCoalescedMessages(msgs []ipv6.Message, firstMsgAt int, getGSO getGSOFunc, bufs []*buffer.Buffer, pool buffer.Source) (n int, err error) {
-	for i := firstMsgAt; i < len(msgs); i++ {
-		msg := &msgs[i]
-		if msg.N == 0 {
-			return n, err
-		}
-		var (
-			gsoSize    int
-			start      int
-			end        = msg.N
-			numToSplit = 1
-		)
-		gsoSize, err = getGSO(msg.OOB[:msg.NN])
-		if err != nil {
-			return n, err
-		}
-		if gsoSize > 0 {
-			numToSplit = (msg.N + gsoSize - 1) / gsoSize
-			end = gsoSize
-		}
-		for j := 0; j < numToSplit; j++ {
-			if n > i {
-				return n, errors.New("splitting coalesced packet resulted in overflow")
-			}
-			segLen := end - start
-			if bufs[n] == nil {
-				bufs[n] = pool.Get(segLen)
-			}
-			msgs[n].Buffers[0] = bufs[n].Data()
-			msgs[n].OOB = msgs[n].OOB[:cap(msgs[n].OOB)]
-			copied := copy(msgs[n].Buffers[0], msg.Buffers[0][start:end])
-			msgs[n].N = copied
-			msgs[n].Addr = msg.Addr
-			start = end
-			end += gsoSize
-			if end > msg.N {
-				end = msg.N
-			}
-			n++
-		}
-		if i != n-1 {
-			// It is legal for bytes to move within msg.Buffers[0] as a result
-			// of splitting, so we only zero the source msg len when it is not
-			// the destination of the last split operation above.
-			msg.N = 0
-		}
-	}
-	return n, nil
-}

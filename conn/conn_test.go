@@ -13,7 +13,7 @@ import (
 
 func TestPrettyName(t *testing.T) {
 	var (
-		recvFunc ReceiveFunc = func(bufs []*buffer.Buffer, sizes []int, eps []Endpoint) (n int, err error) { return }
+		recvFunc ReceiveFunc = func(stacks []buffer.Stack, eps []Endpoint) (n int, err error) { return }
 	)
 
 	const want = "TestPrettyName"

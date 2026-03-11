@@ -93,7 +93,7 @@ func (device *Device) flushInboundQueue(q *autodrainingInboundQueue) {
 		case elemsContainer := <-q.c:
 			elemsContainer.Lock()
 			for _, elem := range elemsContainer.elems {
-				elem.buf.Release()
+				elem.stack.Release()
 				device.PutInboundElement(elem)
 			}
 			device.PutInboundElementsContainer(elemsContainer)

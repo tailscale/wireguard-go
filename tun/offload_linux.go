@@ -453,9 +453,11 @@ func coalesceUDPPackets(pkt []byte, item *udpGROItem, bufs [][]byte, bufsOffset 
 	if !checksumValid(pkt, item.iphLen, unix.IPPROTO_UDP, isV6) {
 		return coalescePktInvalidCSum
 	}
-	extendBy := len(pkt) - int(headersLen)
-	bufs[item.bufsIndex] = append(bufs[item.bufsIndex], make([]byte, extendBy)...)
-	copy(bufs[item.bufsIndex][bufsOffset+len(pktHead):], pkt[headersLen:])
+	// Append the payload directly. The compiler turns append(dst, src...)
+	// into a single memmove, which handles overlapping bufs entries that
+	// share a backing array (GSO segments from the same buffer) without
+	// clobbering the source region first.
+	bufs[item.bufsIndex] = append(bufs[item.bufsIndex], pkt[headersLen:]...)
 
 	item.numMerged++
 	return coalesceSuccess
@@ -496,9 +498,7 @@ func coalesceTCPPackets(mode canCoalesce, pkt []byte, pktBuffsIndex int, gsoSize
 			return coalescePktInvalidCSum
 		}
 		item.sentSeq = seq
-		extendBy := coalescedLen - len(pktHead)
-		bufs[pktBuffsIndex] = append(bufs[pktBuffsIndex], make([]byte, extendBy)...)
-		copy(bufs[pktBuffsIndex][bufsOffset+len(pkt):], bufs[item.bufsIndex][bufsOffset+int(headersLen):])
+		bufs[pktBuffsIndex] = append(bufs[pktBuffsIndex], bufs[item.bufsIndex][bufsOffset+int(headersLen):]...)
 		// Flip the slice headers in bufs as part of prepend. The index of item
 		// is already being tracked for writing.
 		bufs[item.bufsIndex], bufs[pktBuffsIndex] = bufs[pktBuffsIndex], bufs[item.bufsIndex]
@@ -522,9 +522,7 @@ func coalesceTCPPackets(mode canCoalesce, pkt []byte, pktBuffsIndex int, gsoSize
 			item.pshSet = pshSet
 			pktHead[item.iphLen+tcpFlagsOffset] |= tcpFlagPSH
 		}
-		extendBy := len(pkt) - int(headersLen)
-		bufs[item.bufsIndex] = append(bufs[item.bufsIndex], make([]byte, extendBy)...)
-		copy(bufs[item.bufsIndex][bufsOffset+len(pktHead):], pkt[headersLen:])
+		bufs[item.bufsIndex] = append(bufs[item.bufsIndex], pkt[headersLen:]...)
 	}
 
 	if gsoSize > item.gsoSize {
