@@ -764,6 +764,136 @@ func applyUDPCoalesceAccounting(bufs [][]byte, offset int, table *udpGROTable) e
 	return nil
 }
 
+// groFlowKey is a lightweight 5-tuple key used by mergeAdjacentGroups to
+// decide whether adjacent single-fragment stacks might coalesce. TCP's rxAck
+// is intentionally excluded — packets with different ack values will land in
+// separate GRO table entries during handleGRO. The pre-grouping just needs to
+// group packets that *might* coalesce.
+// TODO consider adding rxAck and scrapping original GRO bookkeeping. more invasive change.
+type groFlowKey struct {
+	srcAddr, dstAddr [16]byte
+	srcPort, dstPort uint16
+	candidateType    groCandidateType
+}
+
+// extractFlowKey returns a groFlowKey, the combined IP+transport header
+// length, and true if pkt is a GRO candidate. It returns ok=false for
+// non-candidates.
+func extractFlowKey(pkt []byte, gro groDisablementFlags) (groFlowKey, int, bool) {
+	ct := packetIsGROCandidate(pkt, gro)
+	if ct == notGROCandidate {
+		return groFlowKey{}, 0, false
+	}
+	var key groFlowKey
+	key.candidateType = ct
+	switch ct {
+	case tcp4GROCandidate, udp4GROCandidate:
+		srcOff := ipv4SrcAddrOffset
+		copy(key.srcAddr[:4], pkt[srcOff:srcOff+4])
+		copy(key.dstAddr[:4], pkt[srcOff+4:srcOff+8])
+		iphLen := int((pkt[0] & 0x0F) * 4)
+		key.srcPort = binary.BigEndian.Uint16(pkt[iphLen:])
+		key.dstPort = binary.BigEndian.Uint16(pkt[iphLen+2:])
+		var hdrLen int
+		if ct == tcp4GROCandidate {
+			tcphLen := int((pkt[iphLen+12] >> 4) * 4)
+			hdrLen = iphLen + tcphLen
+		} else {
+			hdrLen = iphLen + udphLen
+		}
+		return key, hdrLen, true
+	case tcp6GROCandidate, udp6GROCandidate:
+		srcOff := ipv6SrcAddrOffset
+		copy(key.srcAddr[:], pkt[srcOff:srcOff+16])
+		copy(key.dstAddr[:], pkt[srcOff+16:srcOff+32])
+		iphLen := 40
+		key.srcPort = binary.BigEndian.Uint16(pkt[iphLen:])
+		key.dstPort = binary.BigEndian.Uint16(pkt[iphLen+2:])
+		var hdrLen int
+		if ct == tcp6GROCandidate {
+			tcphLen := int((pkt[iphLen+12] >> 4) * 4)
+			hdrLen = iphLen + tcphLen
+		} else {
+			hdrLen = iphLen + udphLen
+		}
+		return key, hdrLen, true
+	}
+	return groFlowKey{}, 0, false
+}
+
+// mergeAdjacentGroups performs a linear pre-scan of bufs, merging adjacent
+// single-fragment groups into a single group when their flow keys match and
+// the head fragment has sufficient capacity to hold the coalesced result.
+// This allows handleGRO to coalesce across what were separate stacks.
+//
+// merged and scratch are caller-provided scratch slices that are reused
+// across calls to avoid allocation.
+func mergeAdjacentGroups(
+	bufs [][][]byte,
+	offset int,
+	gro groDisablementFlags,
+	merged [][][]byte,
+	scratch [][]byte,
+) ([][][]byte, [][]byte) {
+	merged = merged[:0]
+	scratch = scratch[:0]
+	groupStart := 0
+	var curKey groFlowKey
+	var curCoalLen int
+
+	flush := func() {
+		if len(scratch) > groupStart {
+			merged = append(merged, scratch[groupStart:len(scratch)])
+			groupStart = len(scratch)
+		}
+	}
+
+	for _, group := range bufs {
+		if len(group) == 0 {
+			continue
+		}
+
+		if len(group) > 1 {
+			flush()
+			merged = append(merged, group)
+			continue
+		}
+
+		// Single-fragment group.
+		frag := group[0]
+		pkt := frag[offset:]
+		key, _, ok := extractFlowKey(pkt, gro)
+		if !ok {
+			flush()
+			scratch = append(scratch, frag)
+			merged = append(merged, scratch[len(scratch)-1:len(scratch)])
+			groupStart = len(scratch)
+			continue
+		}
+
+		payloadLen := len(pkt)
+
+		if len(scratch) > groupStart && key == curKey {
+			newCoalLen := curCoalLen + payloadLen
+			head := scratch[groupStart]
+			if newCoalLen <= cap(head)-offset {
+				scratch = append(scratch, frag)
+				curCoalLen = newCoalLen
+				continue
+			}
+		}
+
+		flush()
+		scratch = append(scratch, frag)
+		groupStart = len(scratch) - 1
+		curKey = key
+		curCoalLen = len(pkt)
+	}
+
+	flush()
+	return merged, scratch
+}
+
 type groCandidateType uint8
 
 const (

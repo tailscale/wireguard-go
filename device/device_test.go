@@ -441,7 +441,7 @@ func (t *fakeTUNDeviceSized) File() *os.File { return nil }
 func (t *fakeTUNDeviceSized) Read(bufs []*buffer.Buffer, sizes []int, offset int) (n int, err error) {
 	return 0, nil
 }
-func (t *fakeTUNDeviceSized) Write(bufs [][]byte, offset int) (int, error) { return 0, nil }
+func (t *fakeTUNDeviceSized) Write(bufs [][][]byte, offset int) (int, error) { return 0, nil }
 func (t *fakeTUNDeviceSized) MTU() (int, error)                            { return 0, nil }
 func (t *fakeTUNDeviceSized) Name() (string, error)                        { return "", nil }
 func (t *fakeTUNDeviceSized) Events() <-chan tun.Event                     { return nil }

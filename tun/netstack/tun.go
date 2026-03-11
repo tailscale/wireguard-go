@@ -137,24 +137,28 @@ func (tun *netTun) Read(bufs []*wgbuf.Buffer, sizes []int, offset int) (int, err
 	return 1, nil
 }
 
-func (tun *netTun) Write(buf [][]byte, offset int) (int, error) {
-	for _, buf := range buf {
-		packet := buf[offset:]
-		if len(packet) == 0 {
-			continue
-		}
+func (tun *netTun) Write(bufs [][][]byte, offset int) (int, error) {
+	total := 0
+	for _, group := range bufs {
+		for _, buf := range group {
+			packet := buf[offset:]
+			if len(packet) == 0 {
+				continue
+			}
 
-		pkb := stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buffer.MakeWithData(packet)})
-		switch packet[0] >> 4 {
-		case 4:
-			tun.ep.InjectInbound(header.IPv4ProtocolNumber, pkb)
-		case 6:
-			tun.ep.InjectInbound(header.IPv6ProtocolNumber, pkb)
-		default:
-			return 0, syscall.EAFNOSUPPORT
+			pkb := stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buffer.MakeWithData(packet)})
+			switch packet[0] >> 4 {
+			case 4:
+				tun.ep.InjectInbound(header.IPv4ProtocolNumber, pkb)
+			case 6:
+				tun.ep.InjectInbound(header.IPv6ProtocolNumber, pkb)
+			default:
+				return total, syscall.EAFNOSUPPORT
+			}
+			total++
 		}
 	}
-	return len(buf), nil
+	return total, nil
 }
 
 func (tun *netTun) WriteNotify() {

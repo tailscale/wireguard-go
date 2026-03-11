@@ -103,13 +103,17 @@ func (tun *NativeTun) Read(bufs []*buffer.Buffer, sizes []int, offset int) (int,
 	}
 }
 
-func (tun *NativeTun) Write(bufs [][]byte, offset int) (int, error) {
-	for i, buf := range bufs {
-		if _, err := tun.dataFile.Write(buf[offset:]); err != nil {
-			return i, err
+func (tun *NativeTun) Write(bufs [][][]byte, offset int) (int, error) {
+	total := 0
+	for _, group := range bufs {
+		for _, buf := range group {
+			if _, err := tun.dataFile.Write(buf[offset:]); err != nil {
+				return total, err
+			}
+			total++
 		}
 	}
-	return len(bufs), nil
+	return total, nil
 }
 
 func (tun *NativeTun) Close() error {

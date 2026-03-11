@@ -429,7 +429,8 @@ func (peer *Peer) RoutineSequentialReceiver(maxBatchSize int) {
 	}()
 	device.log.Verbosef("%v - Routine: sequential receiver - started", peer)
 
-	legacyBufs := make([][]byte, 0, maxBatchSize)
+	viewGroups := make([][][]byte, 0, maxBatchSize)
+	segBuf := make([][]byte, 0, maxBatchSize)
 
 	for elemsContainer := range peer.queue.inbound.c {
 		if elemsContainer == nil {
@@ -439,6 +440,8 @@ func (peer *Peer) RoutineSequentialReceiver(maxBatchSize int) {
 		validTailPacket := -1
 		dataPacketReceived := false
 		rxBytesLen := uint64(0)
+
+		// Phase 1 — validate all elems, build viewGroups
 		for i, elem := range elemsContainer.elems {
 			if elem.stack.Data() == nil {
 				// decryption failed
@@ -446,6 +449,7 @@ func (peer *Peer) RoutineSequentialReceiver(maxBatchSize int) {
 			}
 
 			elemHasValidSegment := false
+			segStart := len(segBuf)
 			for frame := range elem.stack.SegmentFrames() {
 				counter := binary.LittleEndian.Uint64(
 					frame[MessageTransportOffsetCounter:MessageTransportOffsetContent],
@@ -517,7 +521,7 @@ func (peer *Peer) RoutineSequentialReceiver(maxBatchSize int) {
 					continue
 				}
 
-				legacyBufs = append(legacyBufs, frame[:MessageTransportOffsetContent+len(packet)])
+				segBuf = append(segBuf, frame[:MessageTransportOffsetContent+len(packet)])
 			}
 
 			if elemHasValidSegment {
@@ -526,17 +530,25 @@ func (peer *Peer) RoutineSequentialReceiver(maxBatchSize int) {
 				}
 			}
 
-			// Write once per stack: all segments in a single Write must be
-			// backed by the same contiguous buffer for the TUN's handleGRO.
-			if len(legacyBufs) > 0 {
-				_, err := device.tun.device.Write(legacyBufs, MessageTransportOffsetContent)
-				if err != nil && !device.isClosed() {
-					device.log.Errorf("Failed to write packets to TUN device: %v", err)
-				}
+			if len(segBuf) > segStart {
+				viewGroups = append(viewGroups, segBuf[segStart:len(segBuf)])
 			}
-			elem.stack.Release()
-			legacyBufs = legacyBufs[:0]
 		}
+
+		// Phase 2 — write all groups in a single call
+		if len(viewGroups) > 0 {
+			_, err := device.tun.device.Write(viewGroups, MessageTransportOffsetContent)
+			if err != nil && !device.isClosed() {
+				device.log.Errorf("Failed to write packets to TUN device: %v", err)
+			}
+		}
+
+		// Phase 3 — release all stacks
+		for _, elem := range elemsContainer.elems {
+			elem.stack.Release()
+		}
+		viewGroups = viewGroups[:0]
+		segBuf = segBuf[:0]
 
 		peer.rxBytes.Add(rxBytesLen)
 		if validTailPacket >= 0 {

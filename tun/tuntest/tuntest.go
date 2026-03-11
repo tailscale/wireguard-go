@@ -126,22 +126,26 @@ func (t *chTun) Read(bufs []*buffer.Buffer, sizes []int, offset int) (int, error
 }
 
 // Write is called by the wireguard device to deliver a packet for routing.
-func (t *chTun) Write(packets [][]byte, offset int) (int, error) {
+func (t *chTun) Write(bufs [][][]byte, offset int) (int, error) {
 	if offset == -1 {
 		close(t.c.closed)
 		close(t.c.events)
 		return 0, io.EOF
 	}
-	for i, data := range packets {
-		msg := make([]byte, len(data)-offset)
-		copy(msg, data[offset:])
-		select {
-		case <-t.c.closed:
-			return i, os.ErrClosed
-		case t.c.Inbound <- msg:
+	total := 0
+	for _, group := range bufs {
+		for _, data := range group {
+			msg := make([]byte, len(data)-offset)
+			copy(msg, data[offset:])
+			select {
+			case <-t.c.closed:
+				return total, os.ErrClosed
+			case t.c.Inbound <- msg:
+			}
+			total++
 		}
 	}
-	return len(packets), nil
+	return total, nil
 }
 
 func (t *chTun) BatchSize() int {

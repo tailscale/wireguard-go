@@ -55,6 +55,9 @@ type NativeTun struct {
 	udpGROTable *udpGROTable
 	gro         groDisablementFlags
 
+	mergedGroups [][][]byte
+	groupBacking [][]byte
+
 	bufPool       *buffer.FragmentPool
 	coalescedBufs buffer.Arena
 }
@@ -353,39 +356,55 @@ func (tun *NativeTun) nameSlow() (string, error) {
 	return unix.ByteSliceToString(ifr[:]), nil
 }
 
-func (tun *NativeTun) Write(bufs [][]byte, offset int) (int, error) {
+func (tun *NativeTun) Write(bufs [][][]byte, offset int) (int, error) {
 	tun.writeOpMu.Lock()
-	defer func() {
-		tun.tcpGROTable.reset()
-		tun.udpGROTable.reset()
-		tun.coalescedBufs.Flush()
-		tun.writeOpMu.Unlock()
-	}()
+	defer tun.writeOpMu.Unlock()
 	var (
 		errs  error
 		total int
 	)
-	tun.toWrite = tun.toWrite[:0]
 	if tun.vnetHdr {
-		err := handleGRO(bufs, offset, tun.tcpGROTable, tun.udpGROTable, tun.gro, &tun.toWrite, &tun.coalescedBufs)
-		if err != nil {
-			return 0, err
+		tun.mergedGroups, tun.groupBacking = mergeAdjacentGroups(
+			bufs, offset, tun.gro, tun.mergedGroups, tun.groupBacking)
+		writeOffset := offset - virtioNetHdrLen
+		for _, group := range tun.mergedGroups {
+			tun.toWrite = tun.toWrite[:0]
+			err := handleGRO(group, offset, tun.tcpGROTable, tun.udpGROTable, tun.gro, &tun.toWrite, &tun.coalescedBufs)
+			if err != nil {
+				return 0, err
+			}
+			for _, idx := range tun.toWrite {
+				n, err := tun.tunFile.Write(group[idx][writeOffset:])
+				if errors.Is(err, syscall.EBADFD) {
+					return total, os.ErrClosed
+				}
+				if err != nil {
+					errs = errors.Join(errs, err)
+				} else {
+					total += n
+				}
+			}
+			tun.tcpGROTable.reset()
+			tun.udpGROTable.reset()
+			tun.coalescedBufs.Flush()
 		}
-		offset -= virtioNetHdrLen
 	} else {
-		for i := range bufs {
-			tun.toWrite = append(tun.toWrite, i)
-		}
-	}
-	for _, bufsI := range tun.toWrite {
-		n, err := tun.tunFile.Write(bufs[bufsI][offset:])
-		if errors.Is(err, syscall.EBADFD) {
-			return total, os.ErrClosed
-		}
-		if err != nil {
-			errs = errors.Join(errs, err)
-		} else {
-			total += n
+		for _, group := range bufs {
+			tun.toWrite = tun.toWrite[:0]
+			for i := range group {
+				tun.toWrite = append(tun.toWrite, i)
+			}
+			for _, idx := range tun.toWrite {
+				n, err := tun.tunFile.Write(group[idx][offset:])
+				if errors.Is(err, syscall.EBADFD) {
+					return total, os.ErrClosed
+				}
+				if err != nil {
+					errs = errors.Join(errs, err)
+				} else {
+					total += n
+				}
+			}
 		}
 	}
 	return total, errs
@@ -603,6 +622,8 @@ func CreateTUNFromFile(file *os.File, mtu int) (Device, error) {
 		tcpGROTable:             newTCPGROTable(),
 		udpGROTable:             newUDPGROTable(),
 		toWrite:                 make([]int, 0, conn.IdealBatchSize),
+		mergedGroups:            make([][][]byte, 0, conn.IdealBatchSize),
+		groupBacking:            make([][]byte, 0, conn.IdealBatchSize),
 		bufPool:                 bufPool,
 		coalescedBufs:           buffer.Arena{Buffer: bufPool.Get(32 * 16 << 10)},
 	}
@@ -656,12 +677,14 @@ func CreateUnmonitoredTUNFromFD(fd int) (Device, string, error) {
 	file := os.NewFile(uintptr(fd), "/dev/tun")
 	bufPool := buffer.NewFragmentPool()
 	tun := &NativeTun{
-		tunFile:     file,
-		events:      make(chan Event, 5),
-		errors:      make(chan error, 5),
-		tcpGROTable: newTCPGROTable(),
-		udpGROTable: newUDPGROTable(),
-		toWrite:     make([]int, 0, conn.IdealBatchSize),
+		tunFile:       file,
+		events:        make(chan Event, 5),
+		errors:        make(chan error, 5),
+		tcpGROTable:   newTCPGROTable(),
+		udpGROTable:   newUDPGROTable(),
+		toWrite:       make([]int, 0, conn.IdealBatchSize),
+		mergedGroups:  make([][][]byte, 0, conn.IdealBatchSize),
+		groupBacking:  make([][]byte, 0, conn.IdealBatchSize),
 		bufPool:       bufPool,
 		coalescedBufs: buffer.Arena{Buffer: bufPool.Get(32 * 16 << 10)},
 	}

@@ -31,11 +31,12 @@ type Device interface {
 	// reading into each element of the bufs slice.
 	Read(bufs []*buffer.Buffer, sizes []int, offset int) (n int, err error)
 
-	// Write one or more packets to the device (without any additional headers).
-	// On a successful write it returns the number of packets written. A nonzero
-	// offset can be used to instruct the Device on where to begin writing from
-	// each packet contained within the bufs slice.
-	Write(bufs [][]byte, offset int) (int, error)
+	// Write one or more groups of packets to the device (without any additional
+	// headers). Each element of bufs is a group of packet views (e.g. segments
+	// from a single GSO stack). On a successful write it returns the number of
+	// packets written. A nonzero offset can be used to instruct the Device on
+	// where to begin writing from each packet contained within the bufs slice.
+	Write(bufs [][][]byte, offset int) (int, error)
 
 	// MTU returns the MTU of the Device.
 	MTU() (int, error)

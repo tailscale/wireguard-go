@@ -239,28 +239,32 @@ func (tun *NativeTun) Read(bufs []*buffer.Buffer, sizes []int, offset int) (int,
 	}
 }
 
-func (tun *NativeTun) Write(bufs [][]byte, offset int) (int, error) {
+func (tun *NativeTun) Write(bufs [][][]byte, offset int) (int, error) {
 	if offset < 4 {
 		return 0, io.ErrShortBuffer
 	}
-	for i, buf := range bufs {
-		buf = buf[offset-4:]
-		buf[0] = 0x00
-		buf[1] = 0x00
-		buf[2] = 0x00
-		switch buf[4] >> 4 {
-		case 4:
-			buf[3] = unix.AF_INET
-		case 6:
-			buf[3] = unix.AF_INET6
-		default:
-			return i, unix.EAFNOSUPPORT
-		}
-		if _, err := tun.tunFile.Write(buf); err != nil {
-			return i, err
+	total := 0
+	for _, group := range bufs {
+		for _, buf := range group {
+			buf = buf[offset-4:]
+			buf[0] = 0x00
+			buf[1] = 0x00
+			buf[2] = 0x00
+			switch buf[4] >> 4 {
+			case 4:
+				buf[3] = unix.AF_INET
+			case 6:
+				buf[3] = unix.AF_INET6
+			default:
+				return total, unix.EAFNOSUPPORT
+			}
+			if _, err := tun.tunFile.Write(buf); err != nil {
+				return total, err
+			}
+			total++
 		}
 	}
-	return len(bufs), nil
+	return total, nil
 }
 
 func (tun *NativeTun) Close() error {

@@ -186,33 +186,37 @@ retry:
 	}
 }
 
-func (tun *NativeTun) Write(bufs [][]byte, offset int) (int, error) {
+func (tun *NativeTun) Write(bufs [][][]byte, offset int) (int, error) {
 	tun.running.Add(1)
 	defer tun.running.Done()
 	if tun.close.Load() {
 		return 0, os.ErrClosed
 	}
 
-	for i, buf := range bufs {
-		packetSize := len(buf) - offset
-		tun.rate.update(uint64(packetSize))
+	total := 0
+	for _, group := range bufs {
+		for _, buf := range group {
+			packetSize := len(buf) - offset
+			tun.rate.update(uint64(packetSize))
 
-		packet, err := tun.session.AllocateSendPacket(packetSize)
-		switch err {
-		case nil:
-			// TODO: Explore options to eliminate this copy.
-			copy(packet, buf[offset:])
-			tun.session.SendPacket(packet)
-			continue
-		case windows.ERROR_HANDLE_EOF:
-			return i, os.ErrClosed
-		case windows.ERROR_BUFFER_OVERFLOW:
-			continue // Dropping when ring is full.
-		default:
-			return i, fmt.Errorf("Write failed: %w", err)
+			packet, err := tun.session.AllocateSendPacket(packetSize)
+			switch err {
+			case nil:
+				// TODO: Explore options to eliminate this copy.
+				copy(packet, buf[offset:])
+				tun.session.SendPacket(packet)
+				total++
+				continue
+			case windows.ERROR_HANDLE_EOF:
+				return total, os.ErrClosed
+			case windows.ERROR_BUFFER_OVERFLOW:
+				continue // Dropping when ring is full.
+			default:
+				return total, fmt.Errorf("Write failed: %w", err)
+			}
 		}
 	}
-	return len(bufs), nil
+	return total, nil
 }
 
 // LUID returns Windows interface instance ID.
