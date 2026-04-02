@@ -34,9 +34,11 @@ func mockSetGSOSize(control *[]byte, gsoSize uint16) {
 
 func Test_coalesceMessages(t *testing.T) {
 	cases := []struct {
-		name     string
-		buffs    [][]byte
-		wantLens []int
+		name  string
+		buffs [][]byte
+		// Each wantLens slice corresponds to the Buffers of a single coalesced message,
+		// and each int is the expected length of the corresponding Buffer[i].
+		wantLens [][]int
 		wantGSO  []int
 	}{
 		{
@@ -44,7 +46,7 @@ func Test_coalesceMessages(t *testing.T) {
 			buffs: [][]byte{
 				make([]byte, 1, 1),
 			},
-			wantLens: []int{1},
+			wantLens: [][]int{{1}},
 			wantGSO:  []int{0},
 		},
 		{
@@ -53,7 +55,7 @@ func Test_coalesceMessages(t *testing.T) {
 				make([]byte, 1, 2),
 				make([]byte, 1, 1),
 			},
-			wantLens: []int{2},
+			wantLens: [][]int{{1, 1}},
 			wantGSO:  []int{1},
 		},
 		{
@@ -62,7 +64,7 @@ func Test_coalesceMessages(t *testing.T) {
 				make([]byte, 2, 3),
 				make([]byte, 1, 1),
 			},
-			wantLens: []int{3},
+			wantLens: [][]int{{2, 1}},
 			wantGSO:  []int{2},
 		},
 		{
@@ -72,7 +74,7 @@ func Test_coalesceMessages(t *testing.T) {
 				make([]byte, 1, 1),
 				make([]byte, 2, 2),
 			},
-			wantLens: []int{3, 2},
+			wantLens: [][]int{{2, 1}, {2}},
 			wantGSO:  []int{2, 0},
 		},
 		{
@@ -82,8 +84,8 @@ func Test_coalesceMessages(t *testing.T) {
 				make([]byte, 2, 2),
 				make([]byte, 2, 2),
 			},
-			wantLens: []int{4, 2},
-			wantGSO:  []int{2, 0},
+			wantLens: [][]int{{2, 2, 2}},
+			wantGSO:  []int{2},
 		},
 	}
 
@@ -106,9 +108,14 @@ func Test_coalesceMessages(t *testing.T) {
 				if msgs[i].Addr != addr {
 					t.Errorf("msgs[%d].Addr != passed addr", i)
 				}
-				gotLen := len(msgs[i].Buffers[0])
-				if gotLen != tt.wantLens[i] {
-					t.Errorf("len(msgs[%d].Buffers[0]) %d != %d", i, gotLen, tt.wantLens[i])
+				if len(msgs[i].Buffers) != len(tt.wantLens[i]) {
+					t.Fatalf("len(msgs[%d].Buffers) %d != %d", i, len(msgs[i].Buffers), len(tt.wantLens[i]))
+				}
+				for j := range tt.wantLens[i] {
+					gotLen := len(msgs[i].Buffers[j])
+					if gotLen != tt.wantLens[i][j] {
+						t.Errorf("len(msgs[%d].Buffers[%d]) %d != %d", i, j, gotLen, tt.wantLens[i][j])
+					}
 				}
 				gotGSO, err := mockGetGSOSize(msgs[i].OOB)
 				if err != nil {
