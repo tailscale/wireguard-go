@@ -7,6 +7,7 @@ package tun
 
 import (
 	"net/netip"
+	"slices"
 	"testing"
 
 	"github.com/tailscale/wireguard-go/conn"
@@ -289,32 +290,21 @@ func Fuzz_handleGRO(f *testing.F) {
 	f.Add(pkt0, pkt1, pkt2, pkt3, pkt4, pkt5, pkt6, pkt7, pkt8, pkt9, pkt10, pkt11, 0, offset)
 	f.Fuzz(func(t *testing.T, pkt0, pkt1, pkt2, pkt3, pkt4, pkt5, pkt6, pkt7, pkt8, pkt9, pkt10, pkt11 []byte, gro int, offset int) {
 		pkts := [][]byte{pkt0, pkt1, pkt2, pkt3, pkt4, pkt5, pkt6, pkt7, pkt8, pkt9, pkt10, pkt11}
-		toWrite := make([]int, 0, len(pkts))
-		handleGRO(pkts, offset, newTCPGROTable(), newUDPGROTable(), groDisablementFlags(gro), &toWrite)
-		if len(toWrite) > len(pkts) {
-			t.Errorf("len(toWrite): %d > len(pkts): %d", len(toWrite), len(pkts))
-		}
-		seenWriteI := make(map[int]bool)
-		for _, writeI := range toWrite {
-			if writeI < 0 || writeI > len(pkts)-1 {
-				t.Errorf("toWrite value (%d) outside bounds of len(pkts): %d", writeI, len(pkts))
-			}
-			if seenWriteI[writeI] {
-				t.Errorf("duplicate toWrite value: %d", writeI)
-			}
-			seenWriteI[writeI] = true
+		wi := newGROToWrite()
+		handleGRO(pkts, offset, newTCPGROTable(), newUDPGROTable(), groDisablementFlags(gro), &wi)
+		if len(wi.iovs) > len(pkts) {
+			t.Errorf("len(wi.iovs): %d > len(pkts): %d", len(wi.iovs), len(pkts))
 		}
 	})
 }
 
 func Test_handleGRO(t *testing.T) {
 	tests := []struct {
-		name        string
-		pktsIn      [][]byte
-		gro         groDisablementFlags
-		wantToWrite []int
-		wantLens    []int
-		wantErr     bool
+		name     string
+		pktsIn   [][]byte
+		gro      groDisablementFlags
+		wantLens [][]int
+		wantErr  bool
 	}{
 		{
 			"multiple protocols and flows",
@@ -332,8 +322,15 @@ func Test_handleGRO(t *testing.T) {
 				udp6Packet(ip6PortA, ip6PortB, 100),                         // udp6 flow 1
 			},
 			0,
-			[]int{0, 1, 2, 4, 5, 7, 9},
-			[]int{240, 228, 128, 140, 260, 160, 248},
+			[][]int{
+				{virtioNetHdrLen, 140, 100}, // tcp4 A->B merged
+				{virtioNetHdrLen, 128, 100}, // udp4 A->B merged
+				{virtioNetHdrLen, 128},      // udp4 A->C
+				{virtioNetHdrLen, 140},      // tcp4 A->C
+				{virtioNetHdrLen, 160, 100}, // tcp6 A->B merged
+				{virtioNetHdrLen, 160},      // tcp6 A->C
+				{virtioNetHdrLen, 148, 100}, // udp6 A->B merged
+			},
 			false,
 		},
 		{
@@ -352,8 +349,17 @@ func Test_handleGRO(t *testing.T) {
 				udp6Packet(ip6PortA, ip6PortB, 100),                         // udp6 flow 1
 			},
 			udpGRODisabled,
-			[]int{0, 1, 2, 4, 5, 7, 8, 9, 10},
-			[]int{240, 128, 128, 140, 260, 160, 128, 148, 148},
+			[][]int{
+				{virtioNetHdrLen, 140, 100}, // tcp4 A->B merged
+				{virtioNetHdrLen, 128},      // udp4 A->B noop
+				{virtioNetHdrLen, 128},      // udp4 A->C noop
+				{virtioNetHdrLen, 140},      // tcp4 A->C
+				{virtioNetHdrLen, 160, 100}, // tcp6 A->B merged
+				{virtioNetHdrLen, 160},      // tcp6 A->C
+				{virtioNetHdrLen, 128},      // udp4 A->B noop
+				{virtioNetHdrLen, 148},      // udp6 A->B noop
+				{virtioNetHdrLen, 148},      // udp6 A->B noop
+			},
 			false,
 		},
 		{
@@ -369,8 +375,12 @@ func Test_handleGRO(t *testing.T) {
 				tcp6Packet(ip6PortA, ip6PortB, header.TCPFlagAck, 100, 301),                   // v6 flow 1
 			},
 			0,
-			[]int{0, 2, 4, 6},
-			[]int{240, 240, 260, 260},
+			[][]int{
+				{virtioNetHdrLen, 140, 100}, // v4 merged (seq 1+101 PSH)
+				{virtioNetHdrLen, 140, 100}, // v4 merged (seq 201+301)
+				{virtioNetHdrLen, 160, 100}, // v6 merged (seq 1+101 PSH)
+				{virtioNetHdrLen, 160, 100}, // v6 merged (seq 201+301)
+			},
 			false,
 		},
 		{
@@ -384,8 +394,12 @@ func Test_handleGRO(t *testing.T) {
 				udp4Packet(ip4PortA, ip4PortB, 100),
 			},
 			0,
-			[]int{0, 1, 3, 4},
-			[]int{140, 240, 128, 228},
+			[][]int{
+				{virtioNetHdrLen, 140},      // tcp4 bad csum, unmerged
+				{virtioNetHdrLen, 140, 100}, // tcp4 merged (seq 101+201)
+				{virtioNetHdrLen, 128},      // udp4 bad csum, unmerged
+				{virtioNetHdrLen, 128, 100}, // udp4 merged
+			},
 			false,
 		},
 		{
@@ -396,8 +410,9 @@ func Test_handleGRO(t *testing.T) {
 				tcp4Packet(ip4PortA, ip4PortB, header.TCPFlagAck, 100, 201), // v4 flow 1 seq 201 len 100
 			},
 			0,
-			[]int{0},
-			[]int{340},
+			[][]int{
+				{virtioNetHdrLen, 140, 100, 100}, // prepend seq 1, original seq 101 payload, append seq 201
+			},
 			false,
 		},
 		{
@@ -413,8 +428,12 @@ func Test_handleGRO(t *testing.T) {
 				}),
 			},
 			0,
-			[]int{0, 1, 2, 3},
-			[]int{140, 140, 128, 128},
+			[][]int{
+				{virtioNetHdrLen, 140},
+				{virtioNetHdrLen, 140},
+				{virtioNetHdrLen, 128},
+				{virtioNetHdrLen, 128},
+			},
 			false,
 		},
 		{
@@ -430,8 +449,12 @@ func Test_handleGRO(t *testing.T) {
 				}),
 			},
 			0,
-			[]int{0, 1, 2, 3},
-			[]int{140, 140, 128, 128},
+			[][]int{
+				{virtioNetHdrLen, 140},
+				{virtioNetHdrLen, 140},
+				{virtioNetHdrLen, 128},
+				{virtioNetHdrLen, 128},
+			},
 			false,
 		},
 		{
@@ -447,8 +470,12 @@ func Test_handleGRO(t *testing.T) {
 				}),
 			},
 			0,
-			[]int{0, 1, 2, 3},
-			[]int{140, 140, 128, 128},
+			[][]int{
+				{virtioNetHdrLen, 140},
+				{virtioNetHdrLen, 140},
+				{virtioNetHdrLen, 128},
+				{virtioNetHdrLen, 128},
+			},
 			false,
 		},
 		{
@@ -464,8 +491,12 @@ func Test_handleGRO(t *testing.T) {
 				}),
 			},
 			0,
-			[]int{0, 1, 2, 3},
-			[]int{140, 140, 128, 128},
+			[][]int{
+				{virtioNetHdrLen, 140},
+				{virtioNetHdrLen, 140},
+				{virtioNetHdrLen, 128},
+				{virtioNetHdrLen, 128},
+			},
 			false,
 		},
 		{
@@ -481,8 +512,12 @@ func Test_handleGRO(t *testing.T) {
 				}),
 			},
 			0,
-			[]int{0, 1, 2, 3},
-			[]int{160, 160, 148, 148},
+			[][]int{
+				{virtioNetHdrLen, 160},
+				{virtioNetHdrLen, 160},
+				{virtioNetHdrLen, 148},
+				{virtioNetHdrLen, 148},
+			},
 			false,
 		},
 		{
@@ -498,31 +533,46 @@ func Test_handleGRO(t *testing.T) {
 				}),
 			},
 			0,
-			[]int{0, 1, 2, 3},
-			[]int{160, 160, 148, 148},
+			[][]int{
+				{virtioNetHdrLen, 160},
+				{virtioNetHdrLen, 160},
+				{virtioNetHdrLen, 148},
+				{virtioNetHdrLen, 148},
+			},
 			false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			toWrite := make([]int, 0, len(tt.pktsIn))
-			err := handleGRO(tt.pktsIn, offset, newTCPGROTable(), newUDPGROTable(), tt.gro, &toWrite)
-			if err != nil {
-				if tt.wantErr {
-					return
+			wi := newGROToWrite()
+			for range 2 { // validating reset() correctness
+				wi.reset()
+				// Deep copy pktsIn since coalesce accounting mutates head packet headers.
+				pktsIn := make([][]byte, len(tt.pktsIn))
+				for k, p := range tt.pktsIn {
+					pktsIn[k] = slices.Clone(p)
 				}
-				t.Fatalf("got err: %v", err)
-			}
-			if len(toWrite) != len(tt.wantToWrite) {
-				t.Fatalf("got %d packets, wanted %d", len(toWrite), len(tt.wantToWrite))
-			}
-			for i, pktI := range tt.wantToWrite {
-				if tt.wantToWrite[i] != toWrite[i] {
-					t.Fatalf("wantToWrite[%d]: %d != toWrite: %d", i, tt.wantToWrite[i], toWrite[i])
+				err := handleGRO(pktsIn, offset, newTCPGROTable(), newUDPGROTable(), tt.gro, &wi)
+				if err != nil {
+					if tt.wantErr {
+						return
+					}
+					t.Fatalf("got err: %v", err)
 				}
-				if tt.wantLens[i] != len(tt.pktsIn[pktI][offset:]) {
-					t.Errorf("wanted len %d packet at %d, got: %d", tt.wantLens[i], i, len(tt.pktsIn[pktI][offset:]))
+				if len(wi.iovs) != len(tt.wantLens) {
+					t.Fatalf("got %d packets, wanted %d", len(wi.iovs), len(tt.wantLens))
+				}
+				for i, wantFragLens := range tt.wantLens {
+					iov := wi.iovs[i]
+					if len(iov) != len(wantFragLens) {
+						t.Fatalf("items[%d]: got %d fragments, wanted %d", i, len(iov), len(wantFragLens))
+					}
+					for j, wantLen := range wantFragLens {
+						if len(iov[j]) != wantLen {
+							t.Errorf("items[%d][%d]: got len %d, want %d", i, j, len(iov[j]), wantLen)
+						}
+					}
 				}
 			}
 		})
@@ -669,12 +719,11 @@ func Test_udpPacketsCanCoalesce(t *testing.T) {
 	udp4c := udp4Packet(ip4PortA, ip4PortB, 110)
 
 	type args struct {
-		pkt        []byte
-		iphLen     uint8
-		gsoSize    uint16
-		item       udpGROItem
-		bufs       [][]byte
-		bufsOffset int
+		pkt     []byte
+		iphLen  uint8
+		gsoSize uint16
+		item    udpGROItem
+		wi      groToWrite
 	}
 	tests := []struct {
 		name string
@@ -688,14 +737,12 @@ func Test_udpPacketsCanCoalesce(t *testing.T) {
 				iphLen:  20,
 				gsoSize: 100,
 				item: udpGROItem{
-					gsoSize: 100,
-					iphLen:  20,
+					gsoSize:    100,
+					iphLen:     20,
+					outputIdx:  0,
+					payloadLen: 100,
 				},
-				bufs: [][]byte{
-					udp4a,
-					udp4b,
-				},
-				bufsOffset: offset,
+				wi: groToWrite{iovs: [][][]byte{{make([]byte, virtioNetHdrLen), udp4b[offset:]}}},
 			},
 			coalesceAppend,
 		},
@@ -706,14 +753,12 @@ func Test_udpPacketsCanCoalesce(t *testing.T) {
 				iphLen:  20,
 				gsoSize: 10,
 				item: udpGROItem{
-					gsoSize: 100,
-					iphLen:  20,
+					gsoSize:    100,
+					iphLen:     20,
+					outputIdx:  0,
+					payloadLen: 100,
 				},
-				bufs: [][]byte{
-					udp4a,
-					udp4b,
-				},
-				bufsOffset: offset,
+				wi: groToWrite{iovs: [][][]byte{{make([]byte, virtioNetHdrLen), udp4b[offset:]}}},
 			},
 			coalesceAppend,
 		},
@@ -724,14 +769,12 @@ func Test_udpPacketsCanCoalesce(t *testing.T) {
 				iphLen:  20,
 				gsoSize: 100,
 				item: udpGROItem{
-					gsoSize: 100,
-					iphLen:  20,
+					gsoSize:    100,
+					iphLen:     20,
+					outputIdx:  0,
+					payloadLen: 110,
 				},
-				bufs: [][]byte{
-					udp4c,
-					udp4b,
-				},
-				bufsOffset: offset,
+				wi: groToWrite{iovs: [][][]byte{{make([]byte, virtioNetHdrLen), udp4c[offset:]}}},
 			},
 			coalesceUnavailable,
 		},
@@ -742,21 +785,51 @@ func Test_udpPacketsCanCoalesce(t *testing.T) {
 				iphLen:  20,
 				gsoSize: 110,
 				item: udpGROItem{
-					gsoSize: 100,
-					iphLen:  20,
+					gsoSize:    100,
+					iphLen:     20,
+					outputIdx:  0,
+					payloadLen: 100,
 				},
-				bufs: [][]byte{
-					udp4a,
-					udp4c,
+				wi: groToWrite{iovs: [][][]byte{{make([]byte, virtioNetHdrLen), udp4a[offset:]}}},
+			},
+			coalesceUnavailable,
+		},
+		{
+			"coalesceUnavailable too many fragments",
+			args{
+				pkt:     udp4a[offset:],
+				iphLen:  20,
+				gsoSize: 100,
+				item: udpGROItem{
+					gsoSize:    100,
+					iphLen:     20,
+					outputIdx:  0,
+					payloadLen: 100,
 				},
-				bufsOffset: offset,
+				wi: groToWrite{iovs: [][][]byte{make([][]byte, maxScatterGatherFragments)}},
+			},
+			coalesceUnavailable,
+		},
+		{
+			"coalesceUnavailable payload overflow",
+			args{
+				pkt:     udp4a[offset:],
+				iphLen:  20,
+				gsoSize: 100,
+				item: udpGROItem{
+					gsoSize:    100,
+					iphLen:     20,
+					outputIdx:  0,
+					payloadLen: maxUint16 - 20 - 8,
+				},
+				wi: groToWrite{iovs: [][][]byte{{make([]byte, virtioNetHdrLen), udp4a[offset:]}}},
 			},
 			coalesceUnavailable,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := udpPacketsCanCoalesce(tt.args.pkt, tt.args.iphLen, tt.args.gsoSize, tt.args.item, tt.args.bufs, tt.args.bufsOffset); got != tt.want {
+			if got := udpPacketsCanCoalesce(tt.args.pkt, tt.args.iphLen, tt.args.gsoSize, tt.args.item, &tt.args.wi); got != tt.want {
 				t.Errorf("udpPacketsCanCoalesce() = %v, want %v", got, tt.want)
 			}
 		})
@@ -769,20 +842,22 @@ func Test_handleGRO_invalidItemCsumClearsVirtioNetHdr(t *testing.T) {
 		tcp4Packet(ip4PortA, ip4PortB, header.TCPFlagAck, 100, 101),
 		tcp4Packet(ip4PortA, ip4PortB, header.TCPFlagAck, 100, 201),
 	}
-	// Poison the virtioNetHdr region of pkts[0] so a missing clear() is detectable.
-	for i := 0; i < virtioNetHdrLen; i++ {
-		pkts[0][i] = 0xAB
-	}
 
+	// Poison the virtioNetHdr region of pkts[0] so a missing clear() is detectable.
 	table := newTCPGROTable()
-	toWrite := make([]int, 0, len(pkts))
-	if err := handleGRO(pkts, virtioNetHdrLen, table, newUDPGROTable(), 0, &toWrite); err != nil {
+	wi := newGROToWrite()
+	idx, _ := wi.next()
+	for i := range wi.iovs[idx][virtioNetHdrIdx] {
+		wi.iovs[idx][virtioNetHdrIdx][i] = 0xAB
+	}
+	wi.reset()
+	if err := handleGRO(pkts, offset, table, newUDPGROTable(), 0, &wi); err != nil {
 		t.Fatal(err)
 	}
 
 	// Verify pkts[0] is in toWrite where we expect
-	if toWrite[0] != 0 {
-		t.Fatal("pkts[0] not found in toWrite at expected, zero index")
+	if &wi.iovs[0][headPacketIdx][0] != &pkts[0][offset] {
+		t.Fatal("pkts[0] not found in wi.iovs at expected, zero index")
 	}
 
 	// Verify pkts[0] is not in tcpGROTable
@@ -797,16 +872,86 @@ func Test_handleGRO_invalidItemCsumClearsVirtioNetHdr(t *testing.T) {
 		if item.sentSeq != 101 {
 			t.Fatalf("unexpected starting seq num in tcpGROTable: %d", item.sentSeq)
 		}
-		if item.numMerged != 1 {
-			t.Fatalf("unexpected numMerged in tcpGROTable: %d", item.numMerged)
+		if n := len(wi.iovs[item.outputIdx][coalescedPacketsIdx:]); n != 1 {
+			t.Fatalf("unexpected numMerged in tcpGROTable: %d", n)
 		}
 	}
 
 	// pkt 0 is in toWrite and not present in tcpGROTable, so its virtioNetHdr
 	// must have been cleared.
-	for i, b := range pkts[0][:virtioNetHdrLen] {
+	for i, b := range wi.iovs[0][virtioNetHdrIdx] {
 		if b != 0 {
-			t.Fatalf("pkts[0] virtioNetHdr[%d] = 0x%x, want 0", i, b)
+			t.Fatalf("wi.iovs[0] virtioNetHdr[%d] = 0x%x, want 0", i, b)
 		}
+	}
+}
+
+func Test_tcpPacketsCanCoalesce(t *testing.T) {
+	tcp4a := tcp4Packet(ip4PortA, ip4PortB, header.TCPFlagAck, 100, 100)
+
+	type args struct {
+		pkt     []byte
+		iphLen  uint8
+		tcphLen uint8
+		seq     uint32
+		pshSet  bool
+		gsoSize uint16
+		item    tcpGROItem
+		wi      groToWrite
+	}
+	tests := []struct {
+		name string
+		args args
+		want canCoalesce
+	}{
+		{
+			"coalesceUnavailable too many fragments",
+			args{
+				pkt:     tcp4a[offset:],
+				iphLen:  20,
+				tcphLen: 20,
+				seq:     200,
+				pshSet:  false,
+				gsoSize: 100,
+				item: tcpGROItem{
+					gsoSize:    100,
+					iphLen:     20,
+					tcphLen:    20,
+					sentSeq:    100,
+					outputIdx:  0,
+					payloadLen: 100,
+				},
+				wi: groToWrite{iovs: [][][]byte{make([][]byte, maxScatterGatherFragments)}},
+			},
+			coalesceUnavailable,
+		},
+		{
+			"coalesceUnavailable payload overflow",
+			args{
+				pkt:     tcp4a[offset:],
+				iphLen:  20,
+				tcphLen: 20,
+				seq:     200,
+				pshSet:  false,
+				gsoSize: 100,
+				item: tcpGROItem{
+					gsoSize:    100,
+					iphLen:     20,
+					tcphLen:    20,
+					sentSeq:    100,
+					outputIdx:  0,
+					payloadLen: maxUint16 - 20 - 20,
+				},
+				wi: groToWrite{iovs: [][][]byte{{make([]byte, virtioNetHdrLen), tcp4a[offset:]}}},
+			},
+			coalesceUnavailable,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tcpPacketsCanCoalesce(tt.args.pkt, tt.args.iphLen, tt.args.tcphLen, tt.args.seq, tt.args.pshSet, tt.args.gsoSize, tt.args.item, &tt.args.wi); got != tt.want {
+				t.Errorf("tcpPacketsCanCoalesce() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
