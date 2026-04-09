@@ -90,9 +90,9 @@ func newAutodrainingInboundQueue(device *Device) *autodrainingInboundQueue {
 }
 
 func (device *Device) needsInboundQueueFinalizer() bool {
-	return device.pool.messageBuffers.hasAccounting() ||
-		device.pool.inboundElements.hasAccounting() ||
-		device.pool.inboundElementsContainer.hasAccounting()
+	return device.pool.messageBuffers.HasAccounting() ||
+		device.pool.inboundElements.HasAccounting() ||
+		device.pool.inboundElementsContainer.HasAccounting()
 }
 
 func (device *Device) flushInboundQueue(q *autodrainingInboundQueue) {
@@ -131,9 +131,9 @@ func newAutodrainingOutboundQueue(device *Device) *autodrainingOutboundQueue {
 }
 
 func (device *Device) needsOutboundQueueFinalizer() bool {
-	return device.pool.messageBuffers.hasAccounting() ||
-		device.pool.outboundElements.hasAccounting() ||
-		device.pool.outboundElementsContainer.hasAccounting()
+	return device.pool.messageBuffers.HasAccounting() ||
+		device.pool.outboundElements.HasAccounting() ||
+		device.pool.outboundElementsContainer.HasAccounting()
 }
 
 func (device *Device) flushOutboundQueue(q *autodrainingOutboundQueue) {

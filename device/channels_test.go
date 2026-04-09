@@ -5,11 +5,15 @@
 
 package device
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/tailscale/wireguard-go/waitpool"
+)
 
 func TestAutodrainingQueueFinalizerNeedTracksPoolAccounting(t *testing.T) {
-	unbounded := func() *WaitPool { return NewWaitPool(0, func() any { return nil }) }
-	bounded := func() *WaitPool { return NewWaitPool(1, func() any { return nil }) }
+	unbounded := func() *waitpool.WaitPool { return waitpool.New(0, func() any { return nil }) }
+	bounded := func() *waitpool.WaitPool { return waitpool.New(1, func() any { return nil }) }
 
 	device := &Device{}
 	device.pool.messageBuffers = unbounded()

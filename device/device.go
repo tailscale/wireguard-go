@@ -17,6 +17,7 @@ import (
 	"github.com/tailscale/wireguard-go/ratelimiter"
 	"github.com/tailscale/wireguard-go/rwcancel"
 	"github.com/tailscale/wireguard-go/tun"
+	"github.com/tailscale/wireguard-go/waitpool"
 )
 
 type Device struct {
@@ -75,11 +76,11 @@ type Device struct {
 	cookieChecker CookieChecker
 
 	pool struct {
-		inboundElementsContainer  *WaitPool
-		outboundElementsContainer *WaitPool
-		messageBuffers            *WaitPool
-		inboundElements           *WaitPool
-		outboundElements          *WaitPool
+		inboundElementsContainer  *waitpool.WaitPool
+		outboundElementsContainer *waitpool.WaitPool
+		messageBuffers            *waitpool.WaitPool
+		inboundElements           *waitpool.WaitPool
+		outboundElements          *waitpool.WaitPool
 	}
 
 	queue struct {

@@ -3,7 +3,7 @@
  * Copyright (C) 2017-2023 WireGuard LLC. All Rights Reserved.
  */
 
-package device
+package waitpool
 
 import (
 	"math/rand"
@@ -30,9 +30,9 @@ func TestWaitPool(t *testing.T) {
 	if workers-4 <= 0 {
 		t.Skip("Not enough cores")
 	}
-	p := NewWaitPool(uint32(workers-4), func() any { return make([]byte, 16) })
+	p := New(workers-4, func() any { return make([]byte, 16) })
 	wg.Add(workers)
-	var max atomic.Uint32
+	var max atomic.Int64
 	updateMax := func() {
 		p.lock.Lock()
 		count := p.count
@@ -42,10 +42,10 @@ func TestWaitPool(t *testing.T) {
 		}
 		for {
 			old := max.Load()
-			if count <= old {
+			if int64(count) <= old {
 				break
 			}
-			if max.CompareAndSwap(old, count) {
+			if max.CompareAndSwap(old, int64(count)) {
 				break
 			}
 		}
@@ -65,7 +65,7 @@ func TestWaitPool(t *testing.T) {
 		}()
 	}
 	wg.Wait()
-	if max.Load() != p.max {
+	if max.Load() != int64(p.max) {
 		t.Errorf("Actual maximum count (%d) != ideal maximum count (%d)", max.Load(), p.max)
 	}
 }
@@ -78,7 +78,7 @@ func BenchmarkWaitPool(b *testing.B) {
 	if workers-4 <= 0 {
 		b.Skip("Not enough cores")
 	}
-	p := NewWaitPool(uint32(workers-4), func() any { return make([]byte, 16) })
+	p := New(workers-4, func() any { return make([]byte, 16) })
 	wg.Add(workers)
 	b.ResetTimer()
 	for i := 0; i < workers; i++ {
@@ -102,7 +102,7 @@ func BenchmarkWaitPoolEmpty(b *testing.B) {
 	if workers-4 <= 0 {
 		b.Skip("Not enough cores")
 	}
-	p := NewWaitPool(0, func() any { return make([]byte, 16) })
+	p := New(0, func() any { return make([]byte, 16) })
 	wg.Add(workers)
 	b.ResetTimer()
 	for i := 0; i < workers; i++ {

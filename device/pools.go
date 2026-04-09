@@ -6,66 +6,25 @@
 package device
 
 import (
-	"sync"
+	"github.com/tailscale/wireguard-go/waitpool"
 )
 
-type WaitPool struct {
-	pool  sync.Pool
-	cond  sync.Cond
-	lock  sync.Mutex
-	count uint32 // Get calls not yet Put back
-	max   uint32
-}
-
-func NewWaitPool(max uint32, new func() any) *WaitPool {
-	p := &WaitPool{pool: sync.Pool{New: new}, max: max}
-	p.cond = sync.Cond{L: &p.lock}
-	return p
-}
-
-func (p *WaitPool) hasAccounting() bool {
-	return p != nil && p.max != 0
-}
-
-func (p *WaitPool) Get() any {
-	if p.max != 0 {
-		p.lock.Lock()
-		for p.count >= p.max {
-			p.cond.Wait()
-		}
-		p.count++
-		p.lock.Unlock()
-	}
-	return p.pool.Get()
-}
-
-func (p *WaitPool) Put(x any) {
-	p.pool.Put(x)
-	if p.max == 0 {
-		return
-	}
-	p.lock.Lock()
-	defer p.lock.Unlock()
-	p.count--
-	p.cond.Signal()
-}
-
 func (device *Device) PopulatePools() {
-	device.pool.inboundElementsContainer = NewWaitPool(PreallocatedBuffersPerPool, func() any {
+	device.pool.inboundElementsContainer = waitpool.New(PreallocatedBuffersPerPool, func() any {
 		s := make([]*QueueInboundElement, 0, device.BatchSize())
 		return &QueueInboundElementsContainer{elems: s}
 	})
-	device.pool.outboundElementsContainer = NewWaitPool(PreallocatedBuffersPerPool, func() any {
+	device.pool.outboundElementsContainer = waitpool.New(PreallocatedBuffersPerPool, func() any {
 		s := make([]*QueueOutboundElement, 0, device.BatchSize())
 		return &QueueOutboundElementsContainer{elems: s}
 	})
-	device.pool.messageBuffers = NewWaitPool(PreallocatedBuffersPerPool, func() any {
+	device.pool.messageBuffers = waitpool.New(PreallocatedBuffersPerPool, func() any {
 		return new([MaxMessageSize]byte)
 	})
-	device.pool.inboundElements = NewWaitPool(PreallocatedBuffersPerPool, func() any {
+	device.pool.inboundElements = waitpool.New(PreallocatedBuffersPerPool, func() any {
 		return new(QueueInboundElement)
 	})
-	device.pool.outboundElements = NewWaitPool(PreallocatedBuffersPerPool, func() any {
+	device.pool.outboundElements = waitpool.New(PreallocatedBuffersPerPool, func() any {
 		return new(QueueOutboundElement)
 	})
 }
