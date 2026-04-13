@@ -46,7 +46,7 @@ var DefaultRawPool = NewRawPool(MaxPooledBuffers)
 // and therefore whether queue finalizers are needed to drain blocked
 // producers when an autodraining queue is GC'd.
 func HasAccounting() bool {
-	return DefaultRawPool.WaitPool.HasAccounting()
+	return DefaultRawPool.HasAccounting()
 }
 
 // EnsureAllocated fills zero-valued Views from the [DefaultRawPool].

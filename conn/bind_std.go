@@ -208,7 +208,8 @@ func (s *StdNetBind) putMessages(msgs *[]ipv6.Message) {
 		// Non coalesced write paths access only batch.msgs[i].Buffers[0],
 		// but we append more during [coalesceMessages].
 		// Leave index zero accessible:
-		(*msgs)[i] = ipv6.Message{Buffers: (*msgs)[i].Buffers[:1], OOB: (*msgs)[i].OOB}
+		(*msgs)[i] = ipv6.Message{Buffers: (*msgs)[i].Buffers[:1], OOB: (*msgs)[i].OOB[:cap((*msgs)[i].OOB)]}
+		(*msgs)[i].Buffers[0] = nil
 	}
 	s.msgsPool.Put(msgs)
 }
@@ -236,53 +237,79 @@ func (s *StdNetBind) receiveIP(
 	rxOffload bool,
 	bufs []iobuf.View,
 	eps []Endpoint,
-) (n int, err error) {
+) (int, error) {
 	msgs := s.getMessages()
-	// TODO: placeholder until bind implements right-sized buffers.
-	iobuf.EnsureAllocated(bufs)
-	for i := range bufs {
-		(*msgs)[i].Buffers[0] = bufs[i].Bytes
-		(*msgs)[i].OOB = (*msgs)[i].OOB[:cap((*msgs)[i].OOB)]
-	}
 	defer s.putMessages(msgs)
-	var numMsgs int
-	if runtime.GOOS == "linux" {
-		if rxOffload {
-			readAt := len(*msgs) - 2
-			numMsgs, err = br.ReadBatch((*msgs)[readAt:], 0)
-			if err != nil {
-				return 0, err
-			}
-			numMsgs, err = splitCoalescedMessages(*msgs, readAt, getGSOSize)
-			if err != nil {
-				return 0, err
-			}
-		} else {
-			numMsgs, err = br.ReadBatch(*msgs, 0)
-			if err != nil {
-				return 0, err
+	var readDataArr [IdealBatchSize]*iobuf.Shared // on the stack
+	readData := readDataArr[:]
+	var readDataN int // tracks read buffers to release on return
+	defer func() {
+		for i := range readData[:readDataN] {
+			if readData[i] != nil {
+				readData[i].Release()
 			}
 		}
-	} else {
+	}()
+
+	switch runtime.GOOS {
+	case "linux":
+		readBatchSize := min(len(bufs), len(*msgs))
+		if rxOffload {
+			readBatchSize = min(max(1, len(bufs)/udpSegmentMaxDatagrams), len(*msgs))
+		}
+		readDataN = readBatchSize
+		for i := range readBatchSize {
+			readData[i] = iobuf.SharedBufPool.Get()
+			(*msgs)[i].Buffers[0] = readData[i].Bytes[:]
+		}
+		msgsN, err := br.ReadBatch((*msgs)[:readBatchSize], 0)
+		if err != nil {
+			return 0, err // expect atomic reads
+		}
+		var n int
+		for i, msg := range (*msgs)[:msgsN] {
+			if msg.N == 0 {
+				continue
+			}
+			gsoSize := msg.N // Non-offload path splits to one read-sized View.
+			if rxOffload {
+				gsoSize, err = getGSOSize(msg.OOB[:msg.NN])
+				if err != nil {
+					iobuf.ReleaseAll(bufs[:n])
+					return 0, err
+				}
+				if gsoSize == 0 {
+					gsoSize = msg.N
+				}
+			}
+			split, err := readData[i].SplitCoalesced(bufs[n:], gsoSize, msg.N)
+			if err != nil {
+				iobuf.ReleaseAll(bufs[i:n])
+				return i - 1, err
+			}
+			addrPort := msg.Addr.(*net.UDPAddr).AddrPort()
+			ep := &StdNetEndpoint{AddrPort: addrPort} // TODO: remove allocation
+			getSrcFromControl(msg.OOB[:msg.NN], ep)
+			for j := n; j < n+split; j++ {
+				eps[j] = ep
+			}
+			n += split
+		}
+		return n, nil
+	default:
 		msg := &(*msgs)[0]
-		msg.N, msg.NN, _, msg.Addr, err = conn.ReadMsgUDP(msg.Buffers[0], msg.OOB)
+		readDataN = 1
+		readData[0] = iobuf.SharedBufPool.Get()
+		n, nn, _, addr, err := conn.ReadMsgUDP(readData[0].Bytes[:], msg.OOB)
 		if err != nil {
 			return 0, err
 		}
-		numMsgs = 1
+		readData[0].Refer(&bufs[0], 0, n)
+		ep := &StdNetEndpoint{AddrPort: addr.AddrPort()}
+		getSrcFromControl(msg.OOB[:nn], ep)
+		eps[0] = ep
+		return 1, nil
 	}
-	for i := 0; i < numMsgs; i++ {
-		msg := &(*msgs)[i]
-		bufs[i].Bytes = bufs[i].Bytes[:msg.N]
-		if len(bufs[i].Bytes) == 0 {
-			continue
-		}
-		addrPort := msg.Addr.(*net.UDPAddr).AddrPort()
-		ep := &StdNetEndpoint{AddrPort: addrPort} // TODO: remove allocation
-		getSrcFromControl(msg.OOB[:msg.NN], ep)
-		eps[i] = ep
-	}
-	return numMsgs, nil
 }
 
 func (s *StdNetBind) makeReceiveIPv4(pc *ipv4.PacketConn, conn *net.UDPConn, rxOffload bool) ReceiveFunc {
@@ -522,50 +549,4 @@ func coalesceMessages(addr *net.UDPAddr, ep *StdNetEndpoint, bufs [][]byte, offs
 		coalescedLen = len(buf)
 	}
 	return base + 1
-}
-
-type getGSOFunc func(control []byte) (int, error)
-
-func splitCoalescedMessages(msgs []ipv6.Message, firstMsgAt int, getGSO getGSOFunc) (n int, err error) {
-	for i := firstMsgAt; i < len(msgs); i++ {
-		msg := &msgs[i]
-		if msg.N == 0 {
-			return n, err
-		}
-		var (
-			gsoSize    int
-			start      int
-			end        = msg.N
-			numToSplit = 1
-		)
-		gsoSize, err = getGSO(msg.OOB[:msg.NN])
-		if err != nil {
-			return n, err
-		}
-		if gsoSize > 0 {
-			numToSplit = (msg.N + gsoSize - 1) / gsoSize
-			end = gsoSize
-		}
-		for j := 0; j < numToSplit; j++ {
-			if n > i {
-				return n, errors.New("splitting coalesced packet resulted in overflow")
-			}
-			copied := copy(msgs[n].Buffers[0], msg.Buffers[0][start:end])
-			msgs[n].N = copied
-			msgs[n].Addr = msg.Addr
-			start = end
-			end += gsoSize
-			if end > msg.N {
-				end = msg.N
-			}
-			n++
-		}
-		if i != n-1 {
-			// It is legal for bytes to move within msg.Buffers[0] as a result
-			// of splitting, so we only zero the source msg len when it is not
-			// the destination of the last split operation above.
-			msg.N = 0
-		}
-	}
-	return n, nil
 }
