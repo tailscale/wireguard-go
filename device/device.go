@@ -182,14 +182,22 @@ func (device *Device) upLocked() error {
 	device.ipcMutex.Lock()
 	defer device.ipcMutex.Unlock()
 
+	// Collect peers under RLock and then release before calling into them,
+	// because SendKeepalive can reach CreateMessageInitiation which acquires
+	// staticIdentity.RLock; holding peers.RLock across that path would
+	// invert the staticIdentity < peers hierarchy (see lock-ordering.md).
 	device.peers.RLock()
+	peers := make([]*Peer, 0, len(device.peers.keyMap))
 	for _, peer := range device.peers.keyMap {
+		peers = append(peers, peer)
+	}
+	device.peers.RUnlock()
+	for _, peer := range peers {
 		peer.Start()
 		if peer.persistentKeepaliveInterval.Load() > 0 {
 			peer.SendKeepalive()
 		}
 	}
-	device.peers.RUnlock()
 	return nil
 }
 
@@ -533,16 +541,25 @@ func (device *Device) SendKeepalivesToPeersWithCurrentKeypair() {
 		return
 	}
 
+	// Collect the set of peers to keepalive under peers.RLock, then release
+	// before invoking SendKeepalive. SendKeepalive can reach
+	// CreateMessageInitiation which acquires staticIdentity.RLock; holding
+	// peers.RLock across that path would invert the
+	// staticIdentity < peers hierarchy (see lock-ordering.md).
+	var peers []*Peer
 	device.peers.RLock()
 	for _, peer := range device.peers.keyMap {
 		peer.keypairs.RLock()
 		sendKeepalive := peer.keypairs.current != nil && !peer.keypairs.current.created.Add(RejectAfterTime).Before(time.Now())
 		peer.keypairs.RUnlock()
 		if sendKeepalive {
-			peer.SendKeepalive()
+			peers = append(peers, peer)
 		}
 	}
 	device.peers.RUnlock()
+	for _, peer := range peers {
+		peer.SendKeepalive()
+	}
 }
 
 // closeBindLocked closes the device's net.bind.
