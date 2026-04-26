@@ -8,6 +8,7 @@ package device
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"net"
 	"net/netip"
 	"os"
@@ -58,8 +59,13 @@ type QueueOutboundElement struct {
 }
 
 type QueueOutboundElementsContainer struct {
-	sync.Mutex
-	elems []*QueueOutboundElement
+	// filling is a one-shot barrier signaling encryption→send handoff.
+	// SendStagedPackets calls Add(1) before sending the container down
+	// the encryption and outbound queues; RoutineEncryption calls Done
+	// after encrypting; RoutineSequentialSender calls Wait before
+	// reading the encrypted packets.
+	filling sync.WaitGroup
+	elems   []*QueueOutboundElement
 }
 
 func (device *Device) NewOutboundElement() *QueueOutboundElement {
@@ -378,7 +384,6 @@ top:
 
 				elem.keypair = keypair
 			}
-			elemsContainer.Lock()
 			elemsContainer.elems = elemsContainer.elems[:i]
 
 			if elemsContainerOOO != nil {
@@ -392,6 +397,7 @@ top:
 
 			// add to parallel and sequential queue
 			if peer.isRunning.Load() {
+				elemsContainer.filling.Add(1)
 				peer.queue.outbound.c <- elemsContainer
 				peer.device.queue.encryption.c <- elemsContainer
 			} else {
@@ -483,7 +489,7 @@ func (device *Device) RoutineEncryption(id int) {
 			// re-slice packet to include encapsulating transport space
 			elem.packet = elem.buffer[:MessageEncapsulatingTransportSize+len(elem.packet)]
 		}
-		elemsContainer.Unlock()
+		elemsContainer.filling.Done()
 	}
 }
 
@@ -498,58 +504,82 @@ func (peer *Peer) RoutineSequentialSender(maxBatchSize int) {
 	bufs := make([][]byte, 0, maxBatchSize)
 
 	for elemsContainer := range peer.queue.outbound.c {
-		bufs = bufs[:0]
 		if elemsContainer == nil {
 			return
 		}
-		if !peer.isRunning.Load() {
-			// peer has been stopped; return re-usable elems to the shared pool.
-			// This is an optimization only. It is possible for the peer to be stopped
-			// immediately after this check, in which case, elem will get processed.
-			// The timers and SendBuffers code are resilient to a few stragglers.
-			// TODO: rework peer shutdown order to ensure
-			// that we never accidentally keep timers alive longer than necessary.
-			elemsContainer.Lock()
-			for _, elem := range elemsContainer.elems {
-				device.PutMessageBuffer(elem.buffer)
-				device.PutOutboundElement(elem)
-			}
-			device.PutOutboundElementsContainer(elemsContainer)
-			continue
-		}
-		dataSent := false
-		elemsContainer.Lock()
-		for _, elem := range elemsContainer.elems {
-			if len(elem.packet[MessageEncapsulatingTransportSize:]) != MessageKeepaliveSize {
-				dataSent = true
-			}
-			bufs = append(bufs, elem.packet)
-		}
+		peer.processOutboundContainer(elemsContainer, bufs[:0])
+	}
+}
 
-		peer.timersAnyAuthenticatedPacketTraversal()
-		peer.timersAnyAuthenticatedPacketSent()
+// processOutboundContainer waits for the encryption routine to finish
+// filling elemsContainer, then sends the batch (or drops it, if the peer
+// has been stopped) and returns the container to the pool.
+//
+// scratch is a length-0 slice used to assemble the per-packet buffers
+// passed to SendBuffers; its backing array is reused across calls.
+func (peer *Peer) processOutboundContainer(elemsContainer *QueueOutboundElementsContainer, scratch [][]byte) {
+	// Invariants from RoutineSequentialSender; all should be unreachable.
+	if len(scratch) != 0 || cap(scratch) == 0 {
+		panic(fmt.Sprintf("processOutboundContainer: scratch must be empty with non-zero cap; got len=%d cap=%d",
+			len(scratch), cap(scratch)))
+	}
+	if cap(scratch) < len(elemsContainer.elems) {
+		panic(fmt.Sprintf("processOutboundContainer: scratch cap %d < elems %d",
+			cap(scratch), len(elemsContainer.elems)))
+	}
 
-		err := peer.SendBuffers(bufs)
-		if dataSent {
-			peer.timersDataSent()
-		}
+	device := peer.device
+	defer device.PutOutboundElementsContainer(elemsContainer)
+
+	// Wait for RoutineEncryption to finish filling the container. After
+	// Wait returns we have happens-before with that goroutine and are the
+	// sole owner of the container until Put hands it back to the pool.
+	elemsContainer.filling.Wait()
+
+	if !peer.isRunning.Load() {
+		// peer has been stopped; return re-usable elems to the shared pool.
+		// This is an optimization only. It is possible for the peer to be stopped
+		// immediately after this check, in which case, elem will get processed.
+		// The timers and SendBuffers code are resilient to a few stragglers.
+		// TODO: rework peer shutdown order to ensure
+		// that we never accidentally keep timers alive longer than necessary.
 		for _, elem := range elemsContainer.elems {
 			device.PutMessageBuffer(elem.buffer)
 			device.PutOutboundElement(elem)
 		}
-		device.PutOutboundElementsContainer(elemsContainer)
-		if err != nil {
-			var errGSO conn.ErrUDPGSODisabled
-			if errors.As(err, &errGSO) {
-				device.log.Verbosef(err.Error())
-				err = errGSO.RetryErr
-			}
-		}
-		if err != nil {
-			device.log.Errorf("%v - Failed to send data packets: %v", peer, err)
-			continue
-		}
-
-		peer.keepKeyFreshSending()
+		return
 	}
+
+	dataSent := false
+	for _, elem := range elemsContainer.elems {
+		if len(elem.packet[MessageEncapsulatingTransportSize:]) != MessageKeepaliveSize {
+			dataSent = true
+		}
+		scratch = append(scratch, elem.packet)
+	}
+
+	peer.timersAnyAuthenticatedPacketTraversal()
+	peer.timersAnyAuthenticatedPacketSent()
+
+	err := peer.SendBuffers(scratch)
+	if dataSent {
+		peer.timersDataSent()
+	}
+	for _, elem := range elemsContainer.elems {
+		device.PutMessageBuffer(elem.buffer)
+		device.PutOutboundElement(elem)
+	}
+	if err != nil {
+		var errGSO conn.ErrUDPGSODisabled
+		if errors.As(err, &errGSO) {
+			device.log.Verbosef(err.Error())
+			err = errGSO.RetryErr
+		}
+	}
+	if err != nil {
+		device.log.Errorf("%v - Failed to send data packets: %v", peer, err)
+		return
+	}
+
+	peer.keepKeyFreshSending()
 }

@@ -8,6 +8,7 @@ package device
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"net"
 	"net/netip"
 	"sync"
@@ -35,8 +36,13 @@ type QueueInboundElement struct {
 }
 
 type QueueInboundElementsContainer struct {
-	sync.Mutex
-	elems []*QueueInboundElement
+	// filling is a one-shot barrier signaling decryption→receive
+	// handoff. RoutineReceiveIncoming calls Add(1) before sending the
+	// container down the decryption and inbound queues; RoutineDecryption
+	// calls Done after decrypting; RoutineSequentialReceiver calls Wait
+	// before reading the decrypted packets.
+	filling sync.WaitGroup
+	elems   []*QueueInboundElement
 }
 
 // clearPointers clears elem fields that contain pointers.
@@ -178,7 +184,6 @@ func (device *Device) RoutineReceiveIncoming(maxBatchSize int, recv conn.Receive
 				elemsForPeer, ok := elemsByPeer[peer]
 				if !ok {
 					elemsForPeer = device.GetInboundElementsContainer()
-					elemsForPeer.Lock()
 					elemsByPeer[peer] = elemsForPeer
 				}
 				elemsForPeer.elems = append(elemsForPeer.elems, elem)
@@ -222,6 +227,7 @@ func (device *Device) RoutineReceiveIncoming(maxBatchSize int, recv conn.Receive
 		}
 		for peer, elemsContainer := range elemsByPeer {
 			if peer.isRunning.Load() {
+				elemsContainer.filling.Add(1)
 				peer.queue.inbound.c <- elemsContainer
 				device.queue.decryption.c <- elemsContainer
 			} else {
@@ -263,7 +269,7 @@ func (device *Device) RoutineDecryption(id int) {
 				elem.packet = nil
 			}
 		}
-		elemsContainer.Unlock()
+		elemsContainer.filling.Done()
 	}
 }
 
@@ -441,102 +447,128 @@ func (peer *Peer) RoutineSequentialReceiver(maxBatchSize int) {
 		if elemsContainer == nil {
 			return
 		}
-		elemsContainer.Lock()
-		validTailPacket := -1
-		dataPacketReceived := false
-		rxBytesLen := uint64(0)
-		for i, elem := range elemsContainer.elems {
-			if elem.packet == nil {
-				// decryption failed
+		peer.processInboundContainer(elemsContainer, bufs[:0])
+	}
+}
+
+// processInboundContainer waits for the decryption routine to finish
+// filling elemsContainer, then writes the valid packets to the TUN
+// device and returns the container to the pool.
+//
+// scratch is a length-0 slice used to assemble the per-packet buffers
+// passed to tun.device.Write; its backing array is reused across calls.
+func (peer *Peer) processInboundContainer(elemsContainer *QueueInboundElementsContainer, scratch [][]byte) {
+	// Invariants from RoutineSequentialReceiver; all should be unreachable.
+	if len(scratch) != 0 || cap(scratch) == 0 {
+		panic(fmt.Sprintf("processInboundContainer: scratch must be empty with non-zero cap; got len=%d cap=%d",
+			len(scratch), cap(scratch)))
+	}
+	if cap(scratch) < len(elemsContainer.elems) {
+		panic(fmt.Sprintf("processInboundContainer: scratch cap %d < elems %d",
+			cap(scratch), len(elemsContainer.elems)))
+	}
+
+	device := peer.device
+	defer device.PutInboundElementsContainer(elemsContainer)
+
+	// Wait for RoutineDecryption to finish filling the container. After
+	// Wait returns we have happens-before with that goroutine and are the
+	// sole owner of the container until Put hands it back to the pool.
+	elemsContainer.filling.Wait()
+	elems := elemsContainer.elems
+
+	validTailPacket := -1
+	dataPacketReceived := false
+	rxBytesLen := uint64(0)
+	for i, elem := range elems {
+		if elem.packet == nil {
+			// decryption failed
+			continue
+		}
+
+		if !elem.keypair.replayFilter.ValidateCounter(elem.counter, RejectAfterMessages) {
+			continue
+		}
+
+		validTailPacket = i
+		if peer.ReceivedWithKeypair(elem.keypair) {
+			peer.SetEndpointFromPacket(elem.endpoint)
+			peer.timersHandshakeComplete()
+			peer.SendStagedPackets()
+		}
+		if ep, ok := elem.endpoint.(conn.PeerAwareEndpoint); ok {
+			ep.FromPeer(peer.handshake.remoteStatic)
+		}
+		rxBytesLen += uint64(len(elem.packet) + MinMessageSize)
+
+		if len(elem.packet) == 0 {
+			device.log.Verbosef("%v - Receiving keepalive packet", peer)
+			continue
+		}
+		dataPacketReceived = true
+
+		switch elem.packet[0] >> 4 {
+		case 4:
+			if len(elem.packet) < ipv4.HeaderLen {
+				continue
+			}
+			field := elem.packet[IPv4offsetTotalLength : IPv4offsetTotalLength+2]
+			length := binary.BigEndian.Uint16(field)
+			if int(length) > len(elem.packet) || int(length) < ipv4.HeaderLen {
+				continue
+			}
+			elem.packet = elem.packet[:length]
+			src := elem.packet[IPv4offsetSrc : IPv4offsetSrc+net.IPv4len]
+			srcAddr, _ := netip.AddrFromSlice(src)
+			if !peer.AllowedPeerSourceIP(srcAddr) {
+				device.log.Verbosef("IPv4 packet with disallowed source address from %v", peer)
 				continue
 			}
 
-			if !elem.keypair.replayFilter.ValidateCounter(elem.counter, RejectAfterMessages) {
+		case 6:
+			if len(elem.packet) < ipv6.HeaderLen {
+				continue
+			}
+			field := elem.packet[IPv6offsetPayloadLength : IPv6offsetPayloadLength+2]
+			length := binary.BigEndian.Uint16(field)
+			length += ipv6.HeaderLen
+			if int(length) > len(elem.packet) {
+				continue
+			}
+			elem.packet = elem.packet[:length]
+			src := elem.packet[IPv6offsetSrc : IPv6offsetSrc+net.IPv6len]
+			srcAddr, _ := netip.AddrFromSlice(src)
+			if !peer.AllowedPeerSourceIP(srcAddr) {
+				device.log.Verbosef("IPv6 packet with disallowed source address from %v", peer)
 				continue
 			}
 
-			validTailPacket = i
-			if peer.ReceivedWithKeypair(elem.keypair) {
-				peer.SetEndpointFromPacket(elem.endpoint)
-				peer.timersHandshakeComplete()
-				peer.SendStagedPackets()
-			}
-			if ep, ok := elem.endpoint.(conn.PeerAwareEndpoint); ok {
-				ep.FromPeer(peer.handshake.remoteStatic)
-			}
-			rxBytesLen += uint64(len(elem.packet) + MinMessageSize)
-
-			if len(elem.packet) == 0 {
-				device.log.Verbosef("%v - Receiving keepalive packet", peer)
-				continue
-			}
-			dataPacketReceived = true
-
-			switch elem.packet[0] >> 4 {
-			case 4:
-				if len(elem.packet) < ipv4.HeaderLen {
-					continue
-				}
-				field := elem.packet[IPv4offsetTotalLength : IPv4offsetTotalLength+2]
-				length := binary.BigEndian.Uint16(field)
-				if int(length) > len(elem.packet) || int(length) < ipv4.HeaderLen {
-					continue
-				}
-				elem.packet = elem.packet[:length]
-				src := elem.packet[IPv4offsetSrc : IPv4offsetSrc+net.IPv4len]
-				srcAddr, _ := netip.AddrFromSlice(src)
-				if !peer.AllowedPeerSourceIP(srcAddr) {
-					device.log.Verbosef("IPv4 packet with disallowed source address from %v", peer)
-					continue
-				}
-
-			case 6:
-				if len(elem.packet) < ipv6.HeaderLen {
-					continue
-				}
-				field := elem.packet[IPv6offsetPayloadLength : IPv6offsetPayloadLength+2]
-				length := binary.BigEndian.Uint16(field)
-				length += ipv6.HeaderLen
-				if int(length) > len(elem.packet) {
-					continue
-				}
-				elem.packet = elem.packet[:length]
-				src := elem.packet[IPv6offsetSrc : IPv6offsetSrc+net.IPv6len]
-				srcAddr, _ := netip.AddrFromSlice(src)
-				if !peer.AllowedPeerSourceIP(srcAddr) {
-					device.log.Verbosef("IPv6 packet with disallowed source address from %v", peer)
-					continue
-				}
-
-			default:
-				device.log.Verbosef("Packet with invalid IP version from %v", peer)
-				continue
-			}
-
-			bufs = append(bufs, elem.buffer[:MessageTransportOffsetContent+len(elem.packet)])
+		default:
+			device.log.Verbosef("Packet with invalid IP version from %v", peer)
+			continue
 		}
 
-		peer.rxBytes.Add(rxBytesLen)
-		if validTailPacket >= 0 {
-			peer.SetEndpointFromPacket(elemsContainer.elems[validTailPacket].endpoint)
-			peer.keepKeyFreshReceiving()
-			peer.timersAnyAuthenticatedPacketTraversal()
-			peer.timersAnyAuthenticatedPacketReceived()
+		scratch = append(scratch, elem.buffer[:MessageTransportOffsetContent+len(elem.packet)])
+	}
+
+	peer.rxBytes.Add(rxBytesLen)
+	if validTailPacket >= 0 {
+		peer.SetEndpointFromPacket(elems[validTailPacket].endpoint)
+		peer.keepKeyFreshReceiving()
+		peer.timersAnyAuthenticatedPacketTraversal()
+		peer.timersAnyAuthenticatedPacketReceived()
+	}
+	if dataPacketReceived {
+		peer.timersDataReceived()
+	}
+	if len(scratch) > 0 {
+		_, err := device.tun.device.Write(scratch, MessageTransportOffsetContent)
+		if err != nil && !device.isClosed() {
+			device.log.Errorf("Failed to write packets to TUN device: %v", err)
 		}
-		if dataPacketReceived {
-			peer.timersDataReceived()
-		}
-		if len(bufs) > 0 {
-			_, err := device.tun.device.Write(bufs, MessageTransportOffsetContent)
-			if err != nil && !device.isClosed() {
-				device.log.Errorf("Failed to write packets to TUN device: %v", err)
-			}
-		}
-		for _, elem := range elemsContainer.elems {
-			device.PutMessageBuffer(elem.buffer)
-			device.PutInboundElement(elem)
-		}
-		bufs = bufs[:0]
-		device.PutInboundElementsContainer(elemsContainer)
+	}
+	for _, elem := range elems {
+		device.PutMessageBuffer(elem.buffer)
+		device.PutInboundElement(elem)
 	}
 }
