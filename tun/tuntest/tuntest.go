@@ -118,7 +118,7 @@ func (t *chTun) Read(bufs []iobuf.View, offset int) (int, error) {
 	case msg := <-t.c.Outbound:
 		// TODO: Allocate len(msg) buffer.
 		iobuf.EnsureAllocated(bufs[:1])
-		n := copy(bufs[0].Bytes[offset:], msg)
+		n := copy(bufs[0].Bytes[offset:len(bufs[0].Bytes)-tun.ReadTailroom], msg)
 		bufs[0].Bytes = bufs[0].Bytes[:offset+n]
 		return 1, nil
 	}

@@ -13,6 +13,11 @@ import (
 
 const DefaultMTU = 1420
 
+// tun.Read leaves [tun.ReadTailroom] of cap slack for in-place encryption growth;
+// it must match the transport tail the send path appends. Assert they agree.
+const _ = uint(MessageTransportTailSize - tun.ReadTailroom)
+const _ = uint(tun.ReadTailroom - MessageTransportTailSize)
+
 func (device *Device) RoutineTUNEventReader() {
 	device.log.Verbosef("Routine: event worker - started")
 

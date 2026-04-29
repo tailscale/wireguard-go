@@ -6,9 +6,11 @@
 package tun
 
 import (
+	"errors"
 	"net/netip"
 	"slices"
 	"testing"
+	"unsafe"
 
 	"github.com/tailscale/wireguard-go/conn"
 	"github.com/tailscale/wireguard-go/iobuf"
@@ -169,91 +171,159 @@ func tcp6Packet(srcIPPort, dstIPPort netip.AddrPort, flags header.TCPFlags, segm
 }
 
 func Test_handleVirtioRead(t *testing.T) {
+	const (
+		outOffset = 30
+		tailroom  = 30
+		gsoSize   = 1000
+		firstSeq  = 1
+	)
+	var (
+		// fields: flags, gsoType, hdrLen, gsoSize, csumStart, csumOffset
+		tcp4Hdr = virtioNetHdr{unix.VIRTIO_NET_HDR_F_NEEDS_CSUM, unix.VIRTIO_NET_HDR_GSO_TCPV4, 40, gsoSize, 20, 16}
+		tcp6Hdr = virtioNetHdr{unix.VIRTIO_NET_HDR_F_NEEDS_CSUM, unix.VIRTIO_NET_HDR_GSO_TCPV6, 60, gsoSize, 40, 16}
+		udp4Hdr = virtioNetHdr{unix.VIRTIO_NET_HDR_F_NEEDS_CSUM, unix.VIRTIO_NET_HDR_GSO_UDP_L4, 28, gsoSize, 20, 6}
+		udp6Hdr = virtioNetHdr{unix.VIRTIO_NET_HDR_F_NEEDS_CSUM, unix.VIRTIO_NET_HDR_GSO_UDP_L4, 48, gsoSize, 40, 6}
+	)
 	tests := []struct {
-		name     string
-		hdr      virtioNetHdr
-		pktIn    []byte
-		wantLens []int
-		wantErr  bool
+		name         string
+		hdr          virtioNetHdr
+		pktIn        []byte
+		views        int // 0 means conn.IdealBatchSize
+		wantLens     []int
+		wantErr      error
+		wantBackings int // distinct backing buffers spanned; 0 means don't check
 	}{
 		{
-			"tcp4",
-			virtioNetHdr{
-				flags:      unix.VIRTIO_NET_HDR_F_NEEDS_CSUM,
-				gsoType:    unix.VIRTIO_NET_HDR_GSO_TCPV4,
-				gsoSize:    100,
-				hdrLen:     40,
-				csumStart:  20,
-				csumOffset: 16,
-			},
-			tcp4Packet(ip4PortA, ip4PortB, header.TCPFlagAck|header.TCPFlagPsh, 200, 1),
-			[]int{140, 140},
-			false,
+			name:     "tcp4",
+			hdr:      tcp4Hdr,
+			pktIn:    tcp4Packet(ip4PortA, ip4PortB, header.TCPFlagAck|header.TCPFlagPsh, 2*gsoSize, firstSeq),
+			wantLens: []int{1040, 1040},
 		},
 		{
-			"tcp6",
-			virtioNetHdr{
-				flags:      unix.VIRTIO_NET_HDR_F_NEEDS_CSUM,
-				gsoType:    unix.VIRTIO_NET_HDR_GSO_TCPV6,
-				gsoSize:    100,
-				hdrLen:     60,
-				csumStart:  40,
-				csumOffset: 16,
-			},
-			tcp6Packet(ip6PortA, ip6PortB, header.TCPFlagAck|header.TCPFlagPsh, 200, 1),
-			[]int{160, 160},
-			false,
+			name:     "tcp6",
+			hdr:      tcp6Hdr,
+			pktIn:    tcp6Packet(ip6PortA, ip6PortB, header.TCPFlagAck|header.TCPFlagPsh, 2*gsoSize, firstSeq),
+			wantLens: []int{1060, 1060},
 		},
 		{
-			"udp4",
-			virtioNetHdr{
-				flags:      unix.VIRTIO_NET_HDR_F_NEEDS_CSUM,
-				gsoType:    unix.VIRTIO_NET_HDR_GSO_UDP_L4,
-				gsoSize:    100,
-				hdrLen:     28,
-				csumStart:  20,
-				csumOffset: 6,
-			},
-			udp4Packet(ip4PortA, ip4PortB, 200),
-			[]int{128, 128},
-			false,
+			name:     "udp4",
+			hdr:      udp4Hdr,
+			pktIn:    udp4Packet(ip4PortA, ip4PortB, 2*gsoSize),
+			wantLens: []int{1028, 1028},
 		},
 		{
-			"udp6",
-			virtioNetHdr{
-				flags:      unix.VIRTIO_NET_HDR_F_NEEDS_CSUM,
-				gsoType:    unix.VIRTIO_NET_HDR_GSO_UDP_L4,
-				gsoSize:    100,
-				hdrLen:     48,
-				csumStart:  40,
-				csumOffset: 6,
-			},
-			udp6Packet(ip6PortA, ip6PortB, 200),
-			[]int{148, 148},
-			false,
+			name:     "udp6",
+			hdr:      udp6Hdr,
+			pktIn:    udp6Packet(ip6PortA, ip6PortB, 2*gsoSize),
+			wantLens: []int{1048, 1048},
+		},
+		{
+			name: "none csum-only tcp4",
+			hdr: func() virtioNetHdr {
+				// Checksum-only, no segmentation: the kernel sets NEEDS_CSUM with
+				// GSO_NONE and leaves hdrLen 0. The single-segment path must accept
+				// it even though hdrLen (0) < csumStart (20).
+				h := tcp4Hdr
+				h.gsoType = unix.VIRTIO_NET_HDR_GSO_NONE
+				h.hdrLen = 0
+				return h
+			}(),
+			pktIn:    tcp4Packet(ip4PortA, ip4PortB, header.TCPFlagAck|header.TCPFlagPsh, 2*gsoSize, firstSeq),
+			wantLens: []int{2040},
+		},
+		{
+			// 65 segments spread into 1100-byte frames overflow one pooled
+			// buffer (65 * 1100 > MaxBufferSize) and spill into a second.
+			name:         "spills across buffers",
+			hdr:          tcp4Hdr,
+			pktIn:        tcp4Packet(ip4PortA, ip4PortB, header.TCPFlagAck, 65*gsoSize, firstSeq),
+			wantLens:     slices.Repeat([]int{1040 /*hdr+gso*/}, 65),
+			wantBackings: 2,
+		},
+		{
+			// 5 segments into 2 views: deliver 2, drop 3, surface
+			// ErrTooManySegments. PSH is set on the source and must not survive
+			// on any delivered segment (the true tail was dropped).
+			name:     "truncates to output views",
+			hdr:      tcp4Hdr,
+			pktIn:    tcp4Packet(ip4PortA, ip4PortB, header.TCPFlagAck|header.TCPFlagPsh, 5*gsoSize, firstSeq),
+			views:    2,
+			wantLens: []int{1040, 1040},
+			wantErr:  ErrTooManySegments,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			out := make([]iobuf.View, conn.IdealBatchSize)
-			for i := range out {
-				out[i] = iobuf.View{Bytes: make([]byte, 65535)}
+			nViews := tt.views
+			if nViews == 0 {
+				nViews = conn.IdealBatchSize
 			}
+			out := make([]iobuf.View, nViews)
 			tt.hdr.encode(tt.pktIn)
-			n, err := handleVirtioRead(tt.pktIn, out, offset)
-			if err != nil {
-				if tt.wantErr {
-					return
+			shared := iobuf.SharedBufPool.Get()
+			// Stage the virtio-prefixed packet per handleVirtioRead's contract.
+			virtioStart := outOffset - virtioNetHdrLen
+			copy(shared.Bytes[virtioStart:], tt.pktIn)
+			n, err := handleVirtioRead(shared, virtioStart, len(tt.pktIn), out, outOffset, tailroom)
+
+			if tt.wantErr != nil {
+				if !errors.Is(err, tt.wantErr) {
+					t.Fatalf("err = %v, want %v", err, tt.wantErr)
 				}
+			} else if err != nil {
 				t.Fatalf("got err: %v", err)
 			}
+
 			if n != len(tt.wantLens) {
 				t.Fatalf("got %d packets, wanted %d", n, len(tt.wantLens))
 			}
+
 			for i := range tt.wantLens {
-				if size := len(out[i].Bytes) - offset; tt.wantLens[i] != size {
+				if size := len(out[i].Bytes) - outOffset; tt.wantLens[i] != size {
 					t.Fatalf("wantLens[%d]: %d != size: %d", i, tt.wantLens[i], size)
+				}
+			}
+
+			if tt.wantBackings != 0 {
+				backings := map[unsafe.Pointer]struct{}{}
+				for i := range n {
+					backings[out[i].BackingGo] = struct{}{}
+				}
+				if len(backings) != tt.wantBackings {
+					t.Fatalf("distinct backings = %d, want %d", len(backings), tt.wantBackings)
+				}
+			}
+
+			if tt.hdr.gsoType == unix.VIRTIO_NET_HDR_GSO_TCPV4 || tt.hdr.gsoType == unix.VIRTIO_NET_HDR_GSO_TCPV6 {
+				// The true tail segment is delivered only on full delivery; under
+				// truncation (ErrTooManySegments) it is dropped, so FIN/PSH must
+				// be cleared on every delivered segment.
+				tailIdx := n - 1
+				if tt.wantErr != nil {
+					tailIdx = -1
+				}
+				tcpAt := int(tt.hdr.csumStart)
+				for i := range n {
+					tcpH := header.TCP(out[i].Bytes[outOffset+tcpAt:])
+					// Each segment carries the next gsoSize-sized slice of the stream.
+					if want := uint32(firstSeq) + uint32(tt.hdr.gsoSize)*uint32(i); tcpH.SequenceNumber() != want {
+						t.Fatalf("segment %d: seq %d, want %d", i, tcpH.SequenceNumber(), want)
+					}
+					if i != tailIdx && tcpH.Flags()&(header.TCPFlagFin|header.TCPFlagPsh) != 0 {
+						t.Fatalf("segment %d: FIN/PSH not cleared (flags %x)", i, tcpH.Flags())
+					}
+				}
+			}
+
+			for i := range n {
+				pktBytes := out[i].Bytes[outOffset:]
+				if pktBytes[0]>>4 != 4 {
+					continue // IPv6 has no Identification field
+				}
+				// Source ID is 0, so each segment's ID is its index.
+				if got := header.IPv4(pktBytes).ID(); got != uint16(i) {
+					t.Fatalf("segment %d: ipv4 id %d, want %d", i, got, i)
 				}
 			}
 		})

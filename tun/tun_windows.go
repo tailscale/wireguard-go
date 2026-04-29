@@ -163,6 +163,11 @@ retry:
 		case nil:
 			packetSize := len(packet)
 			iobuf.EnsureAllocated(bufs[:1])
+			maxCopy := len(bufs[0].Bytes) - offset - ReadTailroom
+			if len(packet) > maxCopy {
+				tun.session.ReleaseReceivePacket(packet)
+				return 0, fmt.Errorf("tun: wintun packet (%d) exceeds buffer minus offset+tailroom (%d)", len(packet), maxCopy)
+			}
 			n := copy(bufs[0].Bytes[offset:], packet)
 			bufs[0].Bytes = bufs[0].Bytes[:offset+n]
 			tun.session.ReleaseReceivePacket(packet)

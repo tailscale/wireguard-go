@@ -340,7 +340,7 @@ func (tun *NativeTun) Read(bufs []iobuf.View, offset int) (n int, err error) {
 		return 0, err
 	default:
 		iobuf.EnsureAllocated(bufs[:1])
-		n, err := tun.tunFile.Read(bufs[0].Bytes[offset-4:])
+		n, err := tun.tunFile.Read(bufs[0].Bytes[offset-4 : len(bufs[0].Bytes)-ReadTailroom])
 		if n < 4 {
 			return 0, err
 		}

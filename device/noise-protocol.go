@@ -68,6 +68,7 @@ const (
 	MessageTransportHeaderSize        = 16                                            // size of data preceding content in transport message
 	MessageEncapsulatingTransportSize = 8                                             // size of optional, free (for use by conn.Bind.Send()) space preceding the transport header
 	MessageTransportSize              = MessageTransportHeaderSize + poly1305.TagSize // size of empty transport
+	MessageTransportTailSize          = (PaddingMultiple - 1) + poly1305.TagSize      // max bytes encryption appends after plaintext: padding + auth tag
 	MessageKeepaliveSize              = MessageTransportSize                          // size of keepalive
 	MessageHandshakeSize              = MessageInitiationSize                         // size of largest handshake related message
 )

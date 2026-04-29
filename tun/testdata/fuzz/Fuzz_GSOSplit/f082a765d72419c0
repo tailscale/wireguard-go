@@ -1,0 +1,8 @@
+go test fuzz v1
+[]byte("A")
+int(3)
+uint16(60)
+uint16(40)
+uint16(16)
+uint16(0)
+bool(true)

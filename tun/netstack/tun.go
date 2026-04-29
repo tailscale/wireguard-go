@@ -120,15 +120,15 @@ func (tun *netTun) Events() <-chan tun.Event {
 	return tun.events
 }
 
-func (tun *netTun) Read(bufs []iobuf.View, offset int) (int, error) {
-	view, ok := <-tun.incomingPacket
+func (t *netTun) Read(bufs []iobuf.View, offset int) (int, error) {
+	view, ok := <-t.incomingPacket
 	if !ok {
 		return 0, os.ErrClosed
 	}
 	// TODO: If not the offset, could use view.AsSlice() and wrap view.Release() in a [buffer.Recycler].
 	// TODO: Allocate view.Size() buffer.
 	iobuf.EnsureAllocated(bufs[:1])
-	n, err := view.Read(bufs[0].Bytes[offset:])
+	n, err := view.Read(bufs[0].Bytes[offset : len(bufs[0].Bytes)-tun.ReadTailroom])
 	if err != nil {
 		return 0, err
 	}

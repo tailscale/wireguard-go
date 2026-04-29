@@ -47,9 +47,6 @@ type NativeTun struct {
 	nameCache string    // name of interface
 	nameErr   error
 
-	readOpMu sync.Mutex                    // readOpMu guards readBuff
-	readBuff [virtioNetHdrLen + 65535]byte // if vnetHdr every read() is prefixed by virtioNetHdr
-
 	writeOpMu   sync.Mutex // writeOpMu guards the following fields
 	toWrite     groToWrite
 	tcpGROTable *tcpGROTable
@@ -410,21 +407,23 @@ func (tun *NativeTun) Write(bufs [][]byte, offset int) (int, error) {
 	return total, errs
 }
 
-// handleVirtioRead splits in into bufs, leaving offset bytes at the front of
-// each buffer. It sets each buffer's Bytes length to reflect the size of each
-// element of bufs, and returns the number of packets read.
-func handleVirtioRead(in []byte, bufs []iobuf.View, offset int) (int, error) {
+// handleVirtioRead parses the virtio header already written into shared.Bytes
+// at virtioStart (n is the kernel-written length) and splits the coalesced
+// payload into views in bufs. The caller MUST choose virtioStart = offset -
+// virtioNetHdrLen so the L3+L4 header lands at shared.Bytes[offset : offset+HdrLen].
+func handleVirtioRead(shared *iobuf.Shared, virtioStart, n int, bufs []iobuf.View, offset, tailroom int) (int, error) {
+	hdrBytes := shared.Bytes[virtioStart : virtioStart+virtioNetHdrLen]
 	var hdr virtioNetHdr
-	err := hdr.decode(in)
-	if err != nil {
+	if err := hdr.decode(hdrBytes); err != nil {
 		return 0, err
 	}
-	in = in[virtioNetHdrLen:]
 
 	options, err := hdr.toGSOOptions()
 	if err != nil {
 		return 0, err
 	}
+
+	pkt := shared.Bytes[offset : virtioStart+n] // L3+L4 || payloads
 
 	// Don't trust HdrLen from the kernel as it can be equal to the length
 	// of the entire first packet when the kernel is handling it as part of a
@@ -433,11 +432,11 @@ func handleVirtioRead(in []byte, bufs []iobuf.View, offset int) (int, error) {
 	if options.GSOType == GSOUDPL4 {
 		options.HdrLen = options.CsumStart + 8
 	} else if options.GSOType != GSONone {
-		if len(in) <= int(options.CsumStart+12) {
+		if len(pkt) <= int(options.CsumStart)+12 {
 			return 0, errors.New("packet is too short")
 		}
 
-		tcpHLen := uint16(in[options.CsumStart+12] >> 4 * 4)
+		tcpHLen := uint16(pkt[int(options.CsumStart)+12] >> 4 * 4)
 		if tcpHLen < 20 || tcpHLen > 60 {
 			// A TCP header must be between 20 and 60 bytes in length.
 			return 0, fmt.Errorf("tcp header len is invalid: %d", tcpHLen)
@@ -445,36 +444,52 @@ func handleVirtioRead(in []byte, bufs []iobuf.View, offset int) (int, error) {
 		options.HdrLen = options.CsumStart + tcpHLen
 	}
 
-	return GSOSplit(in, options, bufs, offset)
+	hdrLen := int(options.HdrLen)
+	payloadStart := offset + hdrLen
+	payloadLen := len(pkt) - hdrLen
+	if payloadLen < 0 {
+		return 0, fmt.Errorf("packet length (%d) < GSO HdrLen (%d)", len(pkt), hdrLen)
+	}
+
+	return GSOSplit(shared, options, payloadStart, payloadLen, bufs, offset, tailroom, iobuf.SharedBufPool.Get)
 }
 
 func (tun *NativeTun) Read(bufs []iobuf.View, offset int) (int, error) {
-	tun.readOpMu.Lock()
-	defer tun.readOpMu.Unlock()
 	select {
 	case err := <-tun.errors:
 		return 0, err
 	default:
-		// TODO: placeholder until tun implements right-sized buffers.
-		iobuf.EnsureAllocated(bufs)
-		readInto := bufs[0].Bytes[offset:]
-		if tun.vnetHdr {
-			readInto = tun.readBuff[:]
+	}
+	if tun.vnetHdr {
+		if offset < virtioNetHdrLen {
+			return 0, fmt.Errorf("tun: vnetHdr Read requires offset >= %d, got %d", virtioNetHdrLen, offset)
 		}
+		shared := iobuf.SharedBufPool.Get()
+		virtioStart := offset - virtioNetHdrLen
+		// Reserve ReadTailroom in case we read a single-segment batch.
+		readInto := shared.Bytes[virtioStart : len(shared.Bytes)-ReadTailroom]
 		n, err := tun.tunFile.Read(readInto)
 		if errors.Is(err, syscall.EBADFD) {
 			err = os.ErrClosed
 		}
 		if err != nil {
+			shared.Release()
 			return 0, err
 		}
-		if tun.vnetHdr {
-			return handleVirtioRead(readInto[:n], bufs, offset)
-		} else {
-			bufs[0].Bytes = bufs[0].Bytes[:n+offset]
-			return 1, nil
-		}
+		got, err := handleVirtioRead(shared, virtioStart, n, bufs, offset, ReadTailroom)
+		shared.Release() // data is now owned by views
+		return got, err
 	}
+	iobuf.EnsureAllocated(bufs)
+	n, err := tun.tunFile.Read(bufs[0].Bytes[offset : len(bufs[0].Bytes)-ReadTailroom])
+	if errors.Is(err, syscall.EBADFD) {
+		err = os.ErrClosed
+	}
+	if err != nil {
+		return 0, err
+	}
+	bufs[0].Bytes = bufs[0].Bytes[:n+offset]
+	return 1, nil
 }
 
 func (tun *NativeTun) Events() <-chan Event {

@@ -19,6 +19,11 @@ const (
 	EventMTUUpdate
 )
 
+// ReadTailroom is the trailing slack, in bytes, that Read implementations leave
+// inside each returned View's cap (beyond its len) so the caller can grow the
+// buffer in place during encryption. It mirrors device.MessageTransportTailSize.
+const ReadTailroom = (16 - 1) + 16
+
 type Device interface {
 	// File returns the file descriptor of the device.
 	File() *os.File
@@ -29,6 +34,10 @@ type Device interface {
 	// Zero-valued entries in bufs are allocated by the implementation.
 	// A nonzero offset can be used to instruct the Device on where to begin
 	// reading into each element of the bufs slice.
+	// Implementations that prepend their own header into the offset region may
+	// require offset to be at least that header's length.
+	// Implementations leave [ReadTailroom] bytes of trailing slack inside each
+	// returned View's cap (beyond its len) for the caller to grow in place.
 	Read(bufs []iobuf.View, offset int) (n int, err error)
 
 	// Write one or more packets to the device (without any additional headers).
