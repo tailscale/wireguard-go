@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cloudflare/circl/kem/mlkem/mlkem768"
 	"golang.org/x/crypto/blake2s"
 	"golang.org/x/crypto/chacha20poly1305"
 	"golang.org/x/crypto/poly1305"
@@ -70,6 +71,7 @@ const (
 	MessageTransportSize              = MessageTransportHeaderSize + poly1305.TagSize // size of empty transport
 	MessageKeepaliveSize              = MessageTransportSize                          // size of keepalive
 	MessageHandshakeSize              = MessageInitiationSize                         // size of largest handshake related message
+	MessageHandshakeMLKEMSize         = MessageInitiationMLKEMSize                    // size of largest hybrid ML-KEM handshake message
 )
 
 const (
@@ -225,6 +227,21 @@ type Handshake struct {
 	lastTimestamp             tai64n.Timestamp
 	lastInitiationConsumption time.Time
 	lastSentHandshake         time.Time
+
+	// ML-KEM-768 (FIPS 203) hybrid key exchange state.
+	//
+	// localMLKEMPrivKey holds the packed private key set by the initiator in
+	// CreateMessageInitiationMLKEM and used (then zeroed) in
+	// ConsumeMessageResponseMLKEM.  Storing the key as raw bytes allows
+	// setZero to wipe the material before the GC can observe it, unlike a
+	// heap-allocated *mlkem768.PrivateKey which cannot be zeroed in place.
+	// localMLKEMPrivKeySet tracks whether the field is populated.
+	//
+	// remoteMLKEMPubKey is set by the responder in ConsumeMessageInitiationMLKEM
+	// and used (then cleared) in CreateMessageResponseMLKEM.
+	localMLKEMPrivKey    [mlkem768.PrivateKeySize]byte
+	localMLKEMPrivKeySet bool
+	remoteMLKEMPubKey    *mlkem768.PublicKey
 }
 
 var (
@@ -252,6 +269,9 @@ func (h *Handshake) Clear() {
 	setZero(h.hash[:])
 	h.localIndex = 0
 	h.state = handshakeZeroed
+	setZero(h.localMLKEMPrivKey[:])
+	h.localMLKEMPrivKeySet = false
+	h.remoteMLKEMPubKey = nil
 }
 
 func (h *Handshake) mixHash(data []byte) {
