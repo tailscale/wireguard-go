@@ -128,6 +128,26 @@ func (peer *Peer) SendHandshakeInitiation(isRetry bool) error {
 
 	peer.device.log.Verbosef("%v - Sending handshake initiation", peer)
 
+	if peer.device.MLKEMEnabled() {
+		msg, err := peer.device.CreateMessageInitiationMLKEM(peer)
+		if err != nil {
+			peer.device.log.Errorf("%v - Failed to create ML-KEM initiation message: %v", peer, err)
+			return err
+		}
+		buf := make([]byte, MessageEncapsulatingTransportSize+MessageInitiationMLKEMSize)
+		packet := buf[MessageEncapsulatingTransportSize:]
+		_ = msg.marshal(packet)
+		peer.cookieGenerator.AddMacs(packet)
+		peer.timersAnyAuthenticatedPacketTraversal()
+		peer.timersAnyAuthenticatedPacketSent()
+		err = peer.SendBuffers([][]byte{buf})
+		if err != nil {
+			peer.device.log.Errorf("%v - Failed to send ML-KEM handshake initiation: %v", peer, err)
+		}
+		peer.timersHandshakeInitiated()
+		return err
+	}
+
 	msg, err := peer.device.CreateMessageInitiation(peer)
 	if err != nil {
 		peer.device.log.Errorf("%v - Failed to create initiation message: %v", peer, err)
@@ -154,9 +174,38 @@ func (peer *Peer) SendHandshakeInitiation(isRetry bool) error {
 func (peer *Peer) SendHandshakeResponse() error {
 	peer.handshake.mutex.Lock()
 	peer.handshake.lastSentHandshake = time.Now()
+	// Detect whether the consumed initiation carried an ML-KEM public key.
+	// If so we must reply with a type-6 ML-KEM response to match the
+	// initiator's handshake state.
+	useMLKEM := peer.handshake.remoteMLKEMPubKey != nil
 	peer.handshake.mutex.Unlock()
 
 	peer.device.log.Verbosef("%v - Sending handshake response", peer)
+
+	if useMLKEM {
+		response, err := peer.device.CreateMessageResponseMLKEM(peer)
+		if err != nil {
+			peer.device.log.Errorf("%v - Failed to create ML-KEM response message: %v", peer, err)
+			return err
+		}
+		buf := make([]byte, MessageEncapsulatingTransportSize+MessageResponseMLKEMSize)
+		packet := buf[MessageEncapsulatingTransportSize:]
+		_ = response.marshal(packet)
+		peer.cookieGenerator.AddMacs(packet)
+		err = peer.BeginSymmetricSession()
+		if err != nil {
+			peer.device.log.Errorf("%v - Failed to derive ML-KEM keypair: %v", peer, err)
+			return err
+		}
+		peer.timersSessionDerived()
+		peer.timersAnyAuthenticatedPacketTraversal()
+		peer.timersAnyAuthenticatedPacketSent()
+		err = peer.SendBuffers([][]byte{buf})
+		if err != nil {
+			peer.device.log.Errorf("%v - Failed to send ML-KEM handshake response: %v", peer, err)
+		}
+		return err
+	}
 
 	response, err := peer.device.CreateMessageResponse(peer)
 	if err != nil {

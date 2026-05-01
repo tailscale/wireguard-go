@@ -55,6 +55,12 @@ type Device struct {
 		publicKey  NoisePublicKey
 	}
 
+	// mlkemEnabled enables the hybrid ML-KEM-768 + Noise_IKpsk2 handshake
+	// (FIPS 203) in place of the standard X25519-only handshake.  When set,
+	// the device sends and expects message types 5/6 instead of 1/2.
+	// All peers in the network must have this flag set identically.
+	mlkemEnabled atomic.Bool
+
 	peers struct {
 		sync.RWMutex // protects keyMap
 		keyMap       map[NoisePublicKey]*Peer
@@ -290,6 +296,34 @@ func (device *Device) SetPrivateKey(sk NoisePrivateKey) error {
 	}
 
 	return nil
+}
+
+// SetMLKEMEnabled enables or disables the hybrid ML-KEM-768 + Noise_IKpsk2
+// handshake.  The flag must be set identically on every peer in the network;
+// no mixed-mode interoperability is supported.
+//
+// Changing the value while the device is running causes all current sessions
+// to be renegotiated via the new handshake type.
+func (device *Device) SetMLKEMEnabled(enabled bool) {
+	if device.mlkemEnabled.Swap(enabled) == enabled {
+		return
+	}
+	// Expire all current keypairs so the next packet triggers a new
+	// handshake with the updated message type.
+	device.peers.RLock()
+	peers := make([]*Peer, 0, len(device.peers.keyMap))
+	for _, p := range device.peers.keyMap {
+		peers = append(peers, p)
+	}
+	device.peers.RUnlock()
+	for _, p := range peers {
+		p.ExpireCurrentKeypairs()
+	}
+}
+
+// MLKEMEnabled reports whether the hybrid ML-KEM-768 handshake is active.
+func (device *Device) MLKEMEnabled() bool {
+	return device.mlkemEnabled.Load()
 }
 
 func NewDevice(tunDevice tun.Device, bind conn.Bind, logger *Logger) *Device {

@@ -197,14 +197,40 @@ func (device *Device) RoutineReceiveIncoming(maxBatchSize int, recv conn.Receive
 				if len(packet) != MessageInitiationSize {
 					continue
 				}
+				if device.MLKEMEnabled() {
+					device.log.Verbosef("Dropping classical initiation from %s: ML-KEM required", endpoints[i].DstToString())
+					continue
+				}
 
 			case MessageResponseType:
 				if len(packet) != MessageResponseSize {
 					continue
 				}
+				if device.MLKEMEnabled() {
+					device.log.Verbosef("Dropping classical response from %s: ML-KEM required", endpoints[i].DstToString())
+					continue
+				}
 
 			case MessageCookieReplyType:
 				if len(packet) != MessageCookieReplySize {
+					continue
+				}
+
+			case MessageInitiationMLKEMType:
+				if len(packet) != MessageInitiationMLKEMSize {
+					continue
+				}
+				if !device.MLKEMEnabled() {
+					device.log.Verbosef("Dropping ML-KEM initiation from %s: ML-KEM not enabled", endpoints[i].DstToString())
+					continue
+				}
+
+			case MessageResponseMLKEMType:
+				if len(packet) != MessageResponseMLKEMSize {
+					continue
+				}
+				if !device.MLKEMEnabled() {
+					device.log.Verbosef("Dropping ML-KEM response from %s: ML-KEM not enabled", endpoints[i].DstToString())
 					continue
 				}
 
@@ -318,7 +344,8 @@ func (device *Device) RoutineHandshake(id int) {
 
 			goto skip
 
-		case MessageInitiationType, MessageResponseType:
+		case MessageInitiationType, MessageResponseType,
+			MessageInitiationMLKEMType, MessageResponseMLKEMType:
 
 			// check mac fields and maybe ratelimit
 
@@ -421,6 +448,80 @@ func (device *Device) RoutineHandshake(id int) {
 
 			if err != nil {
 				device.log.Errorf("%v - Failed to derive keypair: %v", peer, err)
+				goto skip
+			}
+
+			peer.timersSessionDerived()
+			peer.timersHandshakeComplete()
+			peer.SendKeepalive()
+
+		case MessageInitiationMLKEMType:
+
+			// unmarshal
+
+			var msg MessageInitiationMLKEM
+			err := msg.unmarshal(elem.packet)
+			if err != nil {
+				device.log.Errorf("Failed to decode ML-KEM initiation message")
+				goto skip
+			}
+
+			// consume initiation
+
+			peer := device.ConsumeMessageInitiationMLKEM(&msg, elem.endpoint)
+			if peer == nil {
+				device.log.Verbosef("Received invalid ML-KEM initiation message from %s", elem.endpoint.DstToString())
+				goto skip
+			}
+
+			// update timers
+
+			peer.timersAnyAuthenticatedPacketTraversal()
+			peer.timersAnyAuthenticatedPacketReceived()
+
+			// update endpoint
+			peer.SetEndpointFromPacket(elem.endpoint)
+
+			device.log.Verbosef("%v - Received ML-KEM handshake initiation", peer)
+			peer.rxBytes.Add(uint64(len(elem.packet)))
+
+			peer.SendHandshakeResponse()
+
+		case MessageResponseMLKEMType:
+
+			// unmarshal
+
+			var msg MessageResponseMLKEM
+			err := msg.unmarshal(elem.packet)
+			if err != nil {
+				device.log.Errorf("Failed to decode ML-KEM response message")
+				goto skip
+			}
+
+			// consume response
+
+			peer := device.ConsumeMessageResponseMLKEM(&msg)
+			if peer == nil {
+				device.log.Verbosef("Received invalid ML-KEM response message from %s", elem.endpoint.DstToString())
+				goto skip
+			}
+
+			// update endpoint
+			peer.SetEndpointFromPacket(elem.endpoint)
+
+			device.log.Verbosef("%v - Received ML-KEM handshake response", peer)
+			peer.rxBytes.Add(uint64(len(elem.packet)))
+
+			// update timers
+
+			peer.timersAnyAuthenticatedPacketTraversal()
+			peer.timersAnyAuthenticatedPacketReceived()
+
+			// derive keypair
+
+			err = peer.BeginSymmetricSession()
+			if err != nil {
+				device.log.Errorf("%v - Failed to derive ML-KEM keypair: %v", peer, err)
 				goto skip
 			}
 
