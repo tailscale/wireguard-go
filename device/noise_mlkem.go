@@ -8,7 +8,7 @@
 // This file implements message types 5 (initiation) and 6 (response) that
 // extend the standard WireGuard Noise_IKpsk2 handshake with a post-quantum
 // ML-KEM-768 (FIPS 203, formerly Kyber-768) key encapsulation mechanism,
-// provided by the Cloudflare CIRCL library.
+// provided by the Go standard library crypto/mlkem package.
 //
 // # Protocol overview
 //
@@ -34,11 +34,11 @@
 package device
 
 import (
+	"crypto/mlkem"
 	"encoding/binary"
 	"errors"
 	"time"
 
-	"github.com/cloudflare/circl/kem/mlkem/mlkem768"
 	"golang.org/x/crypto/blake2s"
 	"golang.org/x/crypto/chacha20poly1305"
 	"golang.org/x/crypto/poly1305"
@@ -55,8 +55,8 @@ const (
 
 // ML-KEM-768 (FIPS 203) wire sizes.
 const (
-	MLKEMPublicKeySize  = mlkem768.PublicKeySize  // 1184 bytes
-	MLKEMCiphertextSize = mlkem768.CiphertextSize // 1088 bytes
+	MLKEMPublicKeySize  = mlkem.EncapsulationKeySize768 // 1184 bytes
+	MLKEMCiphertextSize = mlkem.CiphertextSize768       // 1088 bytes
 )
 
 // Total wire sizes for the hybrid handshake messages.
@@ -265,18 +265,15 @@ func (device *Device) CreateMessageInitiationMLKEM(peer *Peer) (*MessageInitiati
 	handshake.mixHash(msg.Timestamp[:])
 
 	// Generate ML-KEM-768 ephemeral keypair.  The public key is sent in the
-	// clear (authenticated via MAC1) and bound into the transcript so it
-	// cannot be swapped by an active attacker without breaking MAC1.
-	mlkemPub, mlkemPriv, err := mlkem768.GenerateKeyPair(nil)
+	// clear and bound into the transcript via mixHash so both sides commit
+	// to the same ML-KEM public key before deriving session keys.
+	mlkemDK, err := mlkem.GenerateKey768()
 	if err != nil {
 		return nil, err
 	}
-	// Pack into the fixed-size field so the bytes can be explicitly zeroed
-	// after use.  Storing a *mlkem768.PrivateKey pointer would leave the
-	// key material on the heap without a way to zero it in place.
-	mlkemPriv.Pack(handshake.localMLKEMPrivKey[:])
+	copy(handshake.localMLKEMPrivKey[:], mlkemDK.Bytes())
 	handshake.localMLKEMPrivKeySet = true
-	mlkemPub.Pack(msg.MLKEMPublicKey[:])
+	copy(msg.MLKEMPublicKey[:], mlkemDK.EncapsulationKey().Bytes())
 	handshake.mixHash(msg.MLKEMPublicKey[:])
 
 	// Assign sender index.
@@ -376,8 +373,8 @@ func (device *Device) ConsumeMessageInitiationMLKEM(msg *MessageInitiationMLKEM,
 	// Decode and validate the ML-KEM-768 public key, then bind it into the
 	// transcript.  Done outside the write-lock so key parsing cost is not
 	// charged while holding the mutex.
-	mlkemPub := new(mlkem768.PublicKey)
-	if err := mlkemPub.Unpack(msg.MLKEMPublicKey[:]); err != nil {
+	mlkemEK, err := mlkem.NewEncapsulationKey768(msg.MLKEMPublicKey[:])
+	if err != nil {
 		device.log.Verbosef("%v - ConsumeMessageInitiationMLKEM: invalid ML-KEM public key: %v", peer, err)
 		return nil
 	}
@@ -389,7 +386,7 @@ func (device *Device) ConsumeMessageInitiationMLKEM(msg *MessageInitiationMLKEM,
 	handshake.chainKey = chainKey
 	handshake.remoteIndex = msg.Sender
 	handshake.remoteEphemeral = msg.Ephemeral
-	handshake.remoteMLKEMPubKey = mlkemPub
+	handshake.remoteMLKEMPubKey = mlkemEK
 	if timestamp.After(handshake.lastTimestamp) {
 		handshake.lastTimestamp = timestamp
 	}
@@ -464,13 +461,11 @@ func (device *Device) CreateMessageResponseMLKEM(peer *Peer) (*MessageResponseML
 	// key immediately after the X25519 operations and before the PSK step,
 	// so both the classical and post-quantum secrets must be known to derive
 	// the final session keys.
-	var mlkemCT [MLKEMCiphertextSize]byte
-	var mlkemSS [mlkem768.SharedKeySize]byte
-	handshake.remoteMLKEMPubKey.EncapsulateTo(mlkemCT[:], mlkemSS[:], nil)
-	handshake.mixKey(mlkemSS[:])
-	setZero(mlkemSS[:])
+	mlkemSS, mlkemCT := handshake.remoteMLKEMPubKey.Encapsulate()
+	handshake.mixKey(mlkemSS)
+	setZero(mlkemSS)
 	handshake.remoteMLKEMPubKey = nil // no longer needed; drop reference
-	copy(msg.MLKEMCiphertext[:], mlkemCT[:])
+	copy(msg.MLKEMCiphertext[:], mlkemCT)
 	handshake.mixHash(msg.MLKEMCiphertext[:])
 
 	// PSK step (same as standard response).
@@ -548,16 +543,18 @@ func (device *Device) ConsumeMessageResponseMLKEM(msg *MessageResponseMLKEM) *Pe
 		// constant-time rejection per the ML-KEM-768 spec (implicit
 		// rejection).
 		//
-		// Unpack the private key from the packed-bytes field so it can be
-		// zeroed explicitly after use.
-		var privKey mlkem768.PrivateKey
-		if err := privKey.Unpack(handshake.localMLKEMPrivKey[:]); err != nil {
+		// Reconstruct the decapsulation key from the stored seed and
+		// decapsulate the ciphertext.
+		privKey, err := mlkem.NewDecapsulationKey768(handshake.localMLKEMPrivKey[:])
+		if err != nil {
 			return false
 		}
-		var mlkemSS [mlkem768.SharedKeySize]byte
-		privKey.DecapsulateTo(mlkemSS[:], msg.MLKEMCiphertext[:])
-		mixKey(&chainKey, &chainKey, mlkemSS[:])
-		setZero(mlkemSS[:])
+		mlkemSS, err := privKey.Decapsulate(msg.MLKEMCiphertext[:])
+		if err != nil {
+			return false
+		}
+		mixKey(&chainKey, &chainKey, mlkemSS)
+		setZero(mlkemSS)
 		mixHash(&hash, &hash, msg.MLKEMCiphertext[:])
 
 		// PSK step.
@@ -583,7 +580,7 @@ func (device *Device) ConsumeMessageResponseMLKEM(msg *MessageResponseMLKEM) *Pe
 	handshake.hash = hash
 	handshake.chainKey = chainKey
 	handshake.remoteIndex = msg.Sender
-	setZero(handshake.localMLKEMPrivKey[:]) // zero key material before releasing
+	setZero(handshake.localMLKEMPrivKey[:])
 	handshake.localMLKEMPrivKeySet = false
 	handshake.state = handshakeResponseConsumed
 	handshake.mutex.Unlock()

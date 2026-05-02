@@ -12,7 +12,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/cloudflare/circl/kem/mlkem/mlkem768"
+	"crypto/mlkem"
+
 	"golang.org/x/crypto/blake2s"
 	"golang.org/x/crypto/chacha20poly1305"
 	"golang.org/x/crypto/poly1305"
@@ -230,18 +231,16 @@ type Handshake struct {
 
 	// ML-KEM-768 (FIPS 203) hybrid key exchange state.
 	//
-	// localMLKEMPrivKey holds the packed private key set by the initiator in
-	// CreateMessageInitiationMLKEM and used (then zeroed) in
-	// ConsumeMessageResponseMLKEM.  Storing the key as raw bytes allows
-	// setZero to wipe the material before the GC can observe it, unlike a
-	// heap-allocated *mlkem768.PrivateKey which cannot be zeroed in place.
-	// localMLKEMPrivKeySet tracks whether the field is populated.
+	// localMLKEMPrivKey holds the 64-byte seed (d || z) of the initiator's
+	// ephemeral ML-KEM-768 decapsulation key, set in
+	// CreateMessageInitiationMLKEM and zeroed in ConsumeMessageResponseMLKEM
+	// after use.  localMLKEMPrivKeySet tracks whether the field is populated.
 	//
 	// remoteMLKEMPubKey is set by the responder in ConsumeMessageInitiationMLKEM
 	// and used (then cleared) in CreateMessageResponseMLKEM.
-	localMLKEMPrivKey    [mlkem768.PrivateKeySize]byte
+	localMLKEMPrivKey    [mlkem.SeedSize]byte
 	localMLKEMPrivKeySet bool
-	remoteMLKEMPubKey    *mlkem768.PublicKey
+	remoteMLKEMPubKey    *mlkem.EncapsulationKey768
 }
 
 var (
