@@ -1,9 +1,16 @@
+//go:build arm
+
 /* SPDX-License-Identifier: MIT
  *
  * Copyright (C) 2017-2023 WireGuard LLC. All Rights Reserved.
  */
 
-package device
+// This file was copied from device/aead_compat_test.go in the parent
+// commit (originally MIT-licensed by WireGuard LLC). The aeadCtors
+// slice is extended here to include our asm-backed chacha20poly1305 so
+// the same benchmarks compare it against the reference pure-Go path.
+
+package chacha20poly1305
 
 import (
 	"bytes"
@@ -15,19 +22,18 @@ import (
 	"sync"
 	"testing"
 
-	"golang.org/x/crypto/chacha20poly1305"
+	xchacha20poly1305 "golang.org/x/crypto/chacha20poly1305"
 )
 
 // aeadCtorEntry names a ChaCha20-Poly1305 AEAD constructor under test.
-// Linux builds append an AF_ALG-backed entry via init() in
-// aead_compat_linux_test.go; portable builds test only the Go impl.
 type aeadCtorEntry struct {
 	name string
 	new  func(key []byte) (cipher.AEAD, error)
 }
 
 var aeadCtors = []aeadCtorEntry{
-	{"go-chacha20poly1305", chacha20poly1305.New},
+	{"go-chacha20poly1305", xchacha20poly1305.New},
+	{"asm-chacha20poly1305", New},
 }
 
 func mustHex(s string) []byte {
@@ -78,7 +84,17 @@ func TestAEAD_RFC8439Vector(t *testing.T) {
 // This pins down endianness / counter / tag-placement bugs that a
 // self-round-trip cannot catch.
 func TestAEAD_AgreesWithReference(t *testing.T) {
-	sizes := []int{0, 1, 15, 16, 17, 31, 63, 64, 65, 127, 128, 1024, 1500, 4096, 16384}
+	sizes := []int{
+		0, 1, 15, 16, 17, 31, 63, 64, 65, 127, 128, 129,
+		191, 192, 193,
+		255, 256, 257,
+		// NEON cross-function-branch boundary (see chacha20_arm.go);
+		// 257..384 and 513..640 stress the Go-side length trimming.
+		320, 383, 384, 385,
+		511, 512, 513,
+		639, 640,
+		1024, 1500, 4096, 16384,
+	}
 	aadSizes := []int{0, 1, 13, 64}
 
 	var key [32]byte
@@ -90,7 +106,7 @@ func TestAEAD_AgreesWithReference(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ref, err := chacha20poly1305.New(key[:])
+	ref, err := xchacha20poly1305.New(key[:])
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -234,8 +250,7 @@ func benchmarkAEAD(b *testing.B, open bool) {
 }
 
 // TestAEAD_Concurrent exercises Seal/Open from many goroutines to catch
-// shared-state bugs (notably relevant for AF_ALG, which routes work
-// through pooled op-sockets).
+// shared-state bugs.
 func TestAEAD_Concurrent(t *testing.T) {
 	var key [32]byte
 	rand.Read(key[:])
