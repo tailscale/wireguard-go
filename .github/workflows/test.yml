@@ -64,6 +64,12 @@ jobs:
       uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
       with:
         go-version-file: go.mod
+    - name: install cross-binutils
+      # arm-linux-gnueabihf-as / -objcopy are needed by
+      # TestNEONEncoderAgainstGAS in tsasm/arm/regen as the gold
+      # reference for the pure-Perl NEON encoder. (The production
+      # regen pipeline no longer touches the cross-as.)
+      run: sudo apt-get install -y binutils-arm-linux-gnueabihf
     - name: test
       run: go test -race -v ./...
 
