@@ -720,7 +720,6 @@ func Test_udpPacketsCanCoalesce(t *testing.T) {
 
 	type args struct {
 		pkt     []byte
-		iphLen  uint8
 		gsoSize uint16
 		item    udpGROItem
 		wi      groToWrite
@@ -734,7 +733,6 @@ func Test_udpPacketsCanCoalesce(t *testing.T) {
 			"coalesceAppend equal gso",
 			args{
 				pkt:     udp4a[offset:],
-				iphLen:  20,
 				gsoSize: 100,
 				item: udpGROItem{
 					gsoSize:    100,
@@ -750,7 +748,6 @@ func Test_udpPacketsCanCoalesce(t *testing.T) {
 			"coalesceAppend smaller gso",
 			args{
 				pkt:     udp4a[offset : len(udp4a)-90],
-				iphLen:  20,
 				gsoSize: 10,
 				item: udpGROItem{
 					gsoSize:    100,
@@ -766,7 +763,6 @@ func Test_udpPacketsCanCoalesce(t *testing.T) {
 			"coalesceUnavailable smaller gso previously appended",
 			args{
 				pkt:     udp4a[offset:],
-				iphLen:  20,
 				gsoSize: 100,
 				item: udpGROItem{
 					gsoSize:    100,
@@ -782,7 +778,6 @@ func Test_udpPacketsCanCoalesce(t *testing.T) {
 			"coalesceUnavailable larger following smaller",
 			args{
 				pkt:     udp4c[offset:],
-				iphLen:  20,
 				gsoSize: 110,
 				item: udpGROItem{
 					gsoSize:    100,
@@ -798,7 +793,6 @@ func Test_udpPacketsCanCoalesce(t *testing.T) {
 			"coalesceUnavailable too many fragments",
 			args{
 				pkt:     udp4a[offset:],
-				iphLen:  20,
 				gsoSize: 100,
 				item: udpGROItem{
 					gsoSize:    100,
@@ -814,7 +808,6 @@ func Test_udpPacketsCanCoalesce(t *testing.T) {
 			"coalesceUnavailable payload overflow",
 			args{
 				pkt:     udp4a[offset:],
-				iphLen:  20,
 				gsoSize: 100,
 				item: udpGROItem{
 					gsoSize:    100,
@@ -829,7 +822,7 @@ func Test_udpPacketsCanCoalesce(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := udpPacketsCanCoalesce(tt.args.pkt, tt.args.iphLen, tt.args.gsoSize, tt.args.item, &tt.args.wi); got != tt.want {
+			if got := udpPacketsCanCoalesce(tt.args.pkt, tt.args.gsoSize, tt.args.item, &tt.args.wi); got != tt.want {
 				t.Errorf("udpPacketsCanCoalesce() = %v, want %v", got, tt.want)
 			}
 		})
@@ -846,9 +839,9 @@ func Test_handleGRO_invalidItemCsumClearsVirtioNetHdr(t *testing.T) {
 	// Poison the virtioNetHdr region of pkts[0] so a missing clear() is detectable.
 	table := newTCPGROTable()
 	wi := newGROToWrite()
-	idx, _ := wi.next()
-	for i := range wi.iovs[idx][virtioNetHdrIdx] {
-		wi.iovs[idx][virtioNetHdrIdx][i] = 0xAB
+	idx := wi.appendIov(nil)
+	for i := range wi.iovs[idx][iovVirtioNetHdrIdx] {
+		wi.iovs[idx][iovVirtioNetHdrIdx][i] = 0xAB
 	}
 	wi.reset()
 	if err := handleGRO(pkts, offset, table, newUDPGROTable(), 0, &wi); err != nil {
@@ -856,7 +849,7 @@ func Test_handleGRO_invalidItemCsumClearsVirtioNetHdr(t *testing.T) {
 	}
 
 	// Verify pkts[0] is in toWrite where we expect
-	if &wi.iovs[0][headPacketIdx][0] != &pkts[0][offset] {
+	if &wi.iovs[0][iovHeadPacketIdx][0] != &pkts[0][offset] {
 		t.Fatal("pkts[0] not found in wi.iovs at expected, zero index")
 	}
 
@@ -872,14 +865,14 @@ func Test_handleGRO_invalidItemCsumClearsVirtioNetHdr(t *testing.T) {
 		if item.sentSeq != 101 {
 			t.Fatalf("unexpected starting seq num in tcpGROTable: %d", item.sentSeq)
 		}
-		if n := len(wi.iovs[item.outputIdx][coalescedPacketsIdx:]); n != 1 {
+		if n := len(wi.iovs[item.outputIdx][iovFirstPayloadFragmentIdx:]); n != 1 {
 			t.Fatalf("unexpected numMerged in tcpGROTable: %d", n)
 		}
 	}
 
 	// pkt 0 is in toWrite and not present in tcpGROTable, so its virtioNetHdr
 	// must have been cleared.
-	for i, b := range wi.iovs[0][virtioNetHdrIdx] {
+	for i, b := range wi.iovs[0][iovVirtioNetHdrIdx] {
 		if b != 0 {
 			t.Fatalf("wi.iovs[0] virtioNetHdr[%d] = 0x%x, want 0", i, b)
 		}

@@ -74,12 +74,12 @@ const (
 	// shape of the C ABI for its kernel counterpart -- sizeof(virtio_net_hdr).
 	virtioNetHdrLen = int(unsafe.Sizeof(virtioNetHdr{}))
 
-	// Vector layout: [virtioHdr | headPacket | coalescedPayloads...]
-	virtioNetHdrIdx     = 0
-	emptyVectorLen      = 1
-	headPacketIdx       = 1
-	singlePacketLen     = 2
-	coalescedPacketsIdx = 2
+	// Vector layout: [virtioHdr | headPacket | coalescedPayloadFragments...]
+	iovVirtioNetHdrIdx         = 0
+	iovEmptyVectorLen          = 1
+	iovHeadPacketIdx           = 1
+	iovSinglePacketLen         = 2
+	iovFirstPayloadFragmentIdx = 2
 
 	maxScatterGatherFragments = 1024 // Limited by UIO_MAXIOV of 1024.
 )
@@ -88,9 +88,19 @@ const (
 // writev.
 type groToWrite struct {
 	// Each iov is a [][]byte:
-	// - iovs[i][0] is the pre-allocated virtio header
+	// - iovs[i][0] is the pre-allocated virtio header, fixed to [virtioNetHdrLen]
 	// - iovs[i][1] is the head packet with transport headers
 	// - iovs[i][2:] are coalesced payload fragments
+	//
+	// Here and elsewhere, "packet" refers to the full IP packet including transport headers,
+	// and "payload fragment" refers to the data without transport headers.
+	//
+	// Empty iov is length 1 (iovEmptyVectorLen), with the first element (iovVirtioNetHdrIdx) zeroed.
+	// Single packet iov is length 2 (iovSinglePacketLen),
+	// with the first element zeroed, and the full packet at index 1 (iovHeadPacketIdx).
+	// Coalesced packet is length >2, with the first element written from [virtioNetHdr],
+	// the second element the head packet,
+	// and the remaining elements (iovFirstPayloadFragmentIdx:) coalesced payload fragments.
 	iovs      [][][]byte
 	allocated int
 }
@@ -100,33 +110,35 @@ func newGROToWrite() groToWrite {
 		iovs: make([][][]byte, 0, conn.IdealBatchSize),
 	}
 	for range cap(wi.iovs) {
-		_, _ = wi.next() // pre-allocate virtio headers
+		wi.appendIov(nil) // pre-allocate virtio headers
 	}
 	wi.iovs = wi.iovs[:0]
 	return wi
 }
 
-// next extends iovs by one, reusing the pre-allocated backing.
-// Returns the index and a pointer to the new item's [][]byte.
-//
-// Do not use the returned pointer after the next call to next.
-func (w *groToWrite) next() (int, *[][]byte) {
+// appendIov extends iovs by one, reusing the pre-allocated backing.
+// Returns the index of the new item's [][]byte.
+func (w *groToWrite) appendIov(pkt []byte) int {
 	n := len(w.iovs)
 	if n < w.allocated {
 		w.iovs = w.iovs[:n+1]
 	} else {
 		iov := make([][]byte, 1, conn.IdealBatchSize)
-		iov[virtioNetHdrIdx] = make([]byte, virtioNetHdrLen)
+		iov[iovVirtioNetHdrIdx] = make([]byte, virtioNetHdrLen)
 		w.iovs = append(w.iovs, iov)
 		w.allocated++
 	}
-	return n, &w.iovs[n]
+	if pkt != nil {
+		// Nil is passed only in [newGROToWrite] and tests.
+		w.iovs[n] = append(w.iovs[n], pkt)
+	}
+	return n
 }
 
 func (w *groToWrite) reset() {
 	for i := range w.iovs {
-		clear(w.iovs[i][virtioNetHdrIdx])
-		w.iovs[i] = w.iovs[i][:emptyVectorLen] // keep virtio header alloc
+		clear(w.iovs[i][iovVirtioNetHdrIdx])
+		w.iovs[i] = w.iovs[i][:iovEmptyVectorLen] // keep virtio header alloc
 	}
 	w.iovs = w.iovs[:0]
 }
@@ -185,8 +197,7 @@ func (t *tcpGROTable) lookupOrInsert(pkt []byte, srcAddrOffset, dstAddrOffset, t
 // insert an item in the table for the provided packet and packet metadata.
 func (t *tcpGROTable) insert(pkt []byte, srcAddrOffset, dstAddrOffset, tcphOffset, tcphLen int, wi *groToWrite) {
 	key := newTCPFlowKey(pkt, srcAddrOffset, dstAddrOffset, tcphOffset)
-	idx, iov := wi.next()
-	*iov = append(*iov, pkt)
+	idx := wi.appendIov(pkt)
 	item := tcpGROItem{
 		key:        key,
 		outputIdx:  uint16(idx),
@@ -295,8 +306,7 @@ func (u *udpGROTable) lookupOrInsert(pkt []byte, srcAddrOffset, dstAddrOffset, u
 // insert an item in the table for the provided packet and packet metadata.
 func (u *udpGROTable) insert(pkt []byte, srcAddrOffset, dstAddrOffset, udphOffset int, wi *groToWrite, cSumKnownInvalid bool) {
 	key := newUDPFlowKey(pkt, srcAddrOffset, dstAddrOffset, udphOffset)
-	idx, iov := wi.next()
-	*iov = append(*iov, pkt)
+	idx := wi.appendIov(pkt)
 	item := udpGROItem{
 		key:              key,
 		outputIdx:        uint16(idx),
@@ -389,12 +399,12 @@ func ipHeadersCanCoalesce(pktA, pktB []byte) bool {
 
 // udpPacketsCanCoalesce evaluates if pkt can be coalesced with the packet
 // described by item. iphLen and gsoSize describe pkt.
-func udpPacketsCanCoalesce(pkt []byte, iphLen uint8, gsoSize uint16, item udpGROItem, wi *groToWrite) canCoalesce {
+func udpPacketsCanCoalesce(pkt []byte, gsoSize uint16, item udpGROItem, wi *groToWrite) canCoalesce {
 	if len(wi.iovs[item.outputIdx]) >= maxScatterGatherFragments {
 		return coalesceUnavailable
 	}
-	pktTarget := wi.iovs[item.outputIdx][headPacketIdx]
-	if !ipHeadersCanCoalesce(pkt, pktTarget) {
+	headPacket := wi.iovs[item.outputIdx][iovHeadPacketIdx]
+	if !ipHeadersCanCoalesce(pkt, headPacket) {
 		return coalesceUnavailable
 	}
 	if item.payloadLen%item.gsoSize != 0 {
@@ -419,18 +429,18 @@ func tcpPacketsCanCoalesce(pkt []byte, iphLen, tcphLen uint8, seq uint32, pshSet
 	if len(wi.iovs[item.outputIdx]) >= maxScatterGatherFragments {
 		return coalesceUnavailable
 	}
-	pktTarget := wi.iovs[item.outputIdx][headPacketIdx]
+	headPacket := wi.iovs[item.outputIdx][iovHeadPacketIdx]
 	if tcphLen != item.tcphLen {
 		// cannot coalesce with unequal tcp options len
 		return coalesceUnavailable
 	}
 	if tcphLen > 20 {
-		if !bytes.Equal(pkt[iphLen+20:iphLen+tcphLen], pktTarget[item.iphLen+20:iphLen+tcphLen]) {
+		if !bytes.Equal(pkt[iphLen+20:iphLen+tcphLen], headPacket[item.iphLen+20:iphLen+tcphLen]) {
 			// cannot coalesce with unequal tcp options
 			return coalesceUnavailable
 		}
 	}
-	if !ipHeadersCanCoalesce(pkt, pktTarget) {
+	if !ipHeadersCanCoalesce(pkt, headPacket) {
 		return coalesceUnavailable
 	}
 	if int(item.iphLen)+int(item.tcphLen)+int(item.payloadLen)+int(gsoSize) > maxUint16 {
@@ -463,7 +473,7 @@ func tcpPacketsCanCoalesce(pkt []byte, iphLen, tcphLen uint8, seq uint32, pshSet
 			// We cannot have a larger packet following a smaller one.
 			return coalesceUnavailable
 		}
-		if gsoSize > item.gsoSize && len(wi.iovs[item.outputIdx]) > singlePacketLen {
+		if gsoSize > item.gsoSize && len(wi.iovs[item.outputIdx]) > iovSinglePacketLen {
 			// There's at least one previous merge, and we're larger than all
 			// previous. This would put multiple smaller packets on the end.
 			return coalesceUnavailable
@@ -500,8 +510,8 @@ const (
 func coalesceUDPPackets(pkt []byte, item *udpGROItem, wi *groToWrite, isV6 bool) coalesceResult {
 	headersLen := int(item.iphLen) + udphLen
 	iov := &wi.iovs[item.outputIdx]
-	if len(*iov) == singlePacketLen {
-		if item.cSumKnownInvalid || !checksumValid((*iov)[headPacketIdx], item.iphLen, unix.IPPROTO_UDP, isV6) {
+	if len(*iov) == iovSinglePacketLen {
+		if item.cSumKnownInvalid || !checksumValid((*iov)[iovHeadPacketIdx], item.iphLen, unix.IPPROTO_UDP, isV6) {
 			return coalesceItemInvalidCSum
 		}
 	}
@@ -522,8 +532,8 @@ func coalesceTCPPackets(mode canCoalesce, pkt []byte, gsoSize uint16, seq uint32
 		if pshSet {
 			return coalescePSHEnding
 		}
-		if len(*iov) == singlePacketLen {
-			if !checksumValid((*iov)[headPacketIdx], item.iphLen, unix.IPPROTO_TCP, isV6) {
+		if len(*iov) == iovSinglePacketLen {
+			if !checksumValid((*iov)[iovHeadPacketIdx], item.iphLen, unix.IPPROTO_TCP, isV6) {
 				return coalesceItemInvalidCSum
 			}
 		}
@@ -531,15 +541,15 @@ func coalesceTCPPackets(mode canCoalesce, pkt []byte, gsoSize uint16, seq uint32
 			return coalescePktInvalidCSum
 		}
 		item.sentSeq = seq
-		oldHead := (*iov)[headPacketIdx]
-		(*iov)[headPacketIdx] = pkt
+		oldHead := (*iov)[iovHeadPacketIdx]
+		(*iov)[iovHeadPacketIdx] = pkt
 		oldHeadPayload := oldHead[headersLen:]
 		if len(oldHeadPayload) > 0 {
-			*iov = slices.Insert(*iov, coalescedPacketsIdx, oldHeadPayload)
+			*iov = slices.Insert(*iov, iovFirstPayloadFragmentIdx, oldHeadPayload)
 		}
 	} else {
-		if len(*iov) == singlePacketLen {
-			if !checksumValid((*iov)[headPacketIdx], item.iphLen, unix.IPPROTO_TCP, isV6) {
+		if len(*iov) == iovSinglePacketLen {
+			if !checksumValid((*iov)[iovHeadPacketIdx], item.iphLen, unix.IPPROTO_TCP, isV6) {
 				return coalesceItemInvalidCSum
 			}
 		}
@@ -549,7 +559,7 @@ func coalesceTCPPackets(mode canCoalesce, pkt []byte, gsoSize uint16, seq uint32
 		if pshSet {
 			// We are appending a segment with PSH set.
 			item.pshSet = pshSet
-			(*iov)[headPacketIdx][item.iphLen+tcpFlagsOffset] |= tcpFlagPSH
+			(*iov)[iovHeadPacketIdx][item.iphLen+tcpFlagsOffset] |= tcpFlagPSH
 		}
 		*iov = append(*iov, pkt[headersLen:])
 	}
@@ -680,8 +690,8 @@ func applyTCPCoalesceAccounting(wi *groToWrite, table *tcpGROTable) error {
 	for _, items := range table.itemsByFlow {
 		for _, item := range items {
 			iov := wi.iovs[item.outputIdx]
-			pkt := iov[headPacketIdx]
-			if len(iov) > singlePacketLen {
+			pkt := iov[iovHeadPacketIdx]
+			if len(iov) > iovSinglePacketLen {
 				totalLen := uint16(item.iphLen) + uint16(item.tcphLen) + item.payloadLen
 				hdr := virtioNetHdr{
 					flags:      unix.VIRTIO_NET_HDR_F_NEEDS_CSUM, // this turns into CHECKSUM_PARTIAL in the skb
@@ -703,7 +713,7 @@ func applyTCPCoalesceAccounting(wi *groToWrite, table *tcpGROTable) error {
 					iphCSum := ^Checksum(pkt[:item.iphLen], 0)    // compute IPv4 header checksum
 					binary.BigEndian.PutUint16(pkt[10:], iphCSum) // set IPv4 header checksum field
 				}
-				err := hdr.encode(iov[virtioNetHdrIdx])
+				err := hdr.encode(iov[iovVirtioNetHdrIdx])
 				if err != nil {
 					return err
 				}
@@ -733,8 +743,8 @@ func applyUDPCoalesceAccounting(wi *groToWrite, table *udpGROTable) error {
 	for _, items := range table.itemsByFlow {
 		for _, item := range items {
 			iov := wi.iovs[item.outputIdx]
-			pkt := iov[headPacketIdx]
-			if len(iov) > singlePacketLen {
+			pkt := iov[iovHeadPacketIdx]
+			if len(iov) > iovSinglePacketLen {
 				totalLen := uint16(item.iphLen) + udphLen + item.payloadLen
 				hdr := virtioNetHdr{
 					flags:      unix.VIRTIO_NET_HDR_F_NEEDS_CSUM, // this turns into CHECKSUM_PARTIAL in the skb
@@ -755,7 +765,7 @@ func applyUDPCoalesceAccounting(wi *groToWrite, table *udpGROTable) error {
 					iphCSum := ^Checksum(pkt[:item.iphLen], 0)    // compute IPv4 header checksum
 					binary.BigEndian.PutUint16(pkt[10:], iphCSum) // set IPv4 header checksum field
 				}
-				err := hdr.encode(iov[virtioNetHdrIdx])
+				err := hdr.encode(iov[iovVirtioNetHdrIdx])
 				if err != nil {
 					return err
 				}
@@ -876,7 +886,7 @@ func udpGRO(pkt []byte, table *udpGROTable, wi *groToWrite, isV6 bool) groResult
 	// for a given flow. We must also always insert a new item, or successfully
 	// coalesce with an existing item, for the same reason.
 	item := items[len(items)-1]
-	can := udpPacketsCanCoalesce(pkt, uint8(iphLen), gsoSize, item, wi)
+	can := udpPacketsCanCoalesce(pkt, gsoSize, item, wi)
 	var pktCSumKnownInvalid bool
 	if can == coalesceAppend {
 		result := coalesceUDPPackets(pkt, &item, wi, isV6)
@@ -924,8 +934,7 @@ func handleGRO(bufs [][]byte, offset int, tcpTable *tcpGROTable, udpTable *udpGR
 		}
 		switch result {
 		case groResultNoop:
-			_, iov := wi.next()
-			*iov = append(*iov, pkt)
+			wi.appendIov(pkt)
 		case groResultTableInsert:
 			// already in wi via table insert
 		}

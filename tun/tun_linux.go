@@ -386,10 +386,10 @@ func (tun *NativeTun) Write(bufs [][]byte, offset int) (int, error) {
 		err := tun.tunRawConn.Write(func(fd uintptr) bool {
 			for {
 				n, werr = unix.Writev(int(fd), nb)
-				if werr == syscall.EINTR {
+				if errors.Is(werr, syscall.EINTR) {
 					continue // quick retry on interrupt, EINTR is never returned with partial writes
 				}
-				return werr != syscall.EAGAIN // poller retry on "would block"
+				return !errors.Is(werr, syscall.EAGAIN) // poller retry on "would block"
 			}
 		})
 		// err is a poller error (e.g. fd closed before the syscall)
