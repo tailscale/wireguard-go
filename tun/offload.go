@@ -111,6 +111,9 @@ func GSOSplit(in []byte, options GSOOptions, outBufs [][]byte, sizes []int, outO
 	if options.HdrLen < options.CsumStart {
 		return 0, fmt.Errorf("GSO HdrLen (%d) < GSO CsumStart (%d)", options.HdrLen, options.CsumStart)
 	}
+	if int(options.CsumStart)+int(options.CsumOffset)+2 > int(options.HdrLen) {
+		return 0, fmt.Errorf("GSO checksum field end (%d) exceeds HdrLen (%d)", int(options.CsumStart)+int(options.CsumOffset)+2, options.HdrLen)
+	}
 
 	ipVersion := in[0] >> 4
 	switch ipVersion {
