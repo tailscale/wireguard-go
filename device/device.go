@@ -61,6 +61,11 @@ type Device struct {
 		lookupFunc   PeerLookupFunc // or nil if unused
 	}
 
+	sessionState struct {
+		sync.Mutex // serializes PeerSessionStateFunc calls and protects peer.sessionState
+		fn         PeerSessionStateFunc
+	}
+
 	rate struct {
 		underLoadUntil atomic.Int64
 		limiter        ratelimiter.Ratelimiter
@@ -483,6 +488,34 @@ type PeerLookupFunc func(NoisePublicKey) (_ *NewPeerConfig, ok bool)
 // See [Device.SetPeerByIPPacketFunc] and [Device.SetPeerLookupFunc].
 type PeerByIPPacketFunc func(src, dst netip.Addr, ipPkt []byte) (_ NoisePublicKey, ok bool)
 
+// PeerSessionState is the current WireGuard session state for a peer.
+type PeerSessionState uint8
+
+const (
+	// PeerSessionNone means there is no handshake in progress and no session key
+	// material retained for this peer.
+	PeerSessionNone PeerSessionState = iota
+
+	// PeerSessionHandshake means a handshake is in progress for this peer, but
+	// there is not currently a usable WireGuard session.
+	PeerSessionHandshake
+
+	// PeerSessionEstablished means the peer has a completed WireGuard session
+	// with usable session key material.
+	PeerSessionEstablished
+
+	// PeerSessionExpired means the peer's session key material is no longer
+	// considered usable, but final key cleanup or lazy peer removal may not have
+	// happened yet.
+	PeerSessionExpired
+)
+
+// PeerSessionStateFunc is called when a peer's WireGuard session state changes.
+//
+// Calls are serialized per Device and delivered in transition order. The
+// callback must be cheap and must not call back into Device.
+type PeerSessionStateFunc func(peer NoisePublicKey, state PeerSessionState)
+
 // SetPeerLookupFunc sets the function used to look up peers by public key
 // when receiving packets for unknown peers.
 func (device *Device) SetPeerLookupFunc(f PeerLookupFunc) {
@@ -498,6 +531,18 @@ func (device *Device) SetPeerByIPPacketFunc(f PeerByIPPacketFunc) {
 	defer device.allowedips.mu.Unlock()
 	device.allowedips.peerByIPPacketFunc = f
 	device.allowedips.device = device
+}
+
+// SetSessionStateFunc sets the function used to observe peer WireGuard session
+// state changes.
+//
+// It does not replay current state. Callers that need a complete view should set
+// it before peers are started or lazily created, and maintain any snapshots,
+// sequence numbers, and pubsub state outside wireguard-go.
+func (device *Device) SetSessionStateFunc(f PeerSessionStateFunc) {
+	device.sessionState.Lock()
+	defer device.sessionState.Unlock()
+	device.sessionState.fn = f
 }
 
 func (device *Device) Close() {

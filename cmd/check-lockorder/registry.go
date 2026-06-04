@@ -78,6 +78,7 @@ var trackedLocks = []TrackedLock{
 	{ID: "Device.net", OwnerType: "Device", FieldPath: "net", Kind: ReadWriteMutex, DefType: "Device", DefPath: "net"},
 	{ID: "Device.staticIdentity", OwnerType: "Device", FieldPath: "staticIdentity", Kind: ReadWriteMutex, DefType: "Device", DefPath: "staticIdentity"},
 	{ID: "Device.peers", OwnerType: "Device", FieldPath: "peers", Kind: ReadWriteMutex, DefType: "Device", DefPath: "peers"},
+	{ID: "Device.sessionState", OwnerType: "Device", FieldPath: "sessionState", Kind: PlainMutex, DefType: "Device", DefPath: "sessionState"},
 	{ID: "Device.allowedips.mu", OwnerType: "Device", FieldPath: "allowedips.mu", Kind: ReadWriteMutex, DefType: "AllowedIPs", DefPath: "mu"},
 	{ID: "Device.indexTable", OwnerType: "Device", FieldPath: "indexTable", Kind: ReadWriteMutex, DefType: "IndexTable", DefPath: ""},
 	{ID: "Device.cookieChecker", OwnerType: "Device", FieldPath: "cookieChecker", Kind: ReadWriteMutex, DefType: "CookieChecker", DefPath: ""},

@@ -95,6 +95,7 @@ func expiredRetransmitHandshake(peer *Peer) {
 		if peer.timersActive() && !peer.timers.zeroKeyMaterial.IsPending() {
 			peer.timers.zeroKeyMaterial.Mod(RejectAfterTime * 3)
 		}
+		peer.noteSessionHandshakeStopped()
 	} else {
 		peer.timers.handshakeAttempts.Add(1)
 		peer.device.log.Verbosef("%s - Handshake did not complete after %d seconds, retrying (try %d)", peer, int(RekeyTimeout.Seconds()), peer.timers.handshakeAttempts.Load()+1)
@@ -134,6 +135,15 @@ func expiredZeroKeyMaterial(peer *Peer) {
 		// peerfunc created it again after. We might lose some packets.
 		go peer.device.RemovePeer(peer.handshake.remoteStatic)
 	}
+}
+
+func expiredSession(peer *Peer) {
+	expires := peer.sessionExpiresNano.Load()
+	if expires == 0 || time.Now().UnixNano() < expires {
+		return
+	}
+	peer.device.log.Verbosef("%s - Session expired after %d seconds", peer, int(RejectAfterTime.Seconds()))
+	peer.noteSessionState(PeerSessionExpired)
 }
 
 func expiredPersistentKeepalive(peer *Peer) {
@@ -179,6 +189,7 @@ func (peer *Peer) timersHandshakeInitiated() {
 	if peer.timersActive() {
 		peer.timers.retransmitHandshake.Mod(RekeyTimeout + time.Millisecond*time.Duration(fastrandn(RekeyTimeoutJitterMaxMs)))
 	}
+	peer.noteSessionHandshakeStarted()
 }
 
 /* Should be called after a handshake response message is received and processed or when getting key confirmation via the first data message. */
@@ -194,8 +205,11 @@ func (peer *Peer) timersHandshakeComplete() {
 /* Should be called after an ephemeral key is created, which is before sending a handshake response or after receiving a handshake response. */
 func (peer *Peer) timersSessionDerived() {
 	if peer.timersActive() {
+		peer.sessionExpiresNano.Store(time.Now().Add(RejectAfterTime).UnixNano())
+		peer.timers.sessionExpired.Mod(RejectAfterTime)
 		peer.timers.zeroKeyMaterial.Mod(RejectAfterTime * 3)
 	}
+	peer.noteSessionState(PeerSessionEstablished)
 }
 
 /* Should be called before a packet with authentication -- keepalive, data, or handshake -- is sent, or after one is received. */
@@ -210,6 +224,7 @@ func (peer *Peer) timersInit() {
 	peer.timers.retransmitHandshake = peer.NewTimer(expiredRetransmitHandshake)
 	peer.timers.sendKeepalive = peer.NewTimer(expiredSendKeepalive)
 	peer.timers.newHandshake = peer.NewTimer(expiredNewHandshake)
+	peer.timers.sessionExpired = peer.NewTimer(expiredSession)
 	peer.timers.zeroKeyMaterial = peer.NewTimer(expiredZeroKeyMaterial)
 	peer.timers.persistentKeepalive = peer.NewTimer(expiredPersistentKeepalive)
 }
@@ -224,6 +239,7 @@ func (peer *Peer) timersStop() {
 	peer.timers.retransmitHandshake.DelSync()
 	peer.timers.sendKeepalive.DelSync()
 	peer.timers.newHandshake.DelSync()
+	peer.timers.sessionExpired.DelSync()
 	peer.timers.zeroKeyMaterial.DelSync()
 	peer.timers.persistentKeepalive.DelSync()
 }
