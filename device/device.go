@@ -392,7 +392,17 @@ func (device *Device) LookupPeer(pk NoisePublicKey) *Peer {
 	p.SetAllowedIPs(conf.AllowedIPs)
 	p.deleteOnIdle = true
 	if conf.Endpoint != nil {
-		p.SetEndpointFromPacket(conf.Endpoint)
+		if device.net.brokenRoaming {
+			// Match handlePostConfig for devices that called
+			// DisableSomeRoamingForBrokenMobileSemantics. Pin the initial
+			// endpoint so SetEndpointFromPacket cannot later replace it.
+			p.endpoint.Lock()
+			p.endpoint.val = conf.Endpoint
+			p.endpoint.disableRoaming = true
+			p.endpoint.Unlock()
+		} else {
+			p.SetEndpointFromPacket(conf.Endpoint)
+		}
 	}
 	p.Start()
 	return p
@@ -460,6 +470,11 @@ type NewPeerConfig struct {
 
 	// Endpoint, if non-nil, sets the initial endpoint for newly
 	// created peers.
+	//
+	// If the device has been configured via
+	// [Device.DisableSomeRoamingForBrokenMobileSemantics], this endpoint is
+	// pinned for the lifetime of the peer and subsequent
+	// [Peer.SetEndpointFromPacket] calls are no-ops.
 	Endpoint conn.Endpoint
 }
 
