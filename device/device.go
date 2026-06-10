@@ -46,7 +46,6 @@ type Device struct {
 		netlinkCancel *rwcancel.RWCancel
 		port          uint16 // listening port
 		fwmark        uint32 // mark value (0 = disabled)
-		brokenRoaming bool
 	}
 
 	staticIdentity struct {
@@ -392,17 +391,9 @@ func (device *Device) LookupPeer(pk NoisePublicKey) *Peer {
 	p.SetAllowedIPs(conf.AllowedIPs)
 	p.deleteOnIdle = true
 	if conf.Endpoint != nil {
-		if device.net.brokenRoaming {
-			// Match handlePostConfig for devices that called
-			// DisableSomeRoamingForBrokenMobileSemantics. Pin the initial
-			// endpoint so SetEndpointFromPacket cannot later replace it.
-			p.endpoint.Lock()
-			p.endpoint.val = conf.Endpoint
-			p.endpoint.disableRoaming = true
-			p.endpoint.Unlock()
-		} else {
-			p.SetEndpointFromPacket(conf.Endpoint)
-		}
+		p.endpoint.Lock()
+		p.endpoint.val = conf.Endpoint
+		p.endpoint.Unlock()
 	}
 	p.Start()
 	return p
@@ -468,13 +459,8 @@ type NewPeerConfig struct {
 	// AllowedIPs is the initial set of allowed IPs for the new peer.
 	AllowedIPs []netip.Prefix
 
-	// Endpoint, if non-nil, sets the initial endpoint for newly
-	// created peers.
-	//
-	// If the device has been configured via
-	// [Device.DisableSomeRoamingForBrokenMobileSemantics], this endpoint is
-	// pinned for the lifetime of the peer and subsequent
-	// [Peer.SetEndpointFromPacket] calls are no-ops.
+	// Endpoint, if non-nil, sets the endpoint for newly created peers.
+	// The endpoint is pinned for the lifetime of the peer.
 	Endpoint conn.Endpoint
 }
 
