@@ -46,7 +46,6 @@ type Device struct {
 		netlinkCancel *rwcancel.RWCancel
 		port          uint16 // listening port
 		fwmark        uint32 // mark value (0 = disabled)
-		brokenRoaming bool
 	}
 
 	staticIdentity struct {
@@ -387,7 +386,9 @@ func (device *Device) LookupPeer(pk NoisePublicKey) *Peer {
 	p.SetAllowedIPs(conf.AllowedIPs)
 	p.deleteOnIdle = true
 	if conf.Endpoint != nil {
-		p.SetEndpointFromPacket(conf.Endpoint)
+		p.endpoint.Lock()
+		p.endpoint.val = conf.Endpoint
+		p.endpoint.Unlock()
 	}
 	p.Start()
 	return p
@@ -453,8 +454,8 @@ type NewPeerConfig struct {
 	// AllowedIPs is the initial set of allowed IPs for the new peer.
 	AllowedIPs []netip.Prefix
 
-	// Endpoint, if non-nil, sets the initial endpoint for newly
-	// created peers.
+	// Endpoint, if non-nil, sets the endpoint for newly created peers.
+	// The endpoint is pinned for the lifetime of the peer.
 	Endpoint conn.Endpoint
 }
 
