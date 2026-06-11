@@ -37,9 +37,8 @@ type Peer struct {
 
 	endpoint struct {
 		sync.Mutex
-		val            conn.Endpoint
-		clearSrcOnTx   bool // signal to val.ClearSrc() prior to next packet transmission
-		disableRoaming bool
+		val          conn.Endpoint
+		clearSrcOnTx bool // signal to val.ClearSrc() prior to next packet transmission
 	}
 
 	timers struct {
@@ -118,7 +117,6 @@ func (device *Device) NewPeer(pk NoisePublicKey) (*Peer, error) {
 	// reset endpoint
 	peer.endpoint.Lock()
 	peer.endpoint.val = nil
-	peer.endpoint.disableRoaming = false
 	peer.endpoint.clearSrcOnTx = false
 	peer.endpoint.Unlock()
 
@@ -370,16 +368,6 @@ func (peer *Peer) hasKeyMaterial() bool {
 	keypairs.RLock()
 	defer keypairs.RUnlock()
 	return keypairs.previous != nil || keypairs.current != nil || keypairs.next.Load() != nil
-}
-
-func (peer *Peer) SetEndpointFromPacket(endpoint conn.Endpoint) {
-	peer.endpoint.Lock()
-	defer peer.endpoint.Unlock()
-	if peer.endpoint.disableRoaming {
-		return
-	}
-	peer.endpoint.clearSrcOnTx = false
-	peer.endpoint.val = endpoint
 }
 
 func (peer *Peer) markEndpointSrcForClearing() {
