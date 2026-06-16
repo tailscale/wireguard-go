@@ -101,6 +101,10 @@ type groDisablementFlags int
 const (
 	tcpGRODisabled groDisablementFlags = 1 << iota
 	udpGRODisabled
+	// udpGROZeroCsum is opt-in rather than a disablement: it lets UDP GRO
+	// coalesce IPv4 datagrams that carry no checksum. See
+	// [NativeTun.EnableUDPGROZeroChecksum].
+	udpGROZeroCsum
 )
 
 func (g *groDisablementFlags) canTCPGRO() bool {
@@ -109,6 +113,10 @@ func (g *groDisablementFlags) canTCPGRO() bool {
 
 func (g *groDisablementFlags) canUDPGRO() bool {
 	return (*g)&udpGRODisabled == 0
+}
+
+func (g *groDisablementFlags) canUDPGROZeroCsum() bool {
+	return (*g)&udpGROZeroCsum != 0
 }
 
 func (tun *NativeTun) File() *os.File {
@@ -570,6 +578,20 @@ func (tun *NativeTun) BatchSize() int {
 // for cases where it should be called.
 func (tun *NativeTun) DisableUDPGRO() {
 	tun.gro.Or(int32(udpGRODisabled))
+}
+
+// EnableUDPGROZeroChecksum lets UDP GRO coalesce IPv4 datagrams whose UDP
+// checksum field is zero, which RFC 768 defines as "no checksum". VXLAN
+// encapsulators such as Cilium, Calico and Flannel send their outer datagrams
+// this way, so without it their traffic is never coalesced.
+//
+// The kernel declines to do this "for symmetry with GSO": a coalesced frame
+// can only be handed over with NEEDS_CSUM, so the segments the kernel produces
+// from it carry a valid checksum where the originals carried none. The
+// datagrams are otherwise identical, and any receiver accepts the checksum, but
+// they are no longer bit-exact. That is why this is opt-in.
+func (tun *NativeTun) EnableUDPGROZeroChecksum() {
+	tun.gro.Or(int32(udpGROZeroCsum))
 }
 
 // DisableTCPGRO disables TCP GRO if it is enabled. See the GRODevice interface

@@ -6,6 +6,8 @@
 package tun
 
 import (
+	"bytes"
+	"encoding/binary"
 	"net/netip"
 	"slices"
 	"testing"
@@ -286,6 +288,15 @@ func flipUDP4Checksum(b []byte) []byte {
 	return b
 }
 
+// zeroUDP4Checksum clears the UDP checksum field, which per RFC 768 signals
+// "no checksum" for IPv4 UDP. VXLAN encapsulators commonly emit such datagrams.
+func zeroUDP4Checksum(b []byte) []byte {
+	at := virtioNetHdrLen + 20 + 6 // 20 byte ipv4 header; udp csum offset is 6
+	b[at] = 0
+	b[at+1] = 0
+	return b
+}
+
 func Fuzz_handleGRO(f *testing.F) {
 	pkt0 := tcp4Packet(ip4PortA, ip4PortB, header.TCPFlagAck, 100, 1)
 	pkt1 := tcp4Packet(ip4PortA, ip4PortB, header.TCPFlagAck, 100, 101)
@@ -300,6 +311,9 @@ func Fuzz_handleGRO(f *testing.F) {
 	pkt10 := udp6Packet(ip6PortA, ip6PortB, 100)
 	pkt11 := udp6Packet(ip6PortA, ip6PortC, 100)
 	f.Add(pkt0, pkt1, pkt2, pkt3, pkt4, pkt5, pkt6, pkt7, pkt8, pkt9, pkt10, pkt11, 0, offset)
+	f.Add(pkt0, pkt1, pkt2, pkt3, pkt4, pkt5,
+		zeroUDP4Checksum(slices.Clone(pkt6)), zeroUDP4Checksum(slices.Clone(pkt7)), zeroUDP4Checksum(slices.Clone(pkt8)),
+		pkt9, pkt10, pkt11, int(udpGROZeroCsum), offset)
 	f.Fuzz(func(t *testing.T, pkt0, pkt1, pkt2, pkt3, pkt4, pkt5, pkt6, pkt7, pkt8, pkt9, pkt10, pkt11 []byte, gro int, offset int) {
 		pkts := [][]byte{pkt0, pkt1, pkt2, pkt3, pkt4, pkt5, pkt6, pkt7, pkt8, pkt9, pkt10, pkt11}
 		wi := newGROToWrite()
@@ -411,6 +425,73 @@ func Test_handleGRO(t *testing.T) {
 				{virtioNetHdrLen, 140, 100}, // tcp4 merged (seq 101+201)
 				{virtioNetHdrLen, 128},      // udp4 bad csum, unmerged
 				{virtioNetHdrLen, 128, 100}, // udp4 merged
+			},
+			false,
+		},
+		{
+			"udp4 zero checksum, opt-in",
+			[][]byte{
+				zeroUDP4Checksum(udp4Packet(ip4PortA, ip4PortB, 100)), // udp4 flow 1, no checksum
+				zeroUDP4Checksum(udp4Packet(ip4PortA, ip4PortB, 100)), // udp4 flow 1, no checksum
+				zeroUDP4Checksum(udp4Packet(ip4PortA, ip4PortB, 100)), // udp4 flow 1, no checksum
+				flipUDP4Checksum(udp4Packet(ip4PortA, ip4PortC, 100)), // udp4 flow 2, bad checksum
+			},
+			udpGROZeroCsum,
+			[][]int{
+				{virtioNetHdrLen, 128, 100, 100}, // udp4 A->B merged
+				{virtioNetHdrLen, 128},           // udp4 A->C bad csum, unmerged
+			},
+			false,
+		},
+		{
+			"udp4 zero checksum, default off",
+			[][]byte{
+				zeroUDP4Checksum(udp4Packet(ip4PortA, ip4PortB, 100)),
+				zeroUDP4Checksum(udp4Packet(ip4PortA, ip4PortB, 100)),
+			},
+			0,
+			[][]int{
+				{virtioNetHdrLen, 128}, // not validated, so not merged
+				{virtioNetHdrLen, 128},
+			},
+			false,
+		},
+		{
+			"udp4 zero checksum mixed with valid checksums, opt-in",
+			[][]byte{
+				zeroUDP4Checksum(udp4Packet(ip4PortA, ip4PortB, 100)),
+				udp4Packet(ip4PortA, ip4PortB, 100),
+				zeroUDP4Checksum(udp4Packet(ip4PortA, ip4PortB, 100)),
+			},
+			udpGROZeroCsum,
+			[][]int{
+				{virtioNetHdrLen, 128, 100, 100}, // all merged
+			},
+			false,
+		},
+		{
+			"udp4 zero checksum with short UDP length, opt-in",
+			[][]byte{
+				zeroUDP4Checksum(udp4Packet(ip4PortA, ip4PortB, 100)),
+				shortUDP4Length(zeroUDP4Checksum(udp4Packet(ip4PortA, ip4PortB, 100))),
+			},
+			udpGROZeroCsum,
+			[][]int{
+				{virtioNetHdrLen, 128}, // length disagrees, not merged
+				{virtioNetHdrLen, 128},
+			},
+			false,
+		},
+		{
+			"udp6 zero checksum is never treated as absent",
+			[][]byte{
+				zeroUDP6Checksum(udp6Packet(ip6PortA, ip6PortB, 100)),
+				zeroUDP6Checksum(udp6Packet(ip6PortA, ip6PortB, 100)),
+			},
+			udpGROZeroCsum,
+			[][]int{
+				{virtioNetHdrLen, 148},
+				{virtioNetHdrLen, 148},
 			},
 			false,
 		},
@@ -958,5 +1039,46 @@ func Test_tcpPacketsCanCoalesce(t *testing.T) {
 				t.Errorf("tcpPacketsCanCoalesce() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func shortUDP4Length(b []byte) []byte {
+	udph := offset + 20
+	binary.BigEndian.PutUint16(b[udph+4:], binary.BigEndian.Uint16(b[udph+4:])-1)
+	return b
+}
+
+func zeroUDP6Checksum(b []byte) []byte {
+	b[offset+40+6], b[offset+40+7] = 0, 0
+	return b
+}
+
+// Test_handleGRO_zeroChecksumOutputMatchesValid checks that coalescing
+// datagrams without a checksum hands the kernel the same frame, byte for byte,
+// as coalescing the same datagrams with valid checksums: NEEDS_CSUM, UDP_L4 GSO
+// and the pseudo-header sum in the checksum field. The kernel therefore emits
+// identical, validly checksummed segments either way.
+func Test_handleGRO_zeroChecksumOutputMatchesValid(t *testing.T) {
+	coalesce := func(mutate func([]byte) []byte) [][]byte {
+		t.Helper()
+		pkts := make([][]byte, 3)
+		for i := range pkts {
+			pkts[i] = mutate(udp4Packet(ip4PortA, ip4PortB, 100))
+		}
+		wi := newGROToWrite()
+		if err := handleGRO(pkts, offset, newTCPGROTable(), newUDPGROTable(), udpGROZeroCsum, &wi); err != nil {
+			t.Fatal(err)
+		}
+		if len(wi.iovs) != 1 || len(wi.iovs[0]) != 4 {
+			t.Fatalf("got %d outputs, want 1 coalesced frame of 3 datagrams", len(wi.iovs))
+		}
+		return wi.iovs[0]
+	}
+	valid := coalesce(func(b []byte) []byte { return b })
+	noCsum := coalesce(zeroUDP4Checksum)
+	for i := range valid {
+		if !bytes.Equal(valid[i], noCsum[i]) {
+			t.Errorf("fragment %d differs:\nvalid   %x\nno csum %x", i, valid[i], noCsum[i])
+		}
 	}
 }
