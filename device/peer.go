@@ -249,6 +249,14 @@ func (peer *Peer) Start() {
 	go peer.RoutineSequentialReceiver(batchSize)
 
 	peer.isRunning.Store(true)
+
+	// A lazily-created peer that never completes a handshake otherwise never
+	// arms its reaping timer. Arm it here, while running under state.Lock, so
+	// it's reclaimed after RejectAfterTime*3 of no session and is guaranteed to
+	// be torn down by a matching Stop. A completed handshake re-Mods it.
+	if peer.deleteOnIdle {
+		peer.timers.zeroKeyMaterial.Mod(RejectAfterTime * 3)
+	}
 }
 
 func (peer *Peer) ZeroAndFlushAll() {
