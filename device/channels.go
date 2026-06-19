@@ -84,7 +84,7 @@ func newAutodrainingInboundQueue(device *Device) *autodrainingInboundQueue {
 		c: make(chan *QueueInboundElementsContainer, QueueInboundSize),
 	}
 	if device.needsInboundQueueFinalizer() {
-		runtime.SetFinalizer(q, device.flushInboundQueue)
+		runtime.AddCleanup(q, device.flushInboundQueue, q.c)
 	}
 	return q
 }
@@ -95,10 +95,10 @@ func (device *Device) needsInboundQueueFinalizer() bool {
 		device.pool.inboundElementsContainer.hasAccounting()
 }
 
-func (device *Device) flushInboundQueue(q *autodrainingInboundQueue) {
+func (device *Device) flushInboundQueue(c <-chan *QueueInboundElementsContainer) {
 	for {
 		select {
-		case elemsContainer := <-q.c:
+		case elemsContainer := <-c:
 			elemsContainer.filling.Wait()
 			for _, elem := range elemsContainer.elems {
 				device.PutMessageBuffer(elem.buffer)
@@ -125,7 +125,7 @@ func newAutodrainingOutboundQueue(device *Device) *autodrainingOutboundQueue {
 		c: make(chan *QueueOutboundElementsContainer, QueueOutboundSize),
 	}
 	if device.needsOutboundQueueFinalizer() {
-		runtime.SetFinalizer(q, device.flushOutboundQueue)
+		runtime.AddCleanup(q, device.flushOutboundQueue, q.c)
 	}
 	return q
 }
@@ -136,10 +136,10 @@ func (device *Device) needsOutboundQueueFinalizer() bool {
 		device.pool.outboundElementsContainer.hasAccounting()
 }
 
-func (device *Device) flushOutboundQueue(q *autodrainingOutboundQueue) {
+func (device *Device) flushOutboundQueue(c <-chan *QueueOutboundElementsContainer) {
 	for {
 		select {
-		case elemsContainer := <-q.c:
+		case elemsContainer := <-c:
 			elemsContainer.filling.Wait()
 			for _, elem := range elemsContainer.elems {
 				device.PutMessageBuffer(elem.buffer)
