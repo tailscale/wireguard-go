@@ -138,12 +138,13 @@ func expiredZeroKeyMaterial(peer *Peer) {
 }
 
 func expiredSession(peer *Peer) {
-	expires := peer.sessionExpiresNano.Load()
-	if expires == 0 || time.Now().UnixNano() < expires {
+	peer.sessionState.Lock()
+	defer peer.sessionState.Unlock()
+	if peer.sessionState.sessionExpiresNano == 0 || time.Now().UnixNano() < peer.sessionState.sessionExpiresNano {
 		return
 	}
 	peer.device.log.Verbosef("%s - Session expired after %d seconds", peer, int(RejectAfterTime.Seconds()))
-	peer.noteSessionState(PeerSessionExpired)
+	peer.noteSessionStateLocked(PeerSessionExpired)
 }
 
 func expiredPersistentKeepalive(peer *Peer) {
@@ -205,11 +206,15 @@ func (peer *Peer) timersHandshakeComplete() {
 /* Should be called after an ephemeral key is created, which is before sending a handshake response or after receiving a handshake response. */
 func (peer *Peer) timersSessionDerived() {
 	if peer.timersActive() {
-		peer.sessionExpiresNano.Store(time.Now().Add(RejectAfterTime).UnixNano())
+		peer.sessionState.Lock()
+		peer.sessionState.sessionExpiresNano = time.Now().Add(RejectAfterTime).UnixNano()
+		peer.noteSessionStateLocked(PeerSessionEstablished)
+		peer.sessionState.Unlock()
 		peer.timers.sessionExpired.Mod(RejectAfterTime)
 		peer.timers.zeroKeyMaterial.Mod(RejectAfterTime * 3)
+	} else {
+		peer.noteSessionState(PeerSessionEstablished)
 	}
-	peer.noteSessionState(PeerSessionEstablished)
 }
 
 /* Should be called before a packet with authentication -- keepalive, data, or handshake -- is sent, or after one is received. */

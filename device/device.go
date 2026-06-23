@@ -60,10 +60,7 @@ type Device struct {
 		lookupFunc   PeerLookupFunc // or nil if unused
 	}
 
-	sessionState struct {
-		sync.Mutex // serializes PeerSessionStateFunc calls and protects peer.sessionState
-		fn         PeerSessionStateFunc
-	}
+	peerStateFn atomic.Pointer[PeerSessionStateFunc] // observes peer session state changes, nil if unset
 
 	rate struct {
 		underLoadUntil atomic.Int64
@@ -513,7 +510,7 @@ const (
 
 // PeerSessionStateFunc is called when a peer's WireGuard session state changes.
 //
-// Calls are serialized per Device and delivered in transition order. The
+// Calls are serialized per peer and delivered in that peer's transition order. The
 // callback must be cheap and must not call back into Device.
 type PeerSessionStateFunc func(peer NoisePublicKey, state PeerSessionState)
 
@@ -540,10 +537,14 @@ func (device *Device) SetPeerByIPPacketFunc(f PeerByIPPacketFunc) {
 // It does not replay current state. Callers that need a complete view should set
 // it before peers are started or lazily created, and maintain any snapshots,
 // sequence numbers, and pubsub state outside wireguard-go.
+//
+// The callback must be concurrent-safe and must not call back into Device.
 func (device *Device) SetSessionStateFunc(f PeerSessionStateFunc) {
-	device.sessionState.Lock()
-	defer device.sessionState.Unlock()
-	device.sessionState.fn = f
+	if f == nil {
+		device.peerStateFn.Store(nil)
+		return
+	}
+	device.peerStateFn.Store(&f)
 }
 
 func (device *Device) Close() {

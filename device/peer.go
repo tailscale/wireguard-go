@@ -18,16 +18,20 @@ import (
 )
 
 type Peer struct {
-	isRunning          atomic.Bool
-	keypairs           Keypairs
-	handshake          Handshake
-	device             *Device
-	stopping           sync.WaitGroup   // routines pending stop
-	txBytes            atomic.Uint64    // bytes send to peer (endpoint)
-	rxBytes            atomic.Uint64    // bytes received from peer
-	lastHandshakeNano  atomic.Int64     // nano seconds since epoch
-	sessionExpiresNano atomic.Int64     // nano seconds since epoch
-	sessionState       PeerSessionState // guarded by device.sessionState.Mutex
+	isRunning         atomic.Bool
+	keypairs          Keypairs
+	handshake         Handshake
+	device            *Device
+	stopping          sync.WaitGroup // routines pending stop
+	txBytes           atomic.Uint64  // bytes send to peer (endpoint)
+	rxBytes           atomic.Uint64  // bytes received from peer
+	lastHandshakeNano atomic.Int64   // nano seconds since epoch
+
+	sessionState struct {
+		sync.Mutex
+		current            PeerSessionState
+		sessionExpiresNano int64 // nano seconds since epoch
+	}
 
 	// deleteOnIdle indicates whether the peer should be deleted when idle
 	// because it was auto-created via a Device.PeerLookupFunc.
@@ -261,7 +265,6 @@ func (peer *Peer) Start() {
 
 func (peer *Peer) ZeroAndFlushAll() {
 	device := peer.device
-	peer.sessionExpiresNano.Store(0)
 	if peer.timers.sessionExpired != nil {
 		peer.timers.sessionExpired.Del()
 	}
@@ -287,7 +290,11 @@ func (peer *Peer) ZeroAndFlushAll() {
 	handshake.mutex.Unlock()
 
 	peer.FlushStagedPackets()
-	peer.noteSessionState(PeerSessionNone)
+
+	peer.sessionState.Lock()
+	peer.sessionState.sessionExpiresNano = 0
+	peer.noteSessionStateLocked(PeerSessionNone)
+	peer.sessionState.Unlock()
 }
 
 func (peer *Peer) ExpireCurrentKeypairs() {
@@ -308,8 +315,10 @@ func (peer *Peer) ExpireCurrentKeypairs() {
 	}
 	keypairs.Unlock()
 
-	peer.sessionExpiresNano.Store(0)
-	peer.noteSessionState(PeerSessionExpired)
+	peer.sessionState.Lock()
+	peer.sessionState.sessionExpiresNano = 0
+	peer.noteSessionStateLocked(PeerSessionExpired)
+	peer.sessionState.Unlock()
 }
 
 func (peer *Peer) Stop() {
@@ -333,42 +342,41 @@ func (peer *Peer) Stop() {
 }
 
 func (peer *Peer) noteSessionState(state PeerSessionState) {
-	device := peer.device
-	device.sessionState.Lock()
-	defer device.sessionState.Unlock()
+	peer.sessionState.Lock()
+	defer peer.sessionState.Unlock()
+	peer.noteSessionStateLocked(state)
+}
 
-	if peer.sessionState == state {
+// noteSessionStateLocked records a session state transition and delivers the
+// callback. The caller must hold peer.sessionState.Mutex during the
+// determination and transition.
+func (peer *Peer) noteSessionStateLocked(state PeerSessionState) {
+	if peer.sessionState.current == state {
 		return
 	}
-	peer.sessionState = state
-	if f := device.sessionState.fn; f != nil {
-		f(peer.handshake.remoteStatic, state)
+	peer.sessionState.current = state
+	if f := peer.device.peerStateFn.Load(); f != nil {
+		(*f)(peer.handshake.remoteStatic, state)
 	}
 }
 
 func (peer *Peer) noteSessionHandshakeStarted() {
-	device := peer.device
-	device.sessionState.Lock()
-	defer device.sessionState.Unlock()
-
-	switch peer.sessionState {
-	case PeerSessionEstablished:
-		return
-	case PeerSessionHandshake:
+	peer.sessionState.Lock()
+	defer peer.sessionState.Unlock()
+	if peer.sessionState.current == PeerSessionEstablished {
 		return
 	}
-	peer.sessionState = PeerSessionHandshake
-	if f := device.sessionState.fn; f != nil {
-		f(peer.handshake.remoteStatic, PeerSessionHandshake)
-	}
+	peer.noteSessionStateLocked(PeerSessionHandshake)
 }
 
 func (peer *Peer) noteSessionHandshakeStopped() {
+	peer.sessionState.Lock()
+	defer peer.sessionState.Unlock()
 	state := PeerSessionNone
 	if peer.hasKeyMaterial() {
 		state = PeerSessionExpired
 	}
-	peer.noteSessionState(state)
+	peer.noteSessionStateLocked(state)
 }
 
 func (peer *Peer) hasKeyMaterial() bool {

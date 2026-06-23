@@ -34,7 +34,9 @@ func TestSessionStateFuncTransitions(t *testing.T) {
 	peer.noteSessionHandshakeStarted()
 	peer.timersSessionDerived()
 	peer.timersSessionDerived()
-	peer.sessionExpiresNano.Store(time.Now().Add(-time.Second).UnixNano())
+	peer.sessionState.Lock()
+	peer.sessionState.sessionExpiresNano = time.Now().Add(-time.Second).UnixNano()
+	peer.sessionState.Unlock()
 	expiredSession(peer)
 	expiredSession(peer)
 	peer.ZeroAndFlushAll()
@@ -74,6 +76,32 @@ func TestSessionStateHandshakeWhileEstablished(t *testing.T) {
 	want := []PeerSessionState{PeerSessionEstablished}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("session states = %#v; want %#v", got, want)
+	}
+}
+
+func TestSetSessionStateFuncNil(t *testing.T) {
+	dev := newTestDevice(t)
+	peerKey := NoisePublicKey{4}
+	peer, err := dev.NewPeer(peerKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var got []PeerSessionState
+	dev.SetSessionStateFunc(func(peer NoisePublicKey, state PeerSessionState) {
+		got = append(got, state)
+	})
+
+	peer.noteSessionHandshakeStarted()
+
+	// Clearing the callback must not panic (a nil func value must store a nil
+	// pointer, not a pointer to a nil func) and must stop delivery.
+	dev.SetSessionStateFunc(nil)
+	peer.timersSessionDerived()
+
+	want := []PeerSessionState{PeerSessionHandshake}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("session states = %#v, want %#v", got, want)
 	}
 }
 
