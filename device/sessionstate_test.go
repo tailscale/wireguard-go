@@ -35,7 +35,7 @@ func TestSessionStateFuncTransitions(t *testing.T) {
 	peer.timersSessionDerived()
 	peer.timersSessionDerived()
 	peer.sessionState.Lock()
-	peer.sessionState.sessionExpiresNano = time.Now().Add(-time.Second).UnixNano()
+	peer.sessionState.sessionExpires = time.Now().Add(-time.Second)
 	peer.sessionState.Unlock()
 	expiredSession(peer)
 	expiredSession(peer)

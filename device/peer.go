@@ -29,8 +29,8 @@ type Peer struct {
 
 	sessionState struct {
 		sync.Mutex
-		current            PeerSessionState
-		sessionExpiresNano int64 // nano seconds since epoch
+		current        PeerSessionState
+		sessionExpires time.Time
 	}
 
 	// deleteOnIdle indicates whether the peer should be deleted when idle
@@ -292,7 +292,7 @@ func (peer *Peer) ZeroAndFlushAll() {
 	peer.FlushStagedPackets()
 
 	peer.sessionState.Lock()
-	peer.sessionState.sessionExpiresNano = 0
+	peer.sessionState.sessionExpires = time.Time{}
 	peer.noteSessionStateLocked(PeerSessionNone)
 	peer.sessionState.Unlock()
 }
@@ -316,7 +316,7 @@ func (peer *Peer) ExpireCurrentKeypairs() {
 	keypairs.Unlock()
 
 	peer.sessionState.Lock()
-	peer.sessionState.sessionExpiresNano = 0
+	peer.sessionState.sessionExpires = time.Time{}
 	peer.noteSessionStateLocked(PeerSessionExpired)
 	peer.sessionState.Unlock()
 }
@@ -349,7 +349,7 @@ func (peer *Peer) noteSessionState(state PeerSessionState) {
 
 // noteSessionStateLocked records a session state transition and delivers the
 // callback. The caller must hold peer.sessionState.Mutex during the
-// determination and transition.
+// state determination and transition.
 func (peer *Peer) noteSessionStateLocked(state PeerSessionState) {
 	if peer.sessionState.current == state {
 		return

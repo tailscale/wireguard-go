@@ -140,7 +140,7 @@ func expiredZeroKeyMaterial(peer *Peer) {
 func expiredSession(peer *Peer) {
 	peer.sessionState.Lock()
 	defer peer.sessionState.Unlock()
-	if peer.sessionState.sessionExpiresNano == 0 || time.Now().UnixNano() < peer.sessionState.sessionExpiresNano {
+	if peer.sessionState.sessionExpires.IsZero() || time.Now().Before(peer.sessionState.sessionExpires) {
 		return
 	}
 	peer.device.log.Verbosef("%s - Session expired after %d seconds", peer, int(RejectAfterTime.Seconds()))
@@ -207,7 +207,7 @@ func (peer *Peer) timersHandshakeComplete() {
 func (peer *Peer) timersSessionDerived() {
 	if peer.timersActive() {
 		peer.sessionState.Lock()
-		peer.sessionState.sessionExpiresNano = time.Now().Add(RejectAfterTime).UnixNano()
+		peer.sessionState.sessionExpires = time.Now().Add(RejectAfterTime)
 		peer.noteSessionStateLocked(PeerSessionEstablished)
 		peer.sessionState.Unlock()
 		peer.timers.sessionExpired.Mod(RejectAfterTime)
