@@ -1,2 +1,7 @@
-# Every file in this repo requires review from the dataplane team.
-* @tailscale/dataplane
+# No CODEOWNERS.
+#
+# Copy @tailscale/dataplane on changes.
+#
+# Do not add to this list without wide discussion.
+# See https://github.com/tailscale/corp/issues/13972
+# (Same policy as https://github.com/tailscale/tailscale/blob/main/CODEOWNERS etc)
