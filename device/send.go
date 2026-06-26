@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"strconv"
 	"sync"
 	"time"
 
@@ -503,12 +504,129 @@ func (peer *Peer) RoutineSequentialSender(maxBatchSize int) {
 
 	bufs := make([][]byte, 0, maxBatchSize)
 
-	for elemsContainer := range peer.queue.outbound.c {
-		if elemsContainer == nil {
-			return
-		}
-		peer.processOutboundContainer(elemsContainer, bufs[:0])
+	// WG_TX_BATCH>1 enables opportunistic cross-container send coalescing: drain
+	// up to that many packets (capped at maxBatchSize, the send pool size) from
+	// the outbound queue into a single SendBuffers/sendmmsg, instead of one send
+	// per container. All packets for a peer share one endpoint, so this is safe.
+	// It amortizes the send syscall when many small flows produce many small
+	// containers (offload coalescing collapses but sendmmsg batching still wins),
+	// and by draining the outbound queue faster it relieves the backpressure that
+	// otherwise stalls encryption dispatch. WG_TX_BATCH<=1 keeps stock behavior.
+	txBatch := 0
+	if v, err := strconv.Atoi(os.Getenv("WG_TX_BATCH")); err == nil && v > 1 {
+		txBatch = min(v, maxBatchSize)
 	}
+
+	if txBatch <= 1 {
+		for elemsContainer := range peer.queue.outbound.c {
+			if elemsContainer == nil {
+				return
+			}
+			peer.processOutboundContainer(elemsContainer, bufs[:0])
+		}
+		return
+	}
+
+	// batched draining path.
+	batch := make([]*QueueOutboundElementsContainer, 0, maxBatchSize)
+	var held *QueueOutboundElementsContainer // received but didn't fit; carried over
+	for {
+		batch = batch[:0]
+		batchLen := 0
+		if held != nil {
+			batch = append(batch, held)
+			batchLen += len(held.elems)
+			held = nil
+		} else {
+			c, ok := <-peer.queue.outbound.c
+			if !ok || c == nil {
+				return
+			}
+			batch = append(batch, c)
+			batchLen += len(c.elems)
+		}
+		// Opportunistically pull more ready containers, without blocking, up to
+		// the target batch size. Whole containers only: if the next would
+		// overshoot, carry it to the next batch (keeps buffer lifetimes simple).
+		drain := true
+		for drain && batchLen < txBatch {
+			select {
+			case c, ok := <-peer.queue.outbound.c:
+				if !ok || c == nil {
+					peer.sendContainers(batch, bufs[:0])
+					return
+				}
+				if batchLen+len(c.elems) > txBatch {
+					held = c
+					drain = false
+				} else {
+					batch = append(batch, c)
+					batchLen += len(c.elems)
+				}
+			default:
+				drain = false
+			}
+		}
+		peer.sendContainers(batch, bufs[:0])
+	}
+}
+
+// sendContainers waits for encryption of every container in the batch, then
+// emits all their packets in a single SendBuffers call (one sendmmsg), and
+// returns every element and container to their pools. The total element count
+// across containers must not exceed cap(scratch) (== maxBatchSize == the bind's
+// message pool size); RoutineSequentialSender enforces this.
+func (peer *Peer) sendContainers(containers []*QueueOutboundElementsContainer, scratch [][]byte) {
+	if len(containers) == 0 {
+		return
+	}
+	device := peer.device
+	for _, c := range containers {
+		c.filling.Wait()
+	}
+	defer func() {
+		for _, c := range containers {
+			for _, elem := range c.elems {
+				device.PutMessageBuffer(elem.buffer)
+				device.PutOutboundElement(elem)
+			}
+			device.PutOutboundElementsContainer(c)
+		}
+	}()
+	if !peer.isRunning.Load() {
+		return
+	}
+
+	dataSent := false
+	for _, c := range containers {
+		for _, elem := range c.elems {
+			if len(elem.packet[MessageEncapsulatingTransportSize:]) != MessageKeepaliveSize {
+				dataSent = true
+			}
+			scratch = append(scratch, elem.packet)
+		}
+	}
+
+	peer.timersAnyAuthenticatedPacketTraversal()
+	peer.timersAnyAuthenticatedPacketSent()
+
+	err := peer.SendBuffers(scratch)
+	if dataSent {
+		peer.timersDataSent()
+	}
+	if err != nil {
+		var errGSO conn.ErrUDPGSODisabled
+		if errors.As(err, &errGSO) {
+			device.log.Verbosef(err.Error())
+			err = errGSO.RetryErr
+		}
+	}
+	if err != nil {
+		device.log.Errorf("%v - Failed to send data packets: %v", peer, err)
+		return
+	}
+
+	peer.keepKeyFreshSending()
 }
 
 // processOutboundContainer waits for the encryption routine to finish
