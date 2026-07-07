@@ -192,6 +192,86 @@ func genTestPair(tb testing.TB, realSocket bool) (pair testPair) {
 	return
 }
 
+// TestPriorityMessageOnEstablishment verifies that a message returned by a
+// [PeerPriorityMessageFunc] is transmitted to and received by the remote peer
+// when a session keypair is established, from both callback trigger sites.
+func TestPriorityMessageOnEstablishment(t *testing.T) {
+	cases := []struct {
+		name                               string
+		prioritySenderIsHandshakeInitiator bool
+	}{
+		// pair[1] is always the handshake initiator (see below), and we vary
+		// which side has the callback set (prioritySender).
+		{"received-with-keypair-trigger", false},
+		{"handshake-resp-trigger", true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			goroutineLeakCheck(t)
+			pair := genTestPair(t, true)
+			prioritySender, priorityReceiver := pair[0], pair[1]
+			if tc.prioritySenderIsHandshakeInitiator {
+				prioritySender, priorityReceiver = pair[1], pair[0]
+			}
+
+			// Flip the bits in the priority message dest IP so we can distinguish
+			// it from a regular tuntest.Ping, which can also flow alongside
+			// depending on which side has the callback set.
+			priorityUniqueDst := priorityReceiver.ip.As4()
+			for i := range priorityUniqueDst {
+				priorityUniqueDst[i] = ^priorityUniqueDst[i]
+			}
+			priorityMsg := tuntest.Ping(netip.AddrFrom4(priorityUniqueDst), prioritySender.ip)
+
+			var gotKey atomic.Pointer[NoisePublicKey]
+			prioritySender.dev.SetPriorityMessageOnEstablishmentFunc(func(peer NoisePublicKey) []byte {
+				k := peer
+				gotKey.CompareAndSwap(nil, &k)
+				return priorityMsg
+			})
+
+			// pair[1] is always the handshake initiator
+			tunInjectedMsg := tuntest.Ping(pair[0].ip, pair[1].ip)
+			pair[1].tun.Outbound <- tunInjectedMsg
+
+			// Drain the priorityReceiver's TUN. The first message received
+			// should be the priorityMsg.
+			select {
+			case got := <-priorityReceiver.tun.Inbound:
+				if !bytes.Equal(got, priorityMsg) {
+					t.Fatal("first msg on receiver TUN is not priorityMsg")
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("timeout waiting for priorityMsg")
+			}
+
+			// If the priority message receiver is pair[0] (handshake responder),
+			// it should also receive the tunInjectedMsg after the priorityMsg.
+			if priorityReceiver == pair[0] {
+				select {
+				case got := <-priorityReceiver.tun.Inbound:
+					if !bytes.Equal(got, tunInjectedMsg) {
+						t.Error("second msg on receiver TUN is not tunInjectedMsg")
+					}
+				case <-time.After(5 * time.Second):
+					t.Error("timeout waiting for tunInjectedMsg")
+				}
+			}
+
+			// The callback should observe the remote peer's public key.
+			priorityReceiver.dev.staticIdentity.RLock()
+			wantKey := priorityReceiver.dev.staticIdentity.publicKey
+			priorityReceiver.dev.staticIdentity.RUnlock()
+			if k := gotKey.Load(); k == nil {
+				t.Error("priority message callback was not invoked")
+			} else if *k != wantKey {
+				t.Errorf("callback peer key = %x, want %x", *k, wantKey)
+			}
+		})
+	}
+}
+
 func TestTwoDevicePing(t *testing.T) {
 	goroutineLeakCheck(t)
 	pair := genTestPair(t, true)

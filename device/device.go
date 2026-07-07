@@ -60,7 +60,8 @@ type Device struct {
 		lookupFunc   PeerLookupFunc // or nil if unused
 	}
 
-	peerStateFn atomic.Pointer[PeerSessionStateFunc] // observes peer session state changes, nil if unset
+	peerStateFn   atomic.Pointer[PeerSessionStateFunc]    // observes peer session state changes, nil if unset
+	priorityMsgFn atomic.Pointer[PeerPriorityMessageFunc] // returns a priority message to be sent around session establishment, nil if unset
 
 	rate struct {
 		underLoadUntil atomic.Int64
@@ -545,6 +546,38 @@ func (device *Device) SetSessionStateFunc(f PeerSessionStateFunc) {
 		return
 	}
 	device.peerStateFn.Store(&f)
+}
+
+// MaxPriorityMessageContentSize is the maximum size of a message returned by a
+// [PeerPriorityMessageFunc]. It's a power of 2 that leaves significant space
+// when accounting for all WireGuard overhead and encapsulating network protocol
+// headers. Future adjustments to this value should consider all these overheads
+// and any [conn.Bind] implementation limitations.
+const MaxPriorityMessageContentSize = 512
+
+// PeerPriorityMessageFunc is called when a peer's WireGuard session keypair is
+// established (or re-keyed) for forward data transmission.
+//
+// The returned message is transmitted to the peer in priority fashion. Priority
+// means it cannot be evicted from the staged packet queue by non-priority
+// (read from [tun.Device]) packets. It avoids the staged queue altogether.
+//
+// The callback must be cheap and must not call back into [Device]. A zero length
+// message or a message whose length exceeds [MaxPriorityMessageContentSize] will
+// be silently dropped. Message should start with an IPv4 or IPv6 header as it
+// is subject to allowed IPs lookup on the receiver, same as any other transport
+// message.
+type PeerPriorityMessageFunc func(peer NoisePublicKey) (msg []byte)
+
+// SetPriorityMessageOnEstablishmentFunc sets a function to be used for sending
+// a priority message around session establishment. See [PeerPriorityMessageFunc]
+// docs for more details. A nil value clears any previously set value.
+func (device *Device) SetPriorityMessageOnEstablishmentFunc(f PeerPriorityMessageFunc) {
+	if f == nil {
+		device.priorityMsgFn.Store(nil)
+		return
+	}
+	device.priorityMsgFn.Store(&f)
 }
 
 func (device *Device) Close() {

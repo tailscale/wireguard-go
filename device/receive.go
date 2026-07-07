@@ -420,6 +420,7 @@ func (device *Device) RoutineHandshake(id int) {
 
 			peer.timersSessionDerived()
 			peer.timersHandshakeComplete()
+			peer.SendPriorityMessage()
 			peer.SendKeepalive()
 		}
 	skip:
@@ -487,6 +488,7 @@ func (peer *Peer) processInboundContainer(elemsContainer *QueueInboundElementsCo
 		validTailPacket = i
 		if peer.ReceivedWithKeypair(elem.keypair) {
 			peer.timersHandshakeComplete()
+			peer.SendPriorityMessage()
 			peer.SendStagedPackets()
 		}
 		if ep, ok := elem.endpoint.(conn.PeerAwareEndpoint); ok {
