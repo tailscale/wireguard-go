@@ -18,14 +18,15 @@ import (
 )
 
 type Peer struct {
-	isRunning         atomic.Bool
-	keypairs          Keypairs
-	handshake         Handshake
-	device            *Device
-	stopping          sync.WaitGroup // routines pending stop
-	txBytes           atomic.Uint64  // bytes send to peer (endpoint)
-	rxBytes           atomic.Uint64  // bytes received from peer
-	lastHandshakeNano atomic.Int64   // nano seconds since epoch
+	isRunning           atomic.Bool
+	keypairs            Keypairs
+	handshake           Handshake
+	device              *Device
+	stopping            sync.WaitGroup // routines pending stop
+	txBytes             atomic.Uint64  // bytes send to peer (endpoint)
+	rxBytes             atomic.Uint64  // bytes received from peer
+	lastHandshakeNano   atomic.Int64   // nanoseconds since epoch
+	handshakeOnUserSend atomic.Bool    // attempt handshake following next outbound transport
 
 	sessionState struct {
 		sync.Mutex
