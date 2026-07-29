@@ -72,30 +72,33 @@ func (timer *Timer) IsPending() bool {
 	return timer.isPending
 }
 
-func (peer *Peer) timersActive() bool {
-	return peer.isRunning.Load() && peer.device != nil && peer.device.isUp()
+func (peer *Peer) ifTimersActive(f func()) bool {
+	active := false
+	peer.ifRunning(func() {
+		if peer.device != nil && peer.device.isUp() {
+			active = true
+			f()
+		}
+	})
+	return active
 }
 
 func expiredRetransmitHandshake(peer *Peer) {
 	if peer.timers.handshakeAttempts.Load() > MaxTimerHandshakes {
 		peer.device.log.Verbosef("%s - Handshake did not complete after %d attempts, giving up", peer, MaxTimerHandshakes+2)
 
-		if peer.timersActive() {
+		peer.ifTimersActive(func() {
 			peer.timers.sendKeepalive.Del()
-		}
 
-		/* We drop all packets without a keypair and don't try again,
-		 * if we try unsuccessfully for too long to make a handshake.
-		 */
-		peer.FlushStagedPackets()
+			/* We drop all packets without a keypair and don't try again,
+			 * if we try unsuccessfully for too long to make a handshake.
+			 */
+			peer.FlushStagedPackets()
 
-		/* We set a timer for destroying any residue that might be left
-		 * of a partial exchange.
-		 */
-		if peer.timersActive() && !peer.timers.zeroKeyMaterial.IsPending() {
 			peer.timers.zeroKeyMaterial.Mod(RejectAfterTime * 3)
-		}
-		peer.noteSessionHandshakeStopped()
+
+			peer.noteSessionHandshakeStopped()
+		})
 	} else {
 		peer.timers.handshakeAttempts.Add(1)
 		peer.device.log.Verbosef("%s - Handshake did not complete after %d seconds, retrying (try %d)", peer, int(RekeyTimeout.Seconds()), peer.timers.handshakeAttempts.Load()+1)
@@ -111,9 +114,9 @@ func expiredSendKeepalive(peer *Peer) {
 	peer.SendKeepalive()
 	if peer.timers.needAnotherKeepalive.Load() {
 		peer.timers.needAnotherKeepalive.Store(false)
-		if peer.timersActive() {
+		peer.ifTimersActive(func() {
 			peer.timers.sendKeepalive.Mod(KeepaliveTimeout)
-		}
+		})
 	}
 }
 
@@ -155,64 +158,66 @@ func expiredPersistentKeepalive(peer *Peer) {
 
 /* Should be called after an authenticated data packet is sent. */
 func (peer *Peer) timersDataSent() {
-	if peer.timersActive() && !peer.timers.newHandshake.IsPending() {
-		peer.timers.newHandshake.Mod(KeepaliveTimeout + RekeyTimeout + time.Millisecond*time.Duration(fastrandn(RekeyTimeoutJitterMaxMs)))
-	}
+	peer.ifTimersActive(func() {
+		if !peer.timers.newHandshake.IsPending() {
+			peer.timers.newHandshake.Mod(KeepaliveTimeout + RekeyTimeout + time.Millisecond*time.Duration(fastrandn(RekeyTimeoutJitterMaxMs)))
+		}
+	})
 }
 
 /* Should be called after an authenticated data packet is received. */
 func (peer *Peer) timersDataReceived() {
-	if peer.timersActive() {
+	peer.ifTimersActive(func() {
 		if !peer.timers.sendKeepalive.IsPending() {
 			peer.timers.sendKeepalive.Mod(KeepaliveTimeout)
 		} else {
 			peer.timers.needAnotherKeepalive.Store(true)
 		}
-	}
+	})
 }
 
 /* Should be called after any type of authenticated packet is sent -- keepalive, data, or handshake. */
 func (peer *Peer) timersAnyAuthenticatedPacketSent() {
-	if peer.timersActive() {
+	peer.ifTimersActive(func() {
 		peer.timers.sendKeepalive.Del()
-	}
+	})
 }
 
 /* Should be called after any type of authenticated packet is received -- keepalive, data, or handshake. */
 func (peer *Peer) timersAnyAuthenticatedPacketReceived() {
-	if peer.timersActive() {
+	peer.ifTimersActive(func() {
 		peer.timers.newHandshake.Del()
-	}
+	})
 }
 
 /* Should be called after a handshake initiation message is sent. */
 func (peer *Peer) timersHandshakeInitiated() {
-	if peer.timersActive() {
+	peer.ifTimersActive(func() {
 		peer.timers.retransmitHandshake.Mod(RekeyTimeout + time.Millisecond*time.Duration(fastrandn(RekeyTimeoutJitterMaxMs)))
-	}
-	peer.noteSessionHandshakeStarted()
+		peer.noteSessionHandshakeStarted()
+	})
 }
 
 /* Should be called after a handshake response message is received and processed or when getting key confirmation via the first data message. */
 func (peer *Peer) timersHandshakeComplete() {
-	if peer.timersActive() {
+	peer.ifTimersActive(func() {
 		peer.timers.retransmitHandshake.Del()
-	}
-	peer.timers.handshakeAttempts.Store(0)
-	peer.timers.sentLastMinuteHandshake.Store(false)
-	peer.lastHandshakeNano.Store(time.Now().UnixNano())
+		peer.timers.handshakeAttempts.Store(0)
+		peer.timers.sentLastMinuteHandshake.Store(false)
+		peer.lastHandshakeNano.Store(time.Now().UnixNano())
+	})
 }
 
 /* Should be called after an ephemeral key is created, which is before sending a handshake response or after receiving a handshake response. */
 func (peer *Peer) timersSessionDerived() {
-	if peer.timersActive() {
+	if active := peer.ifTimersActive(func() {
 		peer.sessionState.Lock()
 		peer.sessionState.sessionExpires = time.Now().Add(RejectAfterTime)
 		peer.noteSessionStateLocked(PeerSessionEstablished)
 		peer.sessionState.Unlock()
 		peer.timers.sessionExpired.Mod(RejectAfterTime)
 		peer.timers.zeroKeyMaterial.Mod(RejectAfterTime * 3)
-	} else {
+	}); !active {
 		peer.noteSessionState(PeerSessionEstablished)
 	}
 }
@@ -220,9 +225,11 @@ func (peer *Peer) timersSessionDerived() {
 /* Should be called before a packet with authentication -- keepalive, data, or handshake -- is sent, or after one is received. */
 func (peer *Peer) timersAnyAuthenticatedPacketTraversal() {
 	keepalive := peer.persistentKeepaliveInterval.Load()
-	if keepalive > 0 && peer.timersActive() {
-		peer.timers.persistentKeepalive.Mod(time.Duration(keepalive) * time.Second)
-	}
+	peer.ifTimersActive(func() {
+		if keepalive > 0 {
+			peer.timers.persistentKeepalive.Mod(time.Duration(keepalive) * time.Second)
+		}
+	})
 }
 
 func (peer *Peer) timersInit() {

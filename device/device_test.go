@@ -472,6 +472,35 @@ func BenchmarkUAPIGet(b *testing.B) {
 	}
 }
 
+func BenchmarkSelect(b *testing.B) {
+	chA := make(chan struct{})
+	chB := make(chan struct{})
+	close(chB)
+	for b.Loop() {
+		select {
+		case chA <- struct{}{}:
+		case <-chB:
+		}
+	}
+}
+
+func BenchmarkPeerIfRunning(b *testing.B) {
+	dev := newSynctestCapableDevice(b)
+	err := dev.Up()
+	if err != nil {
+		b.Fatal(err)
+	}
+	peer, err := dev.NewPeer([32]byte{1})
+	if err != nil {
+		b.Fatal(err)
+	}
+	peer.Start()
+	for b.Loop() {
+		peer.ifRunning(func() {
+		})
+	}
+}
+
 func goroutineLeakCheck(t *testing.T) {
 	goroutines := func() (int, []byte) {
 		p := pprof.Lookup("goroutine")

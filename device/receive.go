@@ -45,6 +45,15 @@ type QueueInboundElementsContainer struct {
 	elems   []*QueueInboundElement
 }
 
+func (q *QueueInboundElementsContainer) recycle(device *Device) {
+	q.filling.Wait()
+	for _, elem := range q.elems {
+		device.PutMessageBuffer(elem.buffer)
+		device.PutInboundElement(elem)
+	}
+	device.PutInboundElementsContainer(q)
+}
+
 // clearPointers clears elem fields that contain pointers.
 // This makes the garbage collector's life easier and
 // avoids accidentally keeping other objects around unnecessarily.
@@ -226,16 +235,10 @@ func (device *Device) RoutineReceiveIncoming(maxBatchSize int, recv conn.Receive
 			}
 		}
 		for peer, elemsContainer := range elemsByPeer {
-			if peer.isRunning.Load() {
-				elemsContainer.filling.Add(1)
-				peer.queue.inbound.c <- elemsContainer
-				device.queue.decryption.c <- elemsContainer
-			} else {
-				for _, elem := range elemsContainer.elems {
-					device.PutMessageBuffer(elem.buffer)
-					device.PutInboundElement(elem)
-				}
-				device.PutInboundElementsContainer(elemsContainer)
+			if queued := peer.ifRunning(func() {
+				peer.queueInboundElems(elemsContainer)
+			}); !queued {
+				elemsContainer.recycle(device)
 			}
 			delete(elemsByPeer, peer)
 		}
@@ -309,12 +312,13 @@ func (device *Device) RoutineHandshake(id int) {
 
 			// consume reply
 
-			if peer := entry.peer; peer.isRunning.Load() {
+			peer := entry.peer
+			peer.ifRunning(func() {
 				device.log.Verbosef("Receiving cookie response from %s", elem.endpoint.DstToString())
 				if !peer.cookieGenerator.ConsumeReply(&reply) {
 					device.log.Verbosef("Could not decrypt invalid cookie response")
 				}
-			}
+			})
 
 			goto skip
 
@@ -438,17 +442,17 @@ func (peer *Peer) RoutineSequentialReceiver(maxBatchSize int) {
 
 	bufs := make([][]byte, 0, maxBatchSize)
 
-	for elemsContainer := range peer.queue.inbound.c {
-		if elemsContainer == nil {
-			return
-		}
-		peer.processInboundContainer(elemsContainer, bufs[:0])
+	for elemsContainer := range peer.queue.inbound {
+		peer.ifRunning(func() {
+			peer.processInboundContainer(elemsContainer, bufs[:0])
+		})
+		elemsContainer.recycle(peer.device)
 	}
 }
 
 // processInboundContainer waits for the decryption routine to finish
 // filling elemsContainer, then writes the valid packets to the TUN
-// device and returns the container to the pool.
+// device. Callers are responsible for recycling elemsContainer.
 //
 // scratch is a length-0 slice used to assemble the per-packet buffers
 // passed to tun.device.Write; its backing array is reused across calls.
@@ -464,7 +468,6 @@ func (peer *Peer) processInboundContainer(elemsContainer *QueueInboundElementsCo
 	}
 
 	device := peer.device
-	defer device.PutInboundElementsContainer(elemsContainer)
 
 	// Wait for RoutineDecryption to finish filling the container. After
 	// Wait returns we have happens-before with that goroutine and are the
@@ -560,9 +563,5 @@ func (peer *Peer) processInboundContainer(elemsContainer *QueueInboundElementsCo
 		if err != nil && !device.isClosed() {
 			device.log.Errorf("Failed to write packets to TUN device: %v", err)
 		}
-	}
-	for _, elem := range elems {
-		device.PutMessageBuffer(elem.buffer)
-		device.PutInboundElement(elem)
 	}
 }

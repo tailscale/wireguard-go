@@ -23,10 +23,6 @@ func NewWaitPool(max uint32, new func() any) *WaitPool {
 	return p
 }
 
-func (p *WaitPool) hasAccounting() bool {
-	return p != nil && p.max != 0
-}
-
 func (p *WaitPool) Get() any {
 	if p.max != 0 {
 		p.lock.Lock()

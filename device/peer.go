@@ -9,6 +9,7 @@ import (
 	"container/list"
 	"errors"
 	"net/netip"
+	"runtime"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -19,13 +20,14 @@ import (
 
 type Peer struct {
 	isRunning           atomic.Bool
+	activeCritRunners   atomic.Int64
 	keypairs            Keypairs
 	handshake           Handshake
 	device              *Device
 	stopping            sync.WaitGroup // routines pending stop
 	txBytes             atomic.Uint64  // bytes send to peer (endpoint)
 	rxBytes             atomic.Uint64  // bytes received from peer
-	lastHandshakeNano   atomic.Int64   // nanoseconds since epoch
+	lastHandshakeNano   atomic.Int64   // nano seconds since epoch
 	handshakeOnUserSend atomic.Bool    // attempt handshake following next outbound transport
 
 	sessionState struct {
@@ -71,8 +73,8 @@ type Peer struct {
 
 	queue struct {
 		staged   chan *QueueOutboundElementsContainer // staged packets before a handshake is available
-		outbound *autodrainingOutboundQueue           // sequential ordering of udp transmission
-		inbound  *autodrainingInboundQueue            // sequential ordering of tun writing
+		outbound chan *QueueOutboundElementsContainer // sequential ordering of udp transmission
+		inbound  chan *QueueInboundElementsContainer  // sequential ordering of tun writing
 	}
 
 	cookieGenerator             CookieGenerator
@@ -102,8 +104,6 @@ func (device *Device) NewPeer(pk NoisePublicKey) (*Peer, error) {
 
 	peer.cookieGenerator.Init(pk)
 	peer.device = device
-	peer.queue.outbound = newAutodrainingOutboundQueue(device)
-	peer.queue.inbound = newAutodrainingInboundQueue(device)
 	peer.queue.staged = make(chan *QueueOutboundElementsContainer, QueueStagedSize)
 
 	// map public key
@@ -241,11 +241,10 @@ func (peer *Peer) Start() {
 	peer.handshake.mutex.Unlock()
 
 	peer.device.queue.encryption.wg.Add(1) // keep encryption queue open for our writes
+	peer.queue.inbound = make(chan *QueueInboundElementsContainer, QueueInboundSize)
+	peer.queue.outbound = make(chan *QueueOutboundElementsContainer, QueueOutboundSize)
 
 	peer.timersStart()
-
-	device.flushInboundQueue(peer.queue.inbound.c)
-	device.flushOutboundQueue(peer.queue.outbound.c)
 
 	// Use the device batch size, not the bind batch size, as the device size is
 	// the size of the batch pools.
@@ -322,6 +321,76 @@ func (peer *Peer) ExpireCurrentKeypairs() {
 	peer.sessionState.Unlock()
 }
 
+// ifRunning executes doCrit if the [Peer] is running, i.e. the [Peer] is not
+// stopped or stopping. It returns true if doCrit ran, otherwise it returns
+// false.
+//
+// ifRunning guarantees mutual exclusion between goroutines operating against a
+// running [Peer], and the point at which [Peer.Stop] must take ownership of
+// [Peer] state and queues.
+//
+// ifRunning opts for atomics over channels (which would require select) since
+// it must run critical sections that are part of the I/O datapath.
+func (peer *Peer) ifRunning(doCrit func()) (ranCrit bool) {
+	// Checking isRunning on both sides of the atomic increment is required
+	// to prevent starvation of [Peer.Stop] and ensure mutual exclusion around
+	// the critical section (doCrit).
+	if !peer.isRunning.Load() {
+		return false
+	}
+	peer.activeCritRunners.Add(1)
+	ranCrit = peer.isRunning.Load()
+	if ranCrit {
+		doCrit() // run the critical section
+	}
+	peer.activeCritRunners.Add(-1)
+	return ranCrit
+}
+
+func (peer *Peer) queueOutboundElems(elemsContainer *QueueOutboundElementsContainer) {
+	elemsContainer.filling.Add(1)
+	peer.queue.outbound <- elemsContainer
+	peer.device.queue.encryption.c <- elemsContainer
+}
+
+func (peer *Peer) queueInboundElems(elemsContainer *QueueInboundElementsContainer) {
+	elemsContainer.filling.Add(1)
+	peer.queue.inbound <- elemsContainer
+	peer.device.queue.decryption.c <- elemsContainer
+}
+
+func (peer *Peer) drainQueues() {
+	drainInbound := func() {
+		for {
+			select {
+			case elemsContainer := <-peer.queue.inbound:
+				elemsContainer.recycle(peer.device)
+			default:
+				return
+			}
+		}
+	}
+	drainOutbound := func() {
+		for {
+			select {
+			case elemsContainer := <-peer.queue.outbound:
+				elemsContainer.recycle(peer.device)
+			default:
+				return
+			}
+		}
+	}
+	for peer.activeCritRunners.Load() != 0 {
+		// drain while writers may be active
+		drainInbound()
+		drainOutbound()
+		runtime.Gosched() //
+	}
+	// no active writers, final drain
+	drainInbound()
+	drainOutbound()
+}
+
 func (peer *Peer) Stop() {
 	peer.state.Lock()
 	defer peer.state.Unlock()
@@ -329,13 +398,14 @@ func (peer *Peer) Stop() {
 	if !peer.isRunning.Swap(false) {
 		return
 	}
+	peer.drainQueues()
 
 	peer.device.log.Verbosef("%v - Stopping", peer)
 
 	peer.timersStop()
 	// Signal that RoutineSequentialSender and RoutineSequentialReceiver should exit.
-	peer.queue.inbound.c <- nil
-	peer.queue.outbound.c <- nil
+	close(peer.queue.inbound)
+	close(peer.queue.outbound)
 	peer.stopping.Wait()
 	peer.device.queue.encryption.wg.Done() // no more writes to encryption queue from us
 

@@ -384,71 +384,77 @@ func (device *Device) ConsumeMessageInitiation(msg *MessageInitiation, endpoint 
 	}
 
 	peer := device.LookupPeer(peerPK)
-	if peer == nil || !peer.isRunning.Load() {
+	if peer == nil {
 		return nil
 	}
 
-	handshake := &peer.handshake
+	peer.ifRunning(func() {
+		handshake := &peer.handshake
 
-	// verify identity
+		// verify identity
 
-	var timestamp tai64n.Timestamp
+		var timestamp tai64n.Timestamp
 
-	handshake.mutex.RLock()
+		handshake.mutex.RLock()
 
-	if isZero(handshake.precomputedStaticStatic[:]) {
+		if isZero(handshake.precomputedStaticStatic[:]) {
+			handshake.mutex.RUnlock()
+			peer = nil
+			return
+		}
+		KDF2(
+			&chainKey,
+			&key,
+			chainKey[:],
+			handshake.precomputedStaticStatic[:],
+		)
+		aead, _ = chacha20poly1305New(key[:])
+		_, err = aead.Open(timestamp[:0], ZeroNonce[:], msg.Timestamp[:], hash[:])
+		if err != nil {
+			handshake.mutex.RUnlock()
+			peer = nil
+			return
+		}
+		mixHash(&hash, &hash, msg.Timestamp[:])
+
+		// protect against replay & flood
+
+		replay := !timestamp.After(handshake.lastTimestamp)
+		flood := time.Since(handshake.lastInitiationConsumption) <= HandshakeInitationRate
 		handshake.mutex.RUnlock()
-		return nil
-	}
-	KDF2(
-		&chainKey,
-		&key,
-		chainKey[:],
-		handshake.precomputedStaticStatic[:],
-	)
-	aead, _ = chacha20poly1305New(key[:])
-	_, err = aead.Open(timestamp[:0], ZeroNonce[:], msg.Timestamp[:], hash[:])
-	if err != nil {
-		handshake.mutex.RUnlock()
-		return nil
-	}
-	mixHash(&hash, &hash, msg.Timestamp[:])
+		if replay {
+			device.log.Verbosef("%v - ConsumeMessageInitiation: handshake replay @ %v", peer, timestamp)
+			peer = nil
+			return
+		}
+		if flood {
+			device.log.Verbosef("%v - ConsumeMessageInitiation: handshake flood", peer)
+			peer = nil
+			return
+		}
 
-	// protect against replay & flood
+		// update handshake state
 
-	replay := !timestamp.After(handshake.lastTimestamp)
-	flood := time.Since(handshake.lastInitiationConsumption) <= HandshakeInitationRate
-	handshake.mutex.RUnlock()
-	if replay {
-		device.log.Verbosef("%v - ConsumeMessageInitiation: handshake replay @ %v", peer, timestamp)
-		return nil
-	}
-	if flood {
-		device.log.Verbosef("%v - ConsumeMessageInitiation: handshake flood", peer)
-		return nil
-	}
+		handshake.mutex.Lock()
 
-	// update handshake state
+		handshake.hash = hash
+		handshake.chainKey = chainKey
+		handshake.remoteIndex = msg.Sender
+		handshake.remoteEphemeral = msg.Ephemeral
+		if timestamp.After(handshake.lastTimestamp) {
+			handshake.lastTimestamp = timestamp
+		}
+		now := time.Now()
+		if now.After(handshake.lastInitiationConsumption) {
+			handshake.lastInitiationConsumption = now
+		}
+		handshake.state = handshakeInitiationConsumed
 
-	handshake.mutex.Lock()
+		handshake.mutex.Unlock()
 
-	handshake.hash = hash
-	handshake.chainKey = chainKey
-	handshake.remoteIndex = msg.Sender
-	handshake.remoteEphemeral = msg.Ephemeral
-	if timestamp.After(handshake.lastTimestamp) {
-		handshake.lastTimestamp = timestamp
-	}
-	now := time.Now()
-	if now.After(handshake.lastInitiationConsumption) {
-		handshake.lastInitiationConsumption = now
-	}
-	handshake.state = handshakeInitiationConsumed
-
-	handshake.mutex.Unlock()
-
-	setZero(hash[:])
-	setZero(chainKey[:])
+		setZero(hash[:])
+		setZero(chainKey[:])
+	})
 
 	return peer
 }
