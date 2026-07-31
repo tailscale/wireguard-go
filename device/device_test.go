@@ -473,33 +473,29 @@ func BenchmarkUAPIGet(b *testing.B) {
 }
 
 func BenchmarkSelect(b *testing.B) {
-	chA := make(chan struct{}, b.N)
-	chB := make(chan struct{})
+	q := make(chan *QueueOutboundElementsContainer, b.N)
+	stopped := make(chan struct{})
+	elem := new(QueueOutboundElementsContainer)
+
 	b.ResetTimer()
 	for range b.N {
 		select {
-		case chA <- struct{}{}:
-		case <-chB:
+		case q <- elem:
+		case <-stopped:
 		}
 	}
 }
 
 func BenchmarkPeerIfRunning(b *testing.B) {
-	dev := newSynctestCapableDevice(b)
-	err := dev.Up()
-	if err != nil {
-		b.Fatal(err)
-	}
-	peer, err := dev.NewPeer([32]byte{1})
-	if err != nil {
-		b.Fatal(err)
-	}
-	q := make(chan struct{}, b.N)
-	peer.Start()
+	peer := new(Peer)
+	peer.isRunning.Store(true)
+	peer.queue.outbound = make(chan *QueueOutboundElementsContainer, b.N)
+	elem := new(QueueOutboundElementsContainer)
+
 	b.ResetTimer()
 	for range b.N {
 		peer.ifRunning(func() {
-			q <- struct{}{}
+			peer.queue.outbound <- elem
 		})
 	}
 }
