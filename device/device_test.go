@@ -473,10 +473,10 @@ func BenchmarkUAPIGet(b *testing.B) {
 }
 
 func BenchmarkSelect(b *testing.B) {
-	chA := make(chan struct{})
+	chA := make(chan struct{}, b.N)
 	chB := make(chan struct{})
-	close(chB)
-	for b.Loop() {
+	b.ResetTimer()
+	for range b.N {
 		select {
 		case chA <- struct{}{}:
 		case <-chB:
@@ -494,9 +494,12 @@ func BenchmarkPeerIfRunning(b *testing.B) {
 	if err != nil {
 		b.Fatal(err)
 	}
+	q := make(chan struct{}, b.N)
 	peer.Start()
-	for b.Loop() {
+	b.ResetTimer()
+	for range b.N {
 		peer.ifRunning(func() {
+			q <- struct{}{}
 		})
 	}
 }
