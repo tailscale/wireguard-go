@@ -473,15 +473,31 @@ func BenchmarkUAPIGet(b *testing.B) {
 }
 
 func BenchmarkSelect(b *testing.B) {
-	q := make(chan *QueueOutboundElementsContainer, b.N)
+	peer := new(Peer)
+	peer.isRunning.Store(true)
+	peer.queue.outbound = make(chan *QueueOutboundElementsContainer, b.N)
 	stopped := make(chan struct{})
 	elem := new(QueueOutboundElementsContainer)
 
 	b.ResetTimer()
 	for range b.N {
 		select {
-		case q <- elem:
+		case peer.queue.outbound <- elem:
 		case <-stopped:
+		}
+	}
+}
+
+func BenchmarkPeerIsRunningLoad(b *testing.B) {
+	peer := new(Peer)
+	peer.isRunning.Store(true)
+	peer.queue.outbound = make(chan *QueueOutboundElementsContainer, b.N)
+	elem := new(QueueOutboundElementsContainer)
+
+	b.ResetTimer()
+	for range b.N {
+		if peer.isRunning.Load() {
+			peer.queue.outbound <- elem
 		}
 	}
 }
