@@ -18,6 +18,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/tailscale/wireguard-go/conn"
@@ -553,4 +554,101 @@ func TestBatchSize(t *testing.T) {
 	if want, got := 128, d.BatchSize(); got != want {
 		t.Errorf("expected batch size %d, got %d", want, got)
 	}
+}
+
+// BenchmarkQueueOutboundIfRunning benchmarks [Peer.queueOutboundIfRunning]
+// alongside alternative approaches.
+func BenchmarkQueueOutboundIfRunning(b *testing.B) {
+	p := &Peer{device: &Device{}}
+	p.runningState.isRunning.Store(true)
+	elems := &QueueOutboundElementsContainer{}
+	initChannels := func(b *testing.B) {
+		p.device.queue.encryption = &outboundQueue{c: make(chan *QueueOutboundElementsContainer, b.N)}
+		p.queue.outbound = make(chan *QueueOutboundElementsContainer, b.N)
+	}
+
+	b.Run("queueOutboundIfRunning", func(b *testing.B) {
+		initChannels(b)
+		b.ReportAllocs()
+		b.ResetTimer()
+		for range b.N {
+			p.queueOutboundIfRunning(elems)
+		}
+	})
+
+	// This is equivalent to the logic that preceded [Peer.queueOutboundIfRunning].
+	// The atomic load raced with [Peer.Stop], making it deadlock and leak
+	// prone.
+	b.Run("racey-load-bare-write", func(b *testing.B) {
+		initChannels(b)
+		b.ReportAllocs()
+		b.ResetTimer()
+		for range b.N {
+			if p.runningState.isRunning.Load() {
+				elems.filling.Add(1)
+				p.queue.outbound <- elems
+				p.device.queue.encryption.c <- elems
+			}
+		}
+	})
+
+	// Adding a select{} is a valid and correct alternative approach to
+	// [Peer.queueOutboundIfRunning], but select{} with multi-channel cases
+	// tends to underperform the atomics-based approach.
+	b.Run("2-channel-select", func(b *testing.B) {
+		initChannels(b)
+		closedCh := make(chan struct{})
+		b.ReportAllocs()
+		b.ResetTimer()
+		for range b.N {
+			elems.filling.Add(1)
+			select {
+			case p.queue.outbound <- elems:
+			case <-closedCh:
+			}
+			p.device.queue.encryption.c <- elems
+		}
+	})
+}
+
+func TestPeerIfRunningWaitQueueActors(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		device := newSynctestCapableDevice(t)
+		peer := &Peer{device: device}
+		// unbuffered so we can durably block and verify [Peer.waitQueueActors]
+		// drains.
+		peer.queue.inbound = make(chan *QueueInboundElementsContainer)
+		peer.queue.outbound = make(chan *QueueOutboundElementsContainer)
+
+		// mark peer as running
+		peer.runningState.isRunning.Store(true)
+
+		elems := device.GetOutboundElementsContainer()
+		actorDone := make(chan bool, 1)
+		go func() {
+			actorDone <- peer.doIfRunning(func() {
+				peer.queue.outbound <- elems
+			})
+		}()
+
+		// actor should be blocked writing to the unbuffered channel
+		synctest.Wait()
+		if got := peer.runningState.queueWriters.Load(); got != 1 {
+			t.Fatalf("queue writers = %d, want 1", got)
+		}
+
+		// mark peer as stopping
+		peer.runningState.isRunning.Store(false)
+
+		// waitQueueActors should drain the channel, unblock the actor, and
+		// wait until it exits its critical section
+		peer.waitQueueActors()
+
+		if ran := <-actorDone; !ran {
+			t.Fatal("ifRunning crit did not run")
+		}
+		if got := peer.runningState.queueWriters.Load(); got != 0 {
+			t.Fatalf("queue writers = %d, want 0", got)
+		}
+	})
 }
