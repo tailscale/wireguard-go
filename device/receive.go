@@ -226,17 +226,7 @@ func (device *Device) RoutineReceiveIncoming(maxBatchSize int, recv conn.Receive
 			}
 		}
 		for peer, elemsContainer := range elemsByPeer {
-			if peer.isRunning.Load() {
-				elemsContainer.filling.Add(1)
-				peer.queue.inbound.c <- elemsContainer
-				device.queue.decryption.c <- elemsContainer
-			} else {
-				for _, elem := range elemsContainer.elems {
-					device.PutMessageBuffer(elem.buffer)
-					device.PutInboundElement(elem)
-				}
-				device.PutInboundElementsContainer(elemsContainer)
-			}
+			peer.queueInboundIfRunning(elemsContainer)
 			delete(elemsByPeer, peer)
 		}
 	}
@@ -309,7 +299,7 @@ func (device *Device) RoutineHandshake(id int) {
 
 			// consume reply
 
-			if peer := entry.peer; peer.isRunning.Load() {
+			if peer := entry.peer; peer.runningState.isRunning.Load() {
 				device.log.Verbosef("Receiving cookie response from %s", elem.endpoint.DstToString())
 				if !peer.cookieGenerator.ConsumeReply(&reply) {
 					device.log.Verbosef("Could not decrypt invalid cookie response")
@@ -432,16 +422,13 @@ func (peer *Peer) RoutineSequentialReceiver(maxBatchSize int) {
 	device := peer.device
 	defer func() {
 		device.log.Verbosef("%v - Routine: sequential receiver - stopped", peer)
-		peer.stopping.Done()
+		peer.runningState.queueReaders.Done()
 	}()
 	device.log.Verbosef("%v - Routine: sequential receiver - started", peer)
 
 	bufs := make([][]byte, 0, maxBatchSize)
 
-	for elemsContainer := range peer.queue.inbound.c {
-		if elemsContainer == nil {
-			return
-		}
+	for elemsContainer := range peer.queue.inbound {
 		peer.processInboundContainer(elemsContainer, bufs[:0])
 	}
 }
