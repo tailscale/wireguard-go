@@ -20,6 +20,8 @@ import (
 )
 
 type Device struct {
+	config config
+
 	state struct {
 		// state holds the device's state. It is accessed atomically.
 		// Use the device.deviceState method to read it.
@@ -94,6 +96,79 @@ type Device struct {
 	ipcMutex sync.RWMutex
 	closed   chan struct{}
 	log      *Logger
+}
+
+type config struct {
+	queueStagedSize            int
+	queueOutboundSize          int
+	queueInboundSize           int
+	queueHandshakeSize         int
+	preallocatedBuffersPerPool uint32
+}
+
+func defaultConfig() config {
+	return config{
+		queueStagedSize:            DefaultQueueStagedSize,
+		queueOutboundSize:          DefaultQueueOutboundSize,
+		queueInboundSize:           DefaultQueueInboundSize,
+		queueHandshakeSize:         DefaultQueueHandshakeSize,
+		preallocatedBuffersPerPool: DefaultPreallocatedBuffersPerPool,
+	}
+}
+
+// An Option configures a [Device].
+type Option interface {
+	apply(*config)
+}
+
+type optionFunc func(*config)
+
+func (f optionFunc) apply(config *config) {
+	f(config)
+}
+
+// WithQueueStagedSize sets the capacity of each peer's staged packet queue.
+// Staged packet queues must be buffered, so max(1, size) is applied to the
+// user-supplied value. [DefaultQueueStagedSize] is the default.
+func WithQueueStagedSize(size int) Option {
+	return optionFunc(func(config *config) {
+		config.queueStagedSize = max(1, size)
+	})
+}
+
+// WithQueueOutboundSize sets the capacity of the device and per-peer outbound
+// packet queues. [DefaultQueueOutboundSize] is the default.
+func WithQueueOutboundSize(size int) Option {
+	return optionFunc(func(config *config) {
+		config.queueOutboundSize = size
+	})
+}
+
+// WithQueueInboundSize sets the capacity of the device and per-peer inbound
+// packet queues. [DefaultQueueInboundSize] is the default.
+func WithQueueInboundSize(size int) Option {
+	return optionFunc(func(config *config) {
+		config.queueInboundSize = size
+	})
+}
+
+// WithQueueHandshakeSize sets the capacity of the device's handshake queue.
+// [DefaultQueueHandshakeSize] is the default.
+func WithQueueHandshakeSize(size int) Option {
+	return optionFunc(func(config *config) {
+		config.queueHandshakeSize = size
+	})
+}
+
+// WithPreallocatedBuffersPerPool sets the maximum number of packet memory
+// pool outstanding items. A value of zero is unlimited. Care must be taken to
+// not set a size that is too small, which can lead to immediate deadlock, or
+// increase the probability of deadlock once packets start flowing.
+// See tailscale/corp#46396. [DefaultPreallocatedBuffersPerPool] is the default.
+func WithPreallocatedBuffersPerPool(size uint32) Option {
+	return optionFunc(func(config *config) {
+		config.preallocatedBuffersPerPool = size
+	})
 }
 
 // deviceState represents the state of a Device.
@@ -230,7 +305,9 @@ func (device *Device) Down() error {
 func (device *Device) IsUnderLoad() bool {
 	// check if currently under load
 	now := time.Now()
-	underLoad := len(device.queue.handshake.c) >= QueueHandshakeSize/8
+	// max(1, ...) is required on the right hand side, otherwise underLoad would
+	// always be true when queueHandshakeSize < 8.
+	underLoad := len(device.queue.handshake.c) >= max(1, device.config.queueHandshakeSize/8)
 	if underLoad {
 		device.rate.underLoadUntil.Store(now.Add(UnderLoadAfterTime).UnixNano())
 		return true
@@ -294,8 +371,11 @@ func (device *Device) SetPrivateKey(sk NoisePrivateKey) error {
 	return nil
 }
 
-func NewDevice(tunDevice tun.Device, bind conn.Bind, logger *Logger) *Device {
-	device := new(Device)
+func NewDevice(tunDevice tun.Device, bind conn.Bind, logger *Logger, opts ...Option) *Device {
+	device := &Device{config: defaultConfig()}
+	for _, opt := range opts {
+		opt.apply(&device.config)
+	}
 	device.state.state.Store(uint32(deviceStateDown))
 	device.closed = make(chan struct{})
 	device.log = logger
@@ -315,9 +395,9 @@ func NewDevice(tunDevice tun.Device, bind conn.Bind, logger *Logger) *Device {
 
 	// create queues
 
-	device.queue.handshake = newHandshakeQueue()
-	device.queue.encryption = newOutboundQueue()
-	device.queue.decryption = newInboundQueue()
+	device.queue.handshake = newHandshakeQueue(device.config.queueHandshakeSize)
+	device.queue.encryption = newOutboundQueue(device.config.queueOutboundSize)
+	device.queue.decryption = newInboundQueue(device.config.queueInboundSize)
 
 	// start workers
 

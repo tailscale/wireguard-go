@@ -47,21 +47,21 @@ func (p *WaitPool) Put(x any) {
 }
 
 func (device *Device) PopulatePools() {
-	device.pool.inboundElementsContainer = NewWaitPool(PreallocatedBuffersPerPool, func() any {
+	device.pool.inboundElementsContainer = NewWaitPool(device.config.preallocatedBuffersPerPool, func() any {
 		s := make([]*QueueInboundElement, 0, device.BatchSize())
 		return &QueueInboundElementsContainer{elems: s}
 	})
-	device.pool.outboundElementsContainer = NewWaitPool(PreallocatedBuffersPerPool, func() any {
+	device.pool.outboundElementsContainer = NewWaitPool(device.config.preallocatedBuffersPerPool, func() any {
 		s := make([]*QueueOutboundElement, 0, device.BatchSize())
 		return &QueueOutboundElementsContainer{elems: s}
 	})
-	device.pool.messageBuffers = NewWaitPool(PreallocatedBuffersPerPool, func() any {
+	device.pool.messageBuffers = NewWaitPool(device.config.preallocatedBuffersPerPool, func() any {
 		return new([MaxMessageSize]byte)
 	})
-	device.pool.inboundElements = NewWaitPool(PreallocatedBuffersPerPool, func() any {
+	device.pool.inboundElements = NewWaitPool(device.config.preallocatedBuffersPerPool, func() any {
 		return new(QueueInboundElement)
 	})
-	device.pool.outboundElements = NewWaitPool(PreallocatedBuffersPerPool, func() any {
+	device.pool.outboundElements = NewWaitPool(device.config.preallocatedBuffersPerPool, func() any {
 		return new(QueueOutboundElement)
 	})
 }

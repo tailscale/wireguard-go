@@ -22,9 +22,9 @@ type outboundQueue struct {
 	wg sync.WaitGroup
 }
 
-func newOutboundQueue() *outboundQueue {
+func newOutboundQueue(capacity int) *outboundQueue {
 	q := &outboundQueue{
-		c: make(chan *QueueOutboundElementsContainer, QueueOutboundSize),
+		c: make(chan *QueueOutboundElementsContainer, capacity),
 	}
 	q.wg.Add(1)
 	go func() {
@@ -40,9 +40,9 @@ type inboundQueue struct {
 	wg sync.WaitGroup
 }
 
-func newInboundQueue() *inboundQueue {
+func newInboundQueue(capacity int) *inboundQueue {
 	q := &inboundQueue{
-		c: make(chan *QueueInboundElementsContainer, QueueInboundSize),
+		c: make(chan *QueueInboundElementsContainer, capacity),
 	}
 	q.wg.Add(1)
 	go func() {
@@ -58,9 +58,9 @@ type handshakeQueue struct {
 	wg sync.WaitGroup
 }
 
-func newHandshakeQueue() *handshakeQueue {
+func newHandshakeQueue(capacity int) *handshakeQueue {
 	q := &handshakeQueue{
-		c: make(chan QueueHandshakeElement, QueueHandshakeSize),
+		c: make(chan QueueHandshakeElement, capacity),
 	}
 	q.wg.Add(1)
 	go func() {
