@@ -652,3 +652,36 @@ func TestPeerIfRunningWaitQueueActors(t *testing.T) {
 		}
 	})
 }
+
+func TestDeviceConfig(t *testing.T) {
+	c := defaultConfig()
+	if c.queueStagedSize != DefaultQueueStagedSize ||
+		c.queueOutboundSize != DefaultQueueOutboundSize ||
+		c.queueInboundSize != DefaultQueueInboundSize ||
+		c.queueHandshakeSize != DefaultQueueHandshakeSize ||
+		c.preallocatedBuffersPerPool != DefaultPreallocatedBuffersPerPool {
+		t.Fatalf("default device config: %+v", c)
+	}
+
+}
+
+func TestDeviceOptions(t *testing.T) {
+	c := defaultConfig()
+	opts := []Option{
+		WithQueueStagedSize(1),
+		WithQueueOutboundSize(2),
+		WithQueueInboundSize(3),
+		WithQueueHandshakeSize(4),
+		WithPreallocatedBuffersPerPool(5),
+	}
+	for _, opt := range opts {
+		opt.apply(&c)
+	}
+	if c.queueStagedSize != 1 ||
+		c.queueOutboundSize != 2 ||
+		c.queueInboundSize != 3 ||
+		c.queueHandshakeSize != 4 ||
+		c.preallocatedBuffersPerPool != 5 {
+		t.Fatalf("configured device config: %+v", c)
+	}
+}

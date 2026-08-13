@@ -121,7 +121,7 @@ func (device *Device) NewPeer(pk NoisePublicKey) (*Peer, error) {
 
 	// staged is never closed, and it can be accessed concurrent to [Peer.Start],
 	// so we init here instead of [Peer.Start].
-	peer.queue.staged = make(chan *QueueOutboundElementsContainer, QueueStagedSize)
+	peer.queue.staged = make(chan *QueueOutboundElementsContainer, device.config.queueStagedSize)
 
 	// map public key
 	_, ok := device.peers.keyMap[pk]
@@ -250,8 +250,8 @@ func (peer *Peer) Start() {
 	device.log.Verbosef("%v - Starting", peer)
 
 	// init inbound & outbound packet queues
-	peer.queue.outbound = make(chan *QueueOutboundElementsContainer, QueueOutboundSize)
-	peer.queue.inbound = make(chan *QueueInboundElementsContainer, QueueInboundSize)
+	peer.queue.outbound = make(chan *QueueOutboundElementsContainer, device.config.queueOutboundSize)
+	peer.queue.inbound = make(chan *QueueInboundElementsContainer, device.config.queueInboundSize)
 
 	// reset routine state
 	peer.runningState.queueReaders.Wait()
