@@ -55,14 +55,20 @@ func (device *Device) PopulatePools() {
 		s := make([]*QueueOutboundElement, 0, device.BatchSize())
 		return &QueueOutboundElementsContainer{elems: s}
 	})
-	device.pool.messageBuffers = NewWaitPool(device.config.preallocatedBuffersPerPool, func() any {
-		return new([MaxMessageSize]byte)
-	})
 	device.pool.inboundElements = NewWaitPool(device.config.preallocatedBuffersPerPool, func() any {
 		return new(QueueInboundElement)
 	})
 	device.pool.outboundElements = NewWaitPool(device.config.preallocatedBuffersPerPool, func() any {
 		return new(QueueOutboundElement)
+	})
+	packetBufSize := singlePacketSlabSize
+	if device.BatchSize() > 1 {
+		packetBufSize = batchingSlabSize
+	}
+	device.pool.packetBufs = NewWaitPool(device.config.preallocatedBuffersPerPool, func() any {
+		return newPacketBuf(packetBufSize, func(buf *packetBuf) {
+			device.pool.packetBufs.Put(buf)
+		})
 	})
 }
 
@@ -92,12 +98,10 @@ func (device *Device) PutOutboundElementsContainer(c *QueueOutboundElementsConta
 	device.pool.outboundElementsContainer.Put(c)
 }
 
-func (device *Device) GetMessageBuffer() *[MaxMessageSize]byte {
-	return device.pool.messageBuffers.Get().(*[MaxMessageSize]byte)
-}
-
-func (device *Device) PutMessageBuffer(msg *[MaxMessageSize]byte) {
-	device.pool.messageBuffers.Put(msg)
+func (device *Device) getPacketBuf() *packetBuf {
+	b := device.pool.packetBufs.Get().(*packetBuf)
+	b.incRef()
+	return b
 }
 
 func (device *Device) GetInboundElement() *QueueInboundElement {
@@ -105,15 +109,25 @@ func (device *Device) GetInboundElement() *QueueInboundElement {
 }
 
 func (device *Device) PutInboundElement(elem *QueueInboundElement) {
+	elem.buffer.decRef()
 	elem.clearPointers()
 	device.pool.inboundElements.Put(elem)
 }
 
+// GetOutboundElement returns a [*QueueOutboundElement] with all its fields
+// set to their respective zero values.
 func (device *Device) GetOutboundElement() *QueueOutboundElement {
-	return device.pool.outboundElements.Get().(*QueueOutboundElement)
+	elem := device.pool.outboundElements.Get().(*QueueOutboundElement)
+	elem.plaintextOffset = 0
+	elem.nonce = 0
+	// buffer, packet, keypair, and peer were cleared (if necessary) by [QueueOutboundElement.clearPointers].
+	return elem
 }
 
 func (device *Device) PutOutboundElement(elem *QueueOutboundElement) {
+	if elem.buffer != nil {
+		elem.buffer.decRef()
+	}
 	elem.clearPointers()
 	device.pool.outboundElements.Put(elem)
 }

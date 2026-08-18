@@ -107,33 +107,34 @@ func CreateNetTUN(localAddresses, dnsServers []netip.Addr, mtu int) (tun.Device,
 	return dev, (*Net)(dev), nil
 }
 
-func (tun *netTun) Name() (string, error) {
+func (t *netTun) Name() (string, error) {
 	return "go", nil
 }
 
-func (tun *netTun) File() *os.File {
+func (t *netTun) File() *os.File {
 	return nil
 }
 
-func (tun *netTun) Events() <-chan tun.Event {
-	return tun.events
+func (t *netTun) Events() <-chan tun.Event {
+	return t.events
 }
 
-func (tun *netTun) Read(buf [][]byte, sizes []int, offset int) (int, error) {
-	view, ok := <-tun.incomingPacket
+func (t *netTun) Read(slab []byte, packets []tun.ReadPacket) (int, error) {
+	view, ok := <-t.incomingPacket
 	if !ok {
 		return 0, os.ErrClosed
 	}
 
-	n, err := view.Read(buf[0][offset:])
+	n, err := view.Read(slab[tun.ReadPacketSpacing : len(slab)-tun.ReadPacketSpacing])
 	if err != nil {
 		return 0, err
 	}
-	sizes[0] = n
+	packets[0].Size = n
+	packets[0].Offset = tun.ReadPacketSpacing
 	return 1, nil
 }
 
-func (tun *netTun) Write(buf [][]byte, offset int) (int, error) {
+func (t *netTun) Write(buf [][]byte, offset int) (int, error) {
 	for _, buf := range buf {
 		packet := buf[offset:]
 		if len(packet) == 0 {
@@ -143,9 +144,9 @@ func (tun *netTun) Write(buf [][]byte, offset int) (int, error) {
 		pkb := stack.NewPacketBuffer(stack.PacketBufferOptions{Payload: buffer.MakeWithData(packet)})
 		switch packet[0] >> 4 {
 		case 4:
-			tun.ep.InjectInbound(header.IPv4ProtocolNumber, pkb)
+			t.ep.InjectInbound(header.IPv4ProtocolNumber, pkb)
 		case 6:
-			tun.ep.InjectInbound(header.IPv6ProtocolNumber, pkb)
+			t.ep.InjectInbound(header.IPv6ProtocolNumber, pkb)
 		default:
 			return 0, syscall.EAFNOSUPPORT
 		}
@@ -153,8 +154,8 @@ func (tun *netTun) Write(buf [][]byte, offset int) (int, error) {
 	return len(buf), nil
 }
 
-func (tun *netTun) WriteNotify() {
-	pkt := tun.ep.Read()
+func (t *netTun) WriteNotify() {
+	pkt := t.ep.Read()
 	if pkt.IsNil() {
 		return
 	}
@@ -162,30 +163,30 @@ func (tun *netTun) WriteNotify() {
 	view := pkt.ToView()
 	pkt.DecRef()
 
-	tun.incomingPacket <- view
+	t.incomingPacket <- view
 }
 
-func (tun *netTun) Close() error {
-	tun.stack.RemoveNIC(1)
+func (t *netTun) Close() error {
+	t.stack.RemoveNIC(1)
 
-	if tun.events != nil {
-		close(tun.events)
+	if t.events != nil {
+		close(t.events)
 	}
 
-	tun.ep.Close()
+	t.ep.Close()
 
-	if tun.incomingPacket != nil {
-		close(tun.incomingPacket)
+	if t.incomingPacket != nil {
+		close(t.incomingPacket)
 	}
 
 	return nil
 }
 
-func (tun *netTun) MTU() (int, error) {
-	return tun.mtu, nil
+func (t *netTun) MTU() (int, error) {
+	return t.mtu, nil
 }
 
-func (tun *netTun) BatchSize() int {
+func (t *netTun) BatchSize() int {
 	return 1
 }
 

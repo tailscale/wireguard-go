@@ -77,9 +77,9 @@ type Device struct {
 	pool struct {
 		inboundElementsContainer  *WaitPool
 		outboundElementsContainer *WaitPool
-		messageBuffers            *WaitPool
 		inboundElements           *WaitPool
 		outboundElements          *WaitPool
+		packetBufs                *WaitPool
 	}
 
 	queue struct {

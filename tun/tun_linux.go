@@ -409,10 +409,11 @@ func (tun *NativeTun) Write(bufs [][]byte, offset int) (int, error) {
 	return total, errs
 }
 
-// handleVirtioRead splits in into bufs, leaving offset bytes at the front of
-// each buffer. It mutates sizes to reflect the size of each element of bufs,
-// and returns the number of packets read.
-func handleVirtioRead(in []byte, bufs [][]byte, sizes []int, offset int) (int, error) {
+// handleVirtioRead splits in into slab, leaving [ReadPacketSpacing] bytes at
+// the front of the first packet, between every adjacent packet, and at the end
+// of the last packet. It mutates packets to reflect the size and offset of each
+// packet in slab, and returns the number of packets read.
+func handleVirtioRead(in []byte, slab []byte, packets []ReadPacket) (int, error) {
 	var hdr virtioNetHdr
 	err := hdr.decode(in)
 	if err != nil {
@@ -444,17 +445,17 @@ func handleVirtioRead(in []byte, bufs [][]byte, sizes []int, offset int) (int, e
 		options.HdrLen = options.CsumStart + tcpHLen
 	}
 
-	return GSOSplit(in, options, bufs, sizes, offset)
+	return GSOSplit(in, options, slab, packets, ReadPacketSpacing)
 }
 
-func (tun *NativeTun) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
+func (tun *NativeTun) Read(slab []byte, packets []ReadPacket) (int, error) {
 	tun.readOpMu.Lock()
 	defer tun.readOpMu.Unlock()
 	select {
 	case err := <-tun.errors:
 		return 0, err
 	default:
-		readInto := bufs[0][offset:]
+		readInto := slab[ReadPacketSpacing : len(slab)-ReadPacketSpacing]
 		if tun.vnetHdr {
 			readInto = tun.readBuff[:]
 		}
@@ -466,9 +467,10 @@ func (tun *NativeTun) Read(bufs [][]byte, sizes []int, offset int) (int, error) 
 			return 0, err
 		}
 		if tun.vnetHdr {
-			return handleVirtioRead(readInto[:n], bufs, sizes, offset)
+			return handleVirtioRead(readInto[:n], slab, packets)
 		} else {
-			sizes[0] = n
+			packets[0].Size = n
+			packets[0].Offset = ReadPacketSpacing
 			return 1, nil
 		}
 	}
