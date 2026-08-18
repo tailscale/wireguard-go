@@ -110,13 +110,14 @@ type chTun struct {
 
 func (t *chTun) File() *os.File { return nil }
 
-func (t *chTun) Read(packets [][]byte, sizes []int, offset int) (int, error) {
+func (t *chTun) Read(slab []byte, packets []tun.ReadPacket) (int, error) {
 	select {
 	case <-t.c.closed:
 		return 0, os.ErrClosed
 	case msg := <-t.c.Outbound:
-		n := copy(packets[0][offset:], msg)
-		sizes[0] = n
+		n := copy(slab[tun.ReadPacketSpacing:len(slab)-tun.ReadPacketSpacing], msg)
+		packets[0].Offset = tun.ReadPacketSpacing
+		packets[0].Size = n
 		return 1, nil
 	}
 }

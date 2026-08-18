@@ -350,7 +350,6 @@ func (peer *Peer) queueOutboundIfRunning(elems *QueueOutboundElementsContainer) 
 		peer.device.queue.encryption.c <- elems
 	}); !queued {
 		for _, elem := range elems.elems {
-			peer.device.PutMessageBuffer(elem.buffer)
 			peer.device.PutOutboundElement(elem)
 		}
 		peer.device.PutOutboundElementsContainer(elems)
@@ -368,7 +367,6 @@ func (peer *Peer) queueInboundIfRunning(elems *QueueInboundElementsContainer) (q
 		peer.device.queue.decryption.c <- elems
 	}); !queued {
 		for _, elem := range elems.elems {
-			peer.device.PutMessageBuffer(elem.buffer)
 			peer.device.PutInboundElement(elem)
 		}
 		peer.device.PutInboundElementsContainer(elems)
@@ -413,14 +411,12 @@ func (peer *Peer) waitQueueActors() {
 			case container := <-peer.queue.inbound:
 				container.filling.Wait()
 				for _, elem := range container.elems {
-					peer.device.PutMessageBuffer(elem.buffer)
 					peer.device.PutInboundElement(elem)
 				}
 				peer.device.PutInboundElementsContainer(container)
 			case container := <-peer.queue.outbound:
 				container.filling.Wait()
 				for _, elem := range container.elems {
-					peer.device.PutMessageBuffer(elem.buffer)
 					peer.device.PutOutboundElement(elem)
 				}
 				peer.device.PutOutboundElementsContainer(container)

@@ -235,13 +235,10 @@ func Test_handleVirtioRead(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			out := make([][]byte, conn.IdealBatchSize)
-			sizes := make([]int, conn.IdealBatchSize)
-			for i := range out {
-				out[i] = make([]byte, 65535)
-			}
+			out := make([]byte, 2*(1<<16-1))
+			packets := make([]ReadPacket, conn.IdealBatchSize)
 			tt.hdr.encode(tt.pktIn)
-			n, err := handleVirtioRead(tt.pktIn, out, sizes, offset)
+			n, err := handleVirtioRead(tt.pktIn, out, packets)
 			if err != nil {
 				if tt.wantErr {
 					return
@@ -251,9 +248,24 @@ func Test_handleVirtioRead(t *testing.T) {
 			if n != len(tt.wantLens) {
 				t.Fatalf("got %d packets, wanted %d", n, len(tt.wantLens))
 			}
-			for i := range tt.wantLens {
-				if tt.wantLens[i] != sizes[i] {
-					t.Fatalf("wantLens[%d]: %d != outSizes: %d", i, tt.wantLens[i], sizes[i])
+			for i, wantLen := range tt.wantLens {
+				if packets[i].Size != wantLen {
+					t.Fatalf(
+						"packet[%d] size: got %d, want %d",
+						i, packets[i].Size, wantLen,
+					)
+				}
+
+				wantOffset := ReadPacketSpacing
+				if i > 0 {
+					prev := packets[i-1]
+					wantOffset = prev.Offset + prev.Size + ReadPacketSpacing
+				}
+				if packets[i].Offset != wantOffset {
+					t.Fatalf(
+						"packet[%d] offset: got %d, want %d",
+						i, packets[i].Offset, wantOffset,
+					)
 				}
 			}
 		})

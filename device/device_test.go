@@ -518,7 +518,7 @@ type fakeTUNDeviceSized struct {
 }
 
 func (t *fakeTUNDeviceSized) File() *os.File { return nil }
-func (t *fakeTUNDeviceSized) Read(bufs [][]byte, sizes []int, offset int) (n int, err error) {
+func (t *fakeTUNDeviceSized) Read(slab []byte, packets []tun.ReadPacket) (n int, err error) {
 	return 0, nil
 }
 func (t *fakeTUNDeviceSized) Write(bufs [][]byte, offset int) (int, error) { return 0, nil }

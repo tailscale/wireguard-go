@@ -11,7 +11,7 @@ import (
 
 func TestPrettyName(t *testing.T) {
 	var (
-		recvFunc ReceiveFunc = func(bufs [][]byte, sizes []int, eps []Endpoint) (n int, err error) { return }
+		recvFunc ReceiveFunc = func(slab []byte, packets []ReceivedPacket) (n int, err error) { return }
 	)
 
 	const want = "TestPrettyName"
