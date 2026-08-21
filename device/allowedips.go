@@ -426,9 +426,6 @@ func (peer *Peer) AllowedPeerSourceIP(src netip.Addr) bool {
 	return false
 }
 
-// fakePeer is a zero Peer used only as a placeholder in tries used by mkIPInCIDRsTestFunc.
-var fakePeer Peer
-
 // mkIPInCIDRsTestFunc returns a function that tests whether an IP address is
 // contained in any of the given CIDRs.
 func mkIPInCIDRsTestFunc(cidrs []netip.Prefix) func(netip.Addr) bool {
@@ -451,17 +448,20 @@ func mkIPInCIDRsTestFunc(cidrs []netip.Prefix) func(netip.Addr) bool {
 			return false
 		}
 	}
-	// Make a trie for faster lookups. We use a dummy Peer.
+	// Make a trie for faster lookups. Use a local dummy Peer so its
+	// trieEntries and the whole trie can be collected once the returned
+	// closure is gone.
+	fakePeer := new(Peer)
 	var a AllowedIPs
 	for _, c := range cidrs {
-		a.Insert(c, &fakePeer)
+		a.Insert(c, fakePeer)
 	}
 	return func(addr netip.Addr) bool {
 		switch {
 		case addr.Is4():
-			return a.ipv4.lookup4(addr.As4()) == &fakePeer
+			return a.ipv4.lookup4(addr.As4()) == fakePeer
 		default:
-			return a.ipv6.lookup6(addr.As16()) == &fakePeer
+			return a.ipv6.lookup6(addr.As16()) == fakePeer
 		}
 	}
 }
