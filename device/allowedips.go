@@ -426,6 +426,10 @@ func (peer *Peer) AllowedPeerSourceIP(src netip.Addr) bool {
 	return false
 }
 
+// cidrLinearSearchMax is the largest number of CIDRs for which
+// mkIPInCIDRsTestFunc does a linear search instead of building a trie.
+const cidrLinearSearchMax = 4
+
 // mkIPInCIDRsTestFunc returns a function that tests whether an IP address is
 // contained in any of the given CIDRs.
 func mkIPInCIDRsTestFunc(cidrs []netip.Prefix) func(netip.Addr) bool {
@@ -435,7 +439,7 @@ func mkIPInCIDRsTestFunc(cidrs []netip.Prefix) func(netip.Addr) bool {
 	if len(cidrs) == 1 {
 		return func(addr netip.Addr) bool { return cidrs[0].Contains(addr) }
 	}
-	if len(cidrs) <= 4 {
+	if len(cidrs) <= cidrLinearSearchMax {
 		// For small numbers of CIDRs, just do a linear search. The trie construction
 		// is more expensive than the linear search, and the test function is faster
 		// than the trie lookup, so this is a net win.

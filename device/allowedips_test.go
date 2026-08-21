@@ -254,10 +254,15 @@ func TestTrieIPv6(t *testing.T) {
 // trieEntries list and can never be collected, so live heap objects grow with
 // each call.
 func TestMkIPInCIDRsTestFuncNoLeak(t *testing.T) {
-	// Enough CIDRs to force the trie path (>4).
-	cidrs := make([]netip.Prefix, 0, 16)
-	for i := 0; i < 16; i++ {
-		cidrs = append(cidrs, netip.MustParsePrefix(fmt.Sprintf("10.%d.0.0/16", i)))
+	// One more than the linear-search max forces the trie path.
+	n := cidrLinearSearchMax + 1
+	if n > 1<<16 {
+		// The 10.a.b.0/24 scheme below only has 2^16 distinct prefixes.
+		t.Fatalf("n=%d exceeds the 2^16 prefixes this test can generate", n)
+	}
+	cidrs := make([]netip.Prefix, 0, n)
+	for i := 0; i < n; i++ {
+		cidrs = append(cidrs, netip.MustParsePrefix(fmt.Sprintf("10.%d.%d.0/24", i/256, i%256)))
 	}
 
 	liveObjects := func() uint64 {
