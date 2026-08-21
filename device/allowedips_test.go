@@ -6,9 +6,11 @@
 package device
 
 import (
+	"fmt"
 	"math/rand"
 	"net"
 	"net/netip"
+	"runtime"
 	"testing"
 )
 
@@ -244,4 +246,43 @@ func TestTrieIPv6(t *testing.T) {
 	assertEQ(h, 0x24046800, 0x40040800, 0, 0)
 	assertEQ(h, 0x24046800, 0x40040800, 0x10101010, 0x10101010)
 	assertEQ(a, 0x24046800, 0x40040800, 0xdeadbeef, 0xdeadbeef)
+}
+
+// TestMkIPInCIDRsTestFuncNoLeak ensures mkIPInCIDRsTestFunc does not retain the
+// tries it builds after the returned closure is dropped. If the placeholder
+// Peer is shared across calls, every trie node stays threaded onto its
+// trieEntries list and can never be collected, so live heap objects grow with
+// each call.
+func TestMkIPInCIDRsTestFuncNoLeak(t *testing.T) {
+	// Enough CIDRs to force the trie path (>4).
+	cidrs := make([]netip.Prefix, 0, 16)
+	for i := 0; i < 16; i++ {
+		cidrs = append(cidrs, netip.MustParsePrefix(fmt.Sprintf("10.%d.0.0/16", i)))
+	}
+
+	liveObjects := func() uint64 {
+		var m runtime.MemStats
+		runtime.GC()
+		runtime.ReadMemStats(&m)
+		return m.HeapObjects
+	}
+
+	// Warm up so allocator/runtime steady state is reached before measuring.
+	for i := 0; i < 100; i++ {
+		_ = mkIPInCIDRsTestFunc(cidrs)
+	}
+	before := liveObjects()
+
+	const iterations = 10000
+	for i := 0; i < iterations; i++ {
+		_ = mkIPInCIDRsTestFunc(cidrs)
+	}
+	after := liveObjects()
+
+	// Each leaked call retains all its trie nodes, so growth would be on the
+	// order of iterations*len(cidrs) objects. A small fixed slack absorbs
+	// unrelated runtime allocations.
+	if growth := int64(after) - int64(before); growth > 1000 {
+		t.Errorf("live heap objects grew by %d across %d calls; trie nodes are being retained", growth, iterations)
+	}
 }
