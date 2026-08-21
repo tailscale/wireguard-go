@@ -1,0 +1,269 @@
+// SPDX-License-Identifier: BSD-3-Clause
+
+//go:build mipsle
+
+#include "textflag.h"
+
+// chacha20BlocksASM(out, in unsafe.Pointer, state *[16]uint32, blocks uintptr)
+//
+// 32-bit MIPS r2 (Plan 9 syntax) port of the mips64 ChaCha20 inner
+// loop in tsasm/mips64/chacha20/chacha20_mips64.s.  The algorithm
+// is unchanged: 16 32-bit state words live in registers (R2..R17)
+// across the 20 rounds, rotates use MIPS r2 ROTR, and the LE byte
+// swap on input/output uses WSBH+ROTR16. The differences from the
+// mips64 port are mechanical:
+//   * 4-byte args, frame layout uses MOVW for pointer loads.
+//   * 4-byte pointer increments via ADDU instead of ADDV.
+//   * Block counter decrement via SUBU instead of SUBVU.
+//
+// Register usage is identical to the mips64 port; see that file for
+// the rationale.
+TEXT ·chacha20BlocksASM(SB), NOSPLIT|NOFRAME, $0-16
+	MOVW	out+0(FP), R18
+	MOVW	in+4(FP), R19
+	MOVW	state+8(FP), R20
+	MOVW	blocks+12(FP), R21
+
+	BEQ	R21, done
+
+block_loop:
+	MOVW	0(R20), R2
+	MOVW	4(R20), R3
+	MOVW	8(R20), R4
+	MOVW	12(R20), R5
+	MOVW	16(R20), R6
+	MOVW	20(R20), R7
+	MOVW	24(R20), R8
+	MOVW	28(R20), R9
+	MOVW	32(R20), R10
+	MOVW	36(R20), R11
+	MOVW	40(R20), R12
+	MOVW	44(R20), R13
+	MOVW	48(R20), R14
+	MOVW	52(R20), R15
+	MOVW	56(R20), R16
+	MOVW	60(R20), R17
+
+	MOVW	$10, R24
+
+round_loop:
+	// Column round.
+	ADDU	R6, R2, R2
+	XOR	R2, R14, R14
+	ROTR	$16, R14, R14
+	ADDU	R14, R10, R10
+	XOR	R10, R6, R6
+	ROTR	$20, R6, R6
+	ADDU	R6, R2, R2
+	XOR	R2, R14, R14
+	ROTR	$24, R14, R14
+	ADDU	R14, R10, R10
+	XOR	R10, R6, R6
+	ROTR	$25, R6, R6
+
+	ADDU	R7, R3, R3
+	XOR	R3, R15, R15
+	ROTR	$16, R15, R15
+	ADDU	R15, R11, R11
+	XOR	R11, R7, R7
+	ROTR	$20, R7, R7
+	ADDU	R7, R3, R3
+	XOR	R3, R15, R15
+	ROTR	$24, R15, R15
+	ADDU	R15, R11, R11
+	XOR	R11, R7, R7
+	ROTR	$25, R7, R7
+
+	ADDU	R8, R4, R4
+	XOR	R4, R16, R16
+	ROTR	$16, R16, R16
+	ADDU	R16, R12, R12
+	XOR	R12, R8, R8
+	ROTR	$20, R8, R8
+	ADDU	R8, R4, R4
+	XOR	R4, R16, R16
+	ROTR	$24, R16, R16
+	ADDU	R16, R12, R12
+	XOR	R12, R8, R8
+	ROTR	$25, R8, R8
+
+	ADDU	R9, R5, R5
+	XOR	R5, R17, R17
+	ROTR	$16, R17, R17
+	ADDU	R17, R13, R13
+	XOR	R13, R9, R9
+	ROTR	$20, R9, R9
+	ADDU	R9, R5, R5
+	XOR	R5, R17, R17
+	ROTR	$24, R17, R17
+	ADDU	R17, R13, R13
+	XOR	R13, R9, R9
+	ROTR	$25, R9, R9
+
+	// Diagonal round.
+	ADDU	R7, R2, R2
+	XOR	R2, R17, R17
+	ROTR	$16, R17, R17
+	ADDU	R17, R12, R12
+	XOR	R12, R7, R7
+	ROTR	$20, R7, R7
+	ADDU	R7, R2, R2
+	XOR	R2, R17, R17
+	ROTR	$24, R17, R17
+	ADDU	R17, R12, R12
+	XOR	R12, R7, R7
+	ROTR	$25, R7, R7
+
+	ADDU	R8, R3, R3
+	XOR	R3, R14, R14
+	ROTR	$16, R14, R14
+	ADDU	R14, R13, R13
+	XOR	R13, R8, R8
+	ROTR	$20, R8, R8
+	ADDU	R8, R3, R3
+	XOR	R3, R14, R14
+	ROTR	$24, R14, R14
+	ADDU	R14, R13, R13
+	XOR	R13, R8, R8
+	ROTR	$25, R8, R8
+
+	ADDU	R9, R4, R4
+	XOR	R4, R15, R15
+	ROTR	$16, R15, R15
+	ADDU	R15, R10, R10
+	XOR	R10, R9, R9
+	ROTR	$20, R9, R9
+	ADDU	R9, R4, R4
+	XOR	R4, R15, R15
+	ROTR	$24, R15, R15
+	ADDU	R15, R10, R10
+	XOR	R10, R9, R9
+	ROTR	$25, R9, R9
+
+	ADDU	R6, R5, R5
+	XOR	R5, R16, R16
+	ROTR	$16, R16, R16
+	ADDU	R16, R11, R11
+	XOR	R11, R6, R6
+	ROTR	$20, R6, R6
+	ADDU	R6, R5, R5
+	XOR	R5, R16, R16
+	ROTR	$24, R16, R16
+	ADDU	R16, R11, R11
+	XOR	R11, R6, R6
+	ROTR	$25, R6, R6
+
+	SUBU	$1, R24
+	BNE	R24, round_loop
+
+	// x[i] += state[i].
+	MOVW	0(R20), R22
+	ADDU	R22, R2, R2
+	MOVW	4(R20), R22
+	ADDU	R22, R3, R3
+	MOVW	8(R20), R22
+	ADDU	R22, R4, R4
+	MOVW	12(R20), R22
+	ADDU	R22, R5, R5
+	MOVW	16(R20), R22
+	ADDU	R22, R6, R6
+	MOVW	20(R20), R22
+	ADDU	R22, R7, R7
+	MOVW	24(R20), R22
+	ADDU	R22, R8, R8
+	MOVW	28(R20), R22
+	ADDU	R22, R9, R9
+	MOVW	32(R20), R22
+	ADDU	R22, R10, R10
+	MOVW	36(R20), R22
+	ADDU	R22, R11, R11
+	MOVW	40(R20), R22
+	ADDU	R22, R12, R12
+	MOVW	44(R20), R22
+	ADDU	R22, R13, R13
+	MOVW	48(R20), R22
+	ADDU	R22, R14, R14
+	MOVW	52(R20), R22
+	ADDU	R22, R15, R15
+	MOVW	56(R20), R22
+	ADDU	R22, R16, R16
+	MOVW	60(R20), R22
+	ADDU	R22, R17, R17
+
+	// XOR with input bytes (LE byte-swap on big-endian) and store.
+	MOVW	0(R19), R22
+	XOR	R22, R2, R2
+	MOVW	R2, 0(R18)
+
+	MOVW	4(R19), R22
+	XOR	R22, R3, R3
+	MOVW	R3, 4(R18)
+
+	MOVW	8(R19), R22
+	XOR	R22, R4, R4
+	MOVW	R4, 8(R18)
+
+	MOVW	12(R19), R22
+	XOR	R22, R5, R5
+	MOVW	R5, 12(R18)
+
+	MOVW	16(R19), R22
+	XOR	R22, R6, R6
+	MOVW	R6, 16(R18)
+
+	MOVW	20(R19), R22
+	XOR	R22, R7, R7
+	MOVW	R7, 20(R18)
+
+	MOVW	24(R19), R22
+	XOR	R22, R8, R8
+	MOVW	R8, 24(R18)
+
+	MOVW	28(R19), R22
+	XOR	R22, R9, R9
+	MOVW	R9, 28(R18)
+
+	MOVW	32(R19), R22
+	XOR	R22, R10, R10
+	MOVW	R10, 32(R18)
+
+	MOVW	36(R19), R22
+	XOR	R22, R11, R11
+	MOVW	R11, 36(R18)
+
+	MOVW	40(R19), R22
+	XOR	R22, R12, R12
+	MOVW	R12, 40(R18)
+
+	MOVW	44(R19), R22
+	XOR	R22, R13, R13
+	MOVW	R13, 44(R18)
+
+	MOVW	48(R19), R22
+	XOR	R22, R14, R14
+	MOVW	R14, 48(R18)
+
+	MOVW	52(R19), R22
+	XOR	R22, R15, R15
+	MOVW	R15, 52(R18)
+
+	MOVW	56(R19), R22
+	XOR	R22, R16, R16
+	MOVW	R16, 56(R18)
+
+	MOVW	60(R19), R22
+	XOR	R22, R17, R17
+	MOVW	R17, 60(R18)
+
+	// Bump the in-memory counter.
+	MOVW	48(R20), R22
+	ADDU	$1, R22, R22
+	MOVW	R22, 48(R20)
+
+	ADDU	$64, R18
+	ADDU	$64, R19
+	SUBU	$1, R21
+	BNE	R21, block_loop
+
+done:
+	RET
