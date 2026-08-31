@@ -447,6 +447,19 @@ func handleVirtioRead(in []byte, bufs [][]byte, sizes []int, offset int) (int, e
 	return GSOSplit(in, options, bufs, sizes, offset)
 }
 
+// maxGSOSegmentsPerRead bounds how many packets a single GSO frame read from
+// the tun may split into. Batched draining (see Read) reserves this much room in
+// bufs before each additional non-blocking read so that a GSO frame can never
+// overflow the remaining buffers. Kernel-generated GSO frames are <=64KiB and
+// segment at the connection MSS, so a 64KiB frame yields well under this many
+// segments for any realistic MSS.
+const maxGSOSegmentsPerRead = 64
+
+// batchedTUNRead enables batched tun-read draining (see Read). It is opt-in via
+// the TS_TUN_BATCHED_READ environment variable, read once at process start,
+// because it alters the read path for all traffic.
+var batchedTUNRead = os.Getenv("TS_TUN_BATCHED_READ") == "1"
+
 func (tun *NativeTun) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
 	tun.readOpMu.Lock()
 	defer tun.readOpMu.Unlock()
@@ -454,24 +467,73 @@ func (tun *NativeTun) Read(bufs [][]byte, sizes []int, offset int) (int, error) 
 	case err := <-tun.errors:
 		return 0, err
 	default:
-		readInto := bufs[0][offset:]
-		if tun.vnetHdr {
-			readInto = tun.readBuff[:]
-		}
-		n, err := tun.tunFile.Read(readInto)
-		if errors.Is(err, syscall.EBADFD) {
-			err = os.ErrClosed
-		}
+	}
+
+	// First packet: a blocking read through the runtime poller.
+	readInto := bufs[0][offset:]
+	if tun.vnetHdr {
+		readInto = tun.readBuff[:]
+	}
+	n, err := tun.tunFile.Read(readInto)
+	if errors.Is(err, syscall.EBADFD) {
+		err = os.ErrClosed
+	}
+	if err != nil {
+		return 0, err
+	}
+
+	var total int
+	if tun.vnetHdr {
+		total, err = handleVirtioRead(readInto[:n], bufs, sizes, offset)
 		if err != nil {
 			return 0, err
 		}
-		if tun.vnetHdr {
-			return handleVirtioRead(readInto[:n], bufs, sizes, offset)
-		} else {
-			sizes[0] = n
-			return 1, nil
-		}
+	} else {
+		sizes[0] = n
+		return 1, nil
 	}
+
+	if !batchedTUNRead {
+		return total, nil
+	}
+
+	// Batched draining: collect any additional packets already queued on the
+	// tun without blocking, so that non-GSO traffic -- for example VXLAN or
+	// other UDP-encapsulated tunnels, which the kernel delivers one datagram
+	// per read because the tun cannot express tunnel segmentation offload -- is
+	// batched through the encrypt and send path the same way a single GSO
+	// superframe is. This is latency neutral: it only gathers packets already
+	// waiting, stopping at EAGAIN. Order is preserved because reads are
+	// sequential. maxGSOSegmentsPerRead slots of headroom guarantee a drained
+	// GSO frame cannot overflow the remaining buffers.
+	for total <= len(bufs)-maxGSOSegmentsPerRead {
+		nn, rerr := tun.readNonblocking(tun.readBuff[:])
+		if rerr != nil || nn == 0 {
+			break // EAGAIN (queue drained) or a transient error: return what we have.
+		}
+		np, herr := handleVirtioRead(tun.readBuff[:nn], bufs[total:], sizes[total:], offset)
+		if herr != nil {
+			break
+		}
+		total += np
+	}
+	return total, nil
+}
+
+// readNonblocking performs a single non-blocking read on the tun fd, returning
+// the number of bytes read. It returns unix.EAGAIN when no packet is queued. It
+// reads via the raw conn so the runtime poller's blocking semantics are
+// bypassed; the raw conn holds the fd mutex for the duration, so it is safe
+// against a concurrent close.
+func (tun *NativeTun) readNonblocking(buf []byte) (int, error) {
+	var n int
+	var serr error
+	if cerr := tun.tunRawConn.Control(func(fd uintptr) {
+		n, serr = unix.Read(int(fd), buf)
+	}); cerr != nil {
+		return 0, cerr
+	}
+	return n, serr
 }
 
 func (tun *NativeTun) Events() <-chan Event {
