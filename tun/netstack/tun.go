@@ -166,7 +166,7 @@ func (tun *netTun) WriteNotify() {
 }
 
 func (tun *netTun) Close() error {
-	tun.stack.RemoveNIC(1)
+	tun.stack.Destroy()
 
 	if tun.events != nil {
 		close(tun.events)
@@ -175,6 +175,8 @@ func (tun *netTun) Close() error {
 	tun.ep.Close()
 
 	if tun.incomingPacket != nil {
+		// It's safe to close the channel here because tun.stack.Destroy() ensures that no worker
+		// goroutines could be calling WriteNotify()
 		close(tun.incomingPacket)
 	}
 
