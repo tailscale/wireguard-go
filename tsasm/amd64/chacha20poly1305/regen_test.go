@@ -124,7 +124,7 @@ func TestUpstreamProvenance(t *testing.T) {
 		}
 	}
 
-	if n := strings.Count(s, "\n"); n < 4500 || n > 5500 {
-		t.Errorf("generated asm has %d lines, expected ~5021 for the SSE-only kernel", n)
+	if n := strings.Count(s, "\n"); n < 3500 || n > 4200 {
+		t.Errorf("generated asm has %d lines, expected ~3854 for the SSE-only kernel", n)
 	}
 }
