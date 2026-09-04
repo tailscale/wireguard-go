@@ -85,7 +85,7 @@ func (elem *QueueOutboundElement) clearPointers() {
 func (peer *Peer) SendKeepalive() {
 	if len(peer.queue.staged) == 0 {
 		elem := peer.device.GetOutboundElement()
-		elem.buffer = peer.device.getPacketBuf() // TODO(jwhited): get a smaller message from a different pool
+		elem.buffer = peer.device.getSmallPacketBuf()
 		elem.plaintextOffset = MessageEncapsulatingTransportSize + MessageTransportHeaderSize
 		elemsContainer := peer.device.GetOutboundElementsContainer()
 		elemsContainer.elems = append(elemsContainer.elems, elem)
@@ -138,7 +138,7 @@ func (peer *Peer) SendPriorityMessage() {
 	elem := peer.device.GetOutboundElement()
 	elemsContainer := peer.device.GetOutboundElementsContainer()
 	elemsContainer.elems = append(elemsContainer.elems, elem)
-	buf := peer.device.getPacketBuf() // TODO(jwhited): get a smaller message from a different pool
+	buf := peer.device.getSmallPacketBuf()
 
 	// initialize outbound element
 	const offset = MessageEncapsulatingTransportSize + MessageTransportHeaderSize
@@ -277,6 +277,31 @@ func (peer *Peer) keepKeyFreshSending() {
 	}
 }
 
+// copyPacketBufIfFits copies the prefix of src.slab ending at the final packet
+// into dst.slab if that prefix+[outboundPlaintextTailroom] fits. It reports
+// whether the copy occurred. Packet descriptors must be in offset ascending order.
+func copyPacketBufIfFits(dst, src *packetBuf, packets []tun.ReadPacket) bool {
+	if dst == nil || len(packets) < 1 {
+		return false
+	}
+	// validate tail descriptor as it relates to src
+	tailPkt := packets[len(packets)-1]
+	if tailPkt.Offset < 0 || tailPkt.Size < 1 {
+		return false
+	}
+	end := tailPkt.Offset + tailPkt.Size
+	if end < tailPkt.Offset || end > len(src.slab) ||
+		outboundPlaintextTailroom > len(src.slab)-end {
+		return false
+	}
+	// validate src fits in dst
+	if end+outboundPlaintextTailroom > len(dst.slab) {
+		return false
+	}
+	copy(dst.slab, src.slab[:end])
+	return true
+}
+
 func (device *Device) RoutineReadFromTUN() {
 	defer func() {
 		device.log.Verbosef("Routine: TUN reader - stopped")
@@ -287,20 +312,25 @@ func (device *Device) RoutineReadFromTUN() {
 	device.log.Verbosef("Routine: TUN reader - started")
 
 	var (
-		batchSize = device.BatchSize()
-		packets   = make([]tun.ReadPacket, batchSize)
-		buf       = device.getPacketBuf()
-		// bufDirty tracks whether the current buf has been pushed downstream to
-		// crypto and per-peer functions, or can be re-used across read cycles
-		bufDirty    bool
+		batchSize   = device.BatchSize()
+		packets     = make([]tun.ReadPacket, batchSize)
+		fullSizeBuf = device.getPacketBuf()
+		smallBuf    *packetBuf
 		readErr     error
 		elems       = make([]*QueueOutboundElement, batchSize)
 		elemsByPeer = make(map[*Peer]*QueueOutboundElementsContainer, batchSize)
 		count       = 0
 	)
 
+	if device.hasDistinctSmallPacketBufPool() {
+		smallBuf = device.getSmallPacketBuf()
+	}
+
 	defer func() {
-		buf.decRef()
+		fullSizeBuf.decRef()
+		if smallBuf != nil {
+			smallBuf.decRef()
+		}
 	}()
 
 	for i := range elems {
@@ -315,15 +345,30 @@ func (device *Device) RoutineReadFromTUN() {
 		}
 	}()
 
+	var (
+		buf          *packetBuf // either fullSizeBuf or smallBuf
+		bufHandedOff bool
+	)
+
 	for {
-		if bufDirty {
-			buf.decRef()
-			buf = device.getPacketBuf()
-			bufDirty = false
+		if bufHandedOff {
+			if buf == smallBuf {
+				smallBuf.decRef()
+				smallBuf = device.getSmallPacketBuf()
+			} else {
+				fullSizeBuf.decRef()
+				fullSizeBuf = device.getPacketBuf()
+			}
 		}
+		buf = fullSizeBuf
+		bufHandedOff = false
 
 		// read packets
-		count, readErr = device.tun.device.Read(buf.slab, packets)
+		count, readErr = device.tun.device.Read(fullSizeBuf.slab, packets)
+		if copyPacketBufIfFits(smallBuf, fullSizeBuf, packets[:count]) {
+			buf = smallBuf
+		}
+
 		for i, meta := range packets[:count] {
 			if meta.Size < 1 || meta.Size > MaxContentSize {
 				continue
@@ -362,7 +407,7 @@ func (device *Device) RoutineReadFromTUN() {
 
 			elem := elems[i]
 			buf.incRef()
-			bufDirty = true
+			bufHandedOff = true
 			elem.buffer = buf
 			elem.packet = packet
 			elem.plaintextOffset = meta.Offset

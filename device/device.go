@@ -80,6 +80,9 @@ type Device struct {
 		inboundElements           *WaitPool
 		outboundElements          *WaitPool
 		packetBufs                *WaitPool
+		// smallPacketBufs aliases packetBufs when no distinct small packet pool
+		// is used. See [Device.PopulatePools].
+		smallPacketBufs *WaitPool
 	}
 
 	queue struct {

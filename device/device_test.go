@@ -685,3 +685,84 @@ func TestDeviceOptions(t *testing.T) {
 		t.Fatalf("configured device config: %+v", c)
 	}
 }
+
+func TestPopulatePoolsPacketBufs(t *testing.T) {
+	wantSingleSmallSize := singlePacketSlabSize
+	wantSingleDistinct := singlePacketSlabSize >= minPacketBufSizeForDistinctSmallPool
+	if wantSingleDistinct {
+		wantSingleSmallSize = smallPacketBufSize
+	}
+
+	tests := []struct {
+		name           string
+		batchSize      int
+		preallocated   uint32
+		wantDistinct   bool
+		wantPacketSize int
+		wantSmallSize  int
+	}{
+		{
+			name:           "single unbounded",
+			batchSize:      1,
+			preallocated:   0,
+			wantDistinct:   wantSingleDistinct,
+			wantPacketSize: singlePacketSlabSize,
+			wantSmallSize:  wantSingleSmallSize,
+		},
+		{
+			name:           "batched unbounded",
+			batchSize:      2,
+			preallocated:   0,
+			wantDistinct:   true,
+			wantPacketSize: batchingSlabSize,
+			wantSmallSize:  smallPacketBufSize,
+		},
+		{
+			name:           "single bounded",
+			batchSize:      1,
+			preallocated:   1,
+			wantDistinct:   false,
+			wantPacketSize: singlePacketSlabSize,
+			wantSmallSize:  singlePacketSlabSize,
+		},
+		{
+			name:           "batched bounded",
+			batchSize:      2,
+			preallocated:   1,
+			wantDistinct:   false,
+			wantPacketSize: batchingSlabSize,
+			wantSmallSize:  batchingSlabSize,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			device := new(Device)
+			device.config.preallocatedBuffersPerPool = tt.preallocated
+			device.net.bind = &fakeBindSized{size: tt.batchSize}
+			device.tun.device = &fakeTUNDeviceSized{size: tt.batchSize}
+			device.PopulatePools()
+
+			if got := device.hasDistinctSmallPacketBufPool(); got != tt.wantDistinct {
+				t.Fatalf("distinct small pool = %v, want %v", got, tt.wantDistinct)
+			}
+
+			buf := device.getPacketBuf()
+			gotPacketSize := len(buf.slab)
+			buf.decRef()
+
+			buf = device.getSmallPacketBuf()
+			gotSmallSize := len(buf.slab)
+			buf.decRef()
+
+			if gotPacketSize != tt.wantPacketSize {
+				t.Errorf("packet buffer size = %d, want %d",
+					gotPacketSize, tt.wantPacketSize)
+			}
+			if gotSmallSize != tt.wantSmallSize {
+				t.Errorf("small packet buffer size = %d, want %d",
+					gotSmallSize, tt.wantSmallSize)
+			}
+		})
+	}
+}
