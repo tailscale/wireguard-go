@@ -7,6 +7,8 @@ package device
 
 import (
 	"sync"
+
+	"github.com/tailscale/wireguard-go/tun"
 )
 
 type WaitPool struct {
@@ -46,6 +48,36 @@ func (p *WaitPool) Put(x any) {
 	p.cond.Signal()
 }
 
+const (
+	// smallPacketBufSize is the size to be used for [packetBuf.slab]'s pooled in
+	// [Device.pool.smallPacketBufs]. It's large enough to fit WireGuard keepalive
+	// messages, WireGuard-encrypted [MaxPriorityMessageContentSize], and
+	// WireGuard-encrypted internet MTU messages.
+	smallPacketBufSize = 2048
+
+	internetMTU = 1500
+	// assert that [smallPacketBufSize] is sufficient to hold [internetMTU]-sized
+	// plaintext read via [tun.Device.Read], for eventual encryption and
+	// transmission as a WireGuard transport message.
+	_ uint = smallPacketBufSize -
+		tun.ReadPacketSpacing -
+		internetMTU -
+		outboundPlaintextTailroom
+	// assert that [smallPacketBufSize] is sufficient to hold [MaxPriorityMessageContentSize]-sized
+	// plaintext for eventual encryption and transmission as a WireGuard transport
+	// message. This assertion also covers keepalive messages, which only have
+	// the auth tag, accounted for in [outboundPlaintextTailroom], following
+	// the WireGuard header.
+	_ uint = smallPacketBufSize -
+		outboundPlaintextHeadroom -
+		MaxPriorityMessageContentSize -
+		outboundPlaintextTailroom
+
+	// minPacketBufSizeForDistinctSmallPool represents the minimum [packetBuf.slab]
+	// size at which a distinct ([Device.pool.smallPacketBufs]) is created.
+	minPacketBufSizeForDistinctSmallPool = 2 * smallPacketBufSize
+)
+
 func (device *Device) PopulatePools() {
 	device.pool.inboundElementsContainer = NewWaitPool(device.config.preallocatedBuffersPerPool, func() any {
 		s := make([]*QueueInboundElement, 0, device.BatchSize())
@@ -70,6 +102,19 @@ func (device *Device) PopulatePools() {
 			device.pool.packetBufs.Put(buf)
 		})
 	})
+	// A distinct smallPacketBufs pool makes TUN readers copy packets that fit
+	// into [smallPacketBufSize] in the interest of memory savings. Alias
+	// smallPacketBufs to the "full-sized" pool if there is little to be gained
+	// in memory savings, or if the device is configured to limit outstanding
+	// packet memory pool items, which we don't want to artificially inflate.
+	device.pool.smallPacketBufs = device.pool.packetBufs
+	if packetBufSize >= minPacketBufSizeForDistinctSmallPool && device.config.preallocatedBuffersPerPool == 0 {
+		device.pool.smallPacketBufs = NewWaitPool(device.config.preallocatedBuffersPerPool, func() any {
+			return newPacketBuf(smallPacketBufSize, func(buf *packetBuf) {
+				device.pool.smallPacketBufs.Put(buf)
+			})
+		})
+	}
 }
 
 func (device *Device) GetInboundElementsContainer() *QueueInboundElementsContainer {
@@ -96,6 +141,21 @@ func (device *Device) PutOutboundElementsContainer(c *QueueOutboundElementsConta
 	}
 	c.elems = c.elems[:0]
 	device.pool.outboundElementsContainer.Put(c)
+}
+
+// hasDistinctSmallPacketBufPool returns true if [Device.getSmallPacketBuf]
+// will fetch from a pool independent of [Device.getPacketBuf].
+func (device *Device) hasDistinctSmallPacketBufPool() bool {
+	return device.pool.smallPacketBufs != device.pool.packetBufs
+}
+
+// getSmallPacketBuf returns a [*packetBuf] smaller or equal in size to what
+// [Device.getPacketBuf] returns depending on [Device] batching and [WaitPool]
+// configuration.
+func (device *Device) getSmallPacketBuf() *packetBuf {
+	b := device.pool.smallPacketBufs.Get().(*packetBuf)
+	b.incRef()
+	return b
 }
 
 func (device *Device) getPacketBuf() *packetBuf {
