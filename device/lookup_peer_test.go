@@ -11,9 +11,10 @@ import (
 	"github.com/tailscale/wireguard-go/conn"
 )
 
-func TestLookupPeerPinsEndpoint(t *testing.T) {
+func TestLookupPeerConfig(t *testing.T) {
 	dev := newTestDevice(t)
 	peerKey := NoisePublicKey{1}
+	psk := NoisePresharedKey{2}
 	initial, err := CreateDummyEndpoint()
 	if err != nil {
 		t.Fatalf("CreateDummyEndpoint: %v", err)
@@ -22,7 +23,7 @@ func TestLookupPeerPinsEndpoint(t *testing.T) {
 		if pk != peerKey {
 			return nil, false
 		}
-		return &NewPeerConfig{Endpoint: initial}, true
+		return &NewPeerConfig{Endpoint: initial, PresharedKey: psk}, true
 	})
 
 	peer := dev.LookupPeer(peerKey)
@@ -33,5 +34,20 @@ func TestLookupPeerPinsEndpoint(t *testing.T) {
 
 	if peer.endpoint.val != conn.Endpoint(initial) {
 		t.Fatalf("initial endpoint = %v, want %v", peer.endpoint.val, initial)
+	}
+	peer.handshake.mutex.RLock()
+	gotPSK := peer.handshake.presharedKey
+	peer.handshake.mutex.RUnlock()
+	if gotPSK != psk {
+		t.Fatalf("initial preshared key = %x, want %x", gotPSK, psk)
+	}
+
+	newPSK := NoisePresharedKey{3}
+	peer.SetPresharedKey(newPSK)
+	peer.handshake.mutex.RLock()
+	gotPSK = peer.handshake.presharedKey
+	peer.handshake.mutex.RUnlock()
+	if gotPSK != newPSK {
+		t.Fatalf("updated preshared key = %x, want %x", gotPSK, newPSK)
 	}
 }

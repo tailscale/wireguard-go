@@ -172,6 +172,14 @@ func (p *Peer) SetAllowedIPs(allowedIPs []netip.Prefix) {
 	p.state.testAllowedIP.Store(&f)
 }
 
+// SetPresharedKey sets the optional WireGuard pre-shared key for this peer.
+// The zero value disables the pre-shared-key layer.
+func (p *Peer) SetPresharedKey(psk NoisePresharedKey) {
+	p.handshake.mutex.Lock()
+	defer p.handshake.mutex.Unlock()
+	p.handshake.presharedKey = psk
+}
+
 // SendBuffers sends buffers to peer. WireGuard packet data in each element of
 // buffers must be preceded by MessageEncapsulatingTransportSize number of
 // bytes.

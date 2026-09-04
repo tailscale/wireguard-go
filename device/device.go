@@ -466,6 +466,7 @@ func (device *Device) LookupPeer(pk NoisePublicKey) *Peer {
 		device.log.Errorf("Failed to create peer: %v", err)
 		return nil
 	}
+	p.SetPresharedKey(conf.PresharedKey)
 	p.SetAllowedIPs(conf.AllowedIPs)
 	p.deleteOnIdle = true
 	if conf.Endpoint != nil {
@@ -536,6 +537,10 @@ func (device *Device) RemoveMatchingPeers(shouldRemove func(NoisePublicKey) bool
 type NewPeerConfig struct {
 	// AllowedIPs is the initial set of allowed IPs for the new peer.
 	AllowedIPs []netip.Prefix
+
+	// PresharedKey is the initial pre-shared key for the new peer. The zero
+	// value disables the optional WireGuard pre-shared-key layer.
+	PresharedKey NoisePresharedKey
 
 	// Endpoint, if non-nil, sets the endpoint for newly created peers.
 	// The endpoint is pinned for the lifetime of the peer.
