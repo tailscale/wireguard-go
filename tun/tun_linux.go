@@ -46,9 +46,6 @@ type NativeTun struct {
 	nameCache string    // name of interface
 	nameErr   error
 
-	readOpMu sync.Mutex                    // readOpMu guards readBuff
-	readBuff [virtioNetHdrLen + 65535]byte // if vnetHdr every read() is prefixed by virtioNetHdr
-
 	writeOpMu   sync.Mutex // writeOpMu guards the following fields
 	toWrite     groToWrite
 	tcpGROTable *tcpGROTable
@@ -448,17 +445,20 @@ func handleVirtioRead(in []byte, slab []byte, packets []ReadPacket) (int, error)
 	return GSOSplit(in, options, slab, packets, ReadPacketSpacing)
 }
 
+// assert that [ReadPacketSpacing] is >= [virtioNetHdrLen], as [NativeTun.Read]
+// assumes so, and uses headroom for [virtioNetHdr].
+const _ = uint(ReadPacketSpacing - virtioNetHdrLen)
+
 func (tun *NativeTun) Read(slab []byte, packets []ReadPacket) (int, error) {
-	tun.readOpMu.Lock()
-	defer tun.readOpMu.Unlock()
 	select {
 	case err := <-tun.errors:
 		return 0, err
 	default:
-		readInto := slab[ReadPacketSpacing : len(slab)-ReadPacketSpacing]
+		start := ReadPacketSpacing
 		if tun.vnetHdr {
-			readInto = tun.readBuff[:]
+			start -= virtioNetHdrLen
 		}
+		readInto := slab[start : len(slab)-ReadPacketSpacing]
 		n, err := tun.tunFile.Read(readInto)
 		if errors.Is(err, syscall.EBADFD) {
 			err = os.ErrClosed
