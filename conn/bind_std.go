@@ -9,12 +9,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/maphash"
 	"io"
 	"net"
 	"net/netip"
 	"runtime"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"syscall"
 
 	"golang.org/x/net/ipv4"
@@ -32,26 +34,44 @@ var (
 // methods for sending and receiving multiple datagrams per-syscall. See the
 // proposal in https://github.com/golang/go/issues/45886#issuecomment-1218301564.
 type StdNetBind struct {
-	mu            sync.Mutex // protects all fields except as specified
-	ipv4          *net.UDPConn
-	ipv6          *net.UDPConn
-	ipv4PC        *ipv4.PacketConn // will be nil on non-Linux
-	ipv6PC        *ipv6.PacketConn // will be nil on non-Linux
-	ipv4TxOffload bool
-	ipv4RxOffload bool
-	ipv6TxOffload bool
-	ipv6RxOffload bool
+	config // read-only post construction.
+
+	mu sync.Mutex // protects all fields except as specified
+
+	// v4 and v6 are fixed in size between Open and Close, safe to index without mu.
+	v4 []*stdNetSocket
+	v6 []*stdNetSocket
 
 	// these two fields are not guarded by mu
 	udpAddrPool sync.Pool
-	msgsPool    sync.Pool
+	messagePool
 
 	blackhole4 bool
 	blackhole6 bool
 }
 
-func NewStdNetBind() Bind {
-	return &StdNetBind{
+// stdNetSocket is one UDP socket. See [WithQueues].
+type stdNetSocket struct {
+	conn *net.UDPConn
+	// pool is the owning [StdNetBind]'s message pool, shared by every socket.
+	pool *messagePool
+	// pc is the batched read/write view of conn, the intersection of
+	// ipv4.PacketConn and ipv6.PacketConn. It is nil on non-Linux.
+	pc interface {
+		batchReader
+		batchWriter
+	}
+
+	// txOffload records whether UDP GSO works on this socket. It is per-socket
+	// rather than per-family because Send's GSO-disable fallback observes only
+	// the socket it wrote to, and no shared lock is left to guard a wider flag.
+	txOffload atomic.Bool
+	rxOffload bool
+}
+
+func NewStdNetBind(opts ...Option) Bind {
+	b := &StdNetBind{
+		config: defaultConfig(),
 		udpAddrPool: sync.Pool{
 			New: func() any {
 				return &net.UDPAddr{
@@ -60,17 +80,23 @@ func NewStdNetBind() Bind {
 			},
 		},
 
-		msgsPool: sync.Pool{
-			New: func() any {
-				msgs := make([]ipv6.Message, IdealBatchSize)
-				for i := range msgs {
-					msgs[i].Buffers = make(net.Buffers, 1)
-					msgs[i].OOB = make([]byte, controlSize)
-				}
-				return &msgs
+		messagePool: messagePool{
+			pool: sync.Pool{
+				New: func() any {
+					msgs := make([]ipv6.Message, IdealBatchSize)
+					for i := range msgs {
+						msgs[i].Buffers = make(net.Buffers, 1)
+						msgs[i].OOB = make([]byte, controlSize)
+					}
+					return &msgs
+				},
 			},
 		},
 	}
+	for _, opt := range opts {
+		opt.apply(&b.config)
+	}
+	return b
 }
 
 type StdNetEndpoint struct {
@@ -119,8 +145,8 @@ func (e *StdNetEndpoint) DstToString() string {
 	return e.AddrPort.String()
 }
 
-func listenNet(network string, port int) (*net.UDPConn, int, error) {
-	conn, err := listenConfig().ListenPacket(context.Background(), network, ":"+strconv.Itoa(port))
+func listenNet(network string, port int, ctrl ...controlFn) (*net.UDPConn, int, error) {
+	conn, err := listenConfig(ctrl...).ListenPacket(context.Background(), network, ":"+strconv.Itoa(port))
 	if err != nil {
 		return nil, 0, err
 	}
@@ -142,6 +168,41 @@ func listenNet(network string, port int) (*net.UDPConn, int, error) {
 // it's at least non-nil.
 var errEADDRINUSE error = errors.New("")
 
+// bindGroup opens n [net.UDPConn]s sharing one local port via SO_REUSEPORT.
+// If port is 0, all sockets join the same ephemeral port.
+// The returned group is either empty or the full n.
+// Error is not returned for unsupported address family.
+func bindGroup(network string, port, n int, ctrl []controlFn) ([]*net.UDPConn, int, error) {
+	var conns []*net.UDPConn
+	for range n {
+		c, p, err := listenNet(network, port, ctrl...)
+		if err != nil {
+			closeConns(conns)
+			if errors.Is(err, syscall.EAFNOSUPPORT) {
+				err = nil
+			}
+			return nil, p, err
+		}
+		conns, port = append(conns, c), p
+	}
+	return conns, port, nil
+}
+
+// firstConn returns the first socket of a group, or an error if the group is
+// empty. It exists for the platform hooks that reach a socket outside Send.
+func firstConn(socks []*stdNetSocket) (*net.UDPConn, error) {
+	if len(socks) == 0 {
+		return nil, syscall.EINVAL
+	}
+	return socks[0].conn, nil
+}
+
+func closeConns(conns []*net.UDPConn) {
+	for _, c := range conns {
+		c.Close()
+	}
+}
+
 func (s *StdNetBind) Open(uport uint16) ([]ReceiveFunc, uint16, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -149,52 +210,62 @@ func (s *StdNetBind) Open(uport uint16) ([]ReceiveFunc, uint16, error) {
 	var err error
 	var tries int
 
-	if s.ipv4 != nil || s.ipv6 != nil {
+	if len(s.v4) > 0 || len(s.v6) > 0 {
 		return nil, 0, ErrBindAlreadyOpen
+	}
+	// Only enable SO_REUSEPORT in multiqueue mode.
+	// TODO: Deal with accidentally landing into another PIDs group when two
+	// wireguard-go instances are run.
+	nq, ctrl := 1, []controlFn(nil)
+	if s.queues > 1 && reusePortFn != nil {
+		nq, ctrl = s.queues, []controlFn{reusePortFn}
 	}
 
 	// Attempt to open ipv4 and ipv6 listeners on the same port.
 	// If uport is 0, we can retry on failure.
 again:
 	port := int(uport)
-	var v4conn, v6conn *net.UDPConn
-	var v4pc *ipv4.PacketConn
-	var v6pc *ipv6.PacketConn
+	var v4conns, v6conns []*net.UDPConn
 
-	v4conn, port, err = listenNet("udp4", port)
-	if err != nil && !errors.Is(err, syscall.EAFNOSUPPORT) {
+	v4conns, port, err = bindGroup("udp4", port, nq, ctrl)
+	if err != nil {
 		return nil, 0, err
 	}
 
 	// Listen on the same port as we're using for ipv4.
-	v6conn, port, err = listenNet("udp6", port)
+	v6conns, port, err = bindGroup("udp6", port, nq, ctrl)
 	if uport == 0 && errors.Is(err, errEADDRINUSE) && tries < 100 {
-		v4conn.Close()
+		closeConns(v4conns)
 		tries++
 		goto again
 	}
-	if err != nil && !errors.Is(err, syscall.EAFNOSUPPORT) {
-		v4conn.Close()
+	if err != nil {
+		closeConns(v4conns)
 		return nil, 0, err
 	}
+
 	var fns []ReceiveFunc
-	if v4conn != nil {
-		s.ipv4TxOffload, s.ipv4RxOffload = supportsUDPOffload(v4conn)
+	for _, c := range v4conns {
+		sock := &stdNetSocket{conn: c, pool: &s.messagePool}
+		tx, rx := supportsUDPOffload(c)
+		sock.txOffload.Store(tx)
+		sock.rxOffload = rx
 		if runtime.GOOS == "linux" {
-			v4pc = ipv4.NewPacketConn(v4conn)
-			s.ipv4PC = v4pc
+			sock.pc = ipv4.NewPacketConn(c)
 		}
-		fns = append(fns, s.makeReceiveIPv4(v4pc, v4conn, s.ipv4RxOffload))
-		s.ipv4 = v4conn
+		fns = append(fns, sock.makeReceiveIPv4())
+		s.v4 = append(s.v4, sock)
 	}
-	if v6conn != nil {
-		s.ipv6TxOffload, s.ipv6RxOffload = supportsUDPOffload(v6conn)
+	for _, c := range v6conns {
+		sock := &stdNetSocket{conn: c, pool: &s.messagePool}
+		tx, rx := supportsUDPOffload(c)
+		sock.txOffload.Store(tx)
+		sock.rxOffload = rx
 		if runtime.GOOS == "linux" {
-			v6pc = ipv6.NewPacketConn(v6conn)
-			s.ipv6PC = v6pc
+			sock.pc = ipv6.NewPacketConn(c)
 		}
-		fns = append(fns, s.makeReceiveIPv6(v6pc, v6conn, s.ipv6RxOffload))
-		s.ipv6 = v6conn
+		fns = append(fns, sock.makeReceiveIPv6())
+		s.v6 = append(s.v6, sock)
 	}
 	if len(fns) == 0 {
 		return nil, 0, syscall.EAFNOSUPPORT
@@ -203,9 +274,15 @@ again:
 	return fns, uint16(port), nil
 }
 
+// messagePool recycles the [ipv6.Message] batches that the read and write
+// paths hand to the kernel. It is shared by every socket of a [StdNetBind].
+type messagePool struct {
+	pool sync.Pool
+}
+
 // putMessages resets each message in (*msgs)[:usedMsgs] for reuse, then returns
 // msgs to its [sync.Pool].
-func (s *StdNetBind) putMessages(msgs *[]ipv6.Message, usedMsgs int) {
+func (p *messagePool) putMessages(msgs *[]ipv6.Message, usedMsgs int) {
 	for i := range (*msgs)[:usedMsgs] {
 		// Clear references to previously used packet buffers, otherwise they
 		// may never be GC'd.
@@ -215,11 +292,11 @@ func (s *StdNetBind) putMessages(msgs *[]ipv6.Message, usedMsgs int) {
 			OOB:     (*msgs)[i].OOB,
 		}
 	}
-	s.msgsPool.Put(msgs)
+	p.pool.Put(msgs)
 }
 
-func (s *StdNetBind) getMessages() *[]ipv6.Message {
-	return s.msgsPool.Get().(*[]ipv6.Message)
+func (p *messagePool) getMessages() *[]ipv6.Message {
+	return p.pool.Get().(*[]ipv6.Message)
 }
 
 var (
@@ -237,14 +314,11 @@ type batchWriter interface {
 
 const maxDatagramSize = 1<<16 - 1
 
-func (s *StdNetBind) receiveIP(
-	br batchReader,
-	conn *net.UDPConn,
-	rxOffload bool,
+func (s *stdNetSocket) receiveIP(
 	slab []byte,
 	packets []ReceivedPacket,
 ) (n int, err error) {
-	msgs := s.getMessages()
+	msgs := s.pool.getMessages()
 	usedMsgs := 1
 	if runtime.GOOS == "linux" {
 		// set a floor of 1 in case len(slab) < maxDatagramSize
@@ -252,7 +326,7 @@ func (s *StdNetBind) receiveIP(
 		// we can't read more datagrams than what we can describe in packets
 		usedMsgs = min(len(packets), usedMsgs)
 	}
-	defer s.putMessages(msgs, usedMsgs)
+	defer s.pool.putMessages(msgs, usedMsgs)
 	var numMsgs int
 	if runtime.GOOS == "linux" {
 		rem := slab
@@ -265,7 +339,7 @@ func (s *StdNetBind) receiveIP(
 			(*msgs)[i].OOB = (*msgs)[i].OOB[:cap((*msgs)[i].OOB)]
 			rem = rem[end:]
 		}
-		numMsgs, err = br.ReadBatch((*msgs)[:usedMsgs], 0)
+		numMsgs, err = s.pc.ReadBatch((*msgs)[:usedMsgs], 0)
 		if err != nil {
 			return 0, err
 		}
@@ -273,24 +347,28 @@ func (s *StdNetBind) receiveIP(
 		msg := &(*msgs)[0]
 		msg.Buffers[0] = slab
 		msg.OOB = msg.OOB[:cap(msg.OOB)]
-		msg.N, msg.NN, _, msg.Addr, err = conn.ReadMsgUDP(msg.Buffers[0], msg.OOB)
+		msg.N, msg.NN, _, msg.Addr, err = s.conn.ReadMsgUDP(msg.Buffers[0], msg.OOB)
 		if err != nil {
 			return 0, err
 		}
 		numMsgs = 1
 	}
-	return fillReceivedPackets((*msgs)[:numMsgs], maxDatagramSize, packets, rxOffload, getGSOSize)
+	return fillReceivedPackets((*msgs)[:numMsgs], maxDatagramSize, packets, s.rxOffload, getGSOSize)
 }
 
-func (s *StdNetBind) makeReceiveIPv4(pc *ipv4.PacketConn, conn *net.UDPConn, rxOffload bool) ReceiveFunc {
+// TODO: [ReceiveFunc.PrettyName] recovers log labels by reflecting on
+// the enclosing function. Two make funcs below distinguish address families,
+// but this doesn't expose queue numbers when [StdNetBind.queues] > 1.
+
+func (s *stdNetSocket) makeReceiveIPv4() ReceiveFunc {
 	return func(slab []byte, packets []ReceivedPacket) (n int, err error) {
-		return s.receiveIP(pc, conn, rxOffload, slab, packets)
+		return s.receiveIP(slab, packets)
 	}
 }
 
-func (s *StdNetBind) makeReceiveIPv6(pc *ipv6.PacketConn, conn *net.UDPConn, rxOffload bool) ReceiveFunc {
+func (s *stdNetSocket) makeReceiveIPv6() ReceiveFunc {
 	return func(slab []byte, packets []ReceivedPacket) (n int, err error) {
-		return s.receiveIP(pc, conn, rxOffload, slab, packets)
+		return s.receiveIP(slab, packets)
 	}
 }
 
@@ -307,27 +385,18 @@ func (s *StdNetBind) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	var err1, err2 error
-	if s.ipv4 != nil {
-		err1 = s.ipv4.Close()
-		s.ipv4 = nil
-		s.ipv4PC = nil
+	var errs error
+	for _, sock := range s.v4 {
+		errs = errors.Join(errs, sock.conn.Close())
 	}
-	if s.ipv6 != nil {
-		err2 = s.ipv6.Close()
-		s.ipv6 = nil
-		s.ipv6PC = nil
+	for _, sock := range s.v6 {
+		errs = errors.Join(errs, sock.conn.Close())
 	}
+	s.v4 = nil
+	s.v6 = nil
 	s.blackhole4 = false
 	s.blackhole6 = false
-	s.ipv4TxOffload = false
-	s.ipv4RxOffload = false
-	s.ipv6TxOffload = false
-	s.ipv6RxOffload = false
-	if err1 != nil {
-		return err1
-	}
-	return err2
+	return errs
 }
 
 type ErrUDPGSODisabled struct {
@@ -343,28 +412,36 @@ func (e ErrUDPGSODisabled) Unwrap() error {
 	return e.RetryErr
 }
 
+// dstQueue picks a socket from a group of n for the given destination.
+// See [WithQueues].
+//
+// Maphash is chosen for a stronger avalanche effect over low bits compared to FNV.
+func dstQueue(ap netip.AddrPort, n int, seed maphash.Seed) int {
+	return int(maphash.Comparable(seed, ap) % uint64(n))
+}
+
 func (s *StdNetBind) Send(bufs [][]byte, endpoint Endpoint, offset int) error {
 	s.mu.Lock()
 	blackhole := s.blackhole4
-	conn := s.ipv4
-	offload := s.ipv4TxOffload
-	br := batchWriter(s.ipv4PC)
+	socks := s.v4
 	is6 := false
 	if endpoint.DstIP().Is6() {
 		blackhole = s.blackhole6
-		conn = s.ipv6
-		br = s.ipv6PC
+		socks = s.v6
 		is6 = true
-		offload = s.ipv6TxOffload
 	}
 	s.mu.Unlock()
 
 	if blackhole {
 		return nil
 	}
-	if conn == nil {
+	if len(socks) == 0 {
 		return syscall.EAFNOSUPPORT
 	}
+	sock := socks[dstQueue(endpoint.(*StdNetEndpoint).AddrPort, len(socks), s.seed)]
+	conn := sock.conn
+	br := sock.pc
+	offload := sock.txOffload.Load()
 
 	msgs := s.getMessages()
 	usedMsgs := len(bufs)
@@ -391,13 +468,7 @@ retry:
 		err = s.send(conn, br, (*msgs)[:n])
 		if err != nil && offload && errShouldDisableUDPGSO(err) {
 			offload = false
-			s.mu.Lock()
-			if is6 {
-				s.ipv6TxOffload = false
-			} else {
-				s.ipv4TxOffload = false
-			}
-			s.mu.Unlock()
+			sock.txOffload.Store(false)
 			retried = true
 			goto retry
 		}

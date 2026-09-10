@@ -9,6 +9,7 @@ package conn
 import (
 	"errors"
 	"fmt"
+	"hash/maphash"
 	"net/netip"
 	"reflect"
 	"runtime"
@@ -69,6 +70,45 @@ type Bind interface {
 	// BatchSize is the number of buffers expected to be passed to
 	// the ReceiveFuncs, and the maximum expected to be passed to SendBatch.
 	BatchSize() int
+}
+
+// An Option configures a [Bind].
+type Option interface {
+	apply(*config)
+}
+
+type optionFunc func(*config)
+
+func (f optionFunc) apply(config *config) {
+	f(config)
+}
+
+type config struct {
+	queues int
+	seed   maphash.Seed
+}
+
+func defaultConfig() config {
+	return config{
+		queues: 1,
+		seed:   maphash.MakeSeed(),
+	}
+}
+
+// WithQueues requests that the [Bind] listens on n sockets per address family,
+// via SO_REUSEPORT.
+//
+// In each direction, socket is chosen based on the 5-tuple,
+// but TX and RX choices do not match.
+//
+// Load is spread across peers, but not within one peer.
+//
+// Platforms without SO_REUSEPORT silently ignore the request,
+// and open a single socket per address family.
+func WithQueues(n int) Option {
+	return optionFunc(func(config *config) {
+		config.queues = max(1, n)
+	})
 }
 
 // BindSocketToInterface is implemented by Bind objects that support being

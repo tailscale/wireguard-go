@@ -29,6 +29,10 @@ type ReadPacket struct {
 // between adjacent packets, and after the final packet filled by [Device.Read].
 const ReadPacketSpacing = 64
 
+// A ReadFunc reads from a single queue of a [Device], with the same contract
+// as [Device.Read].
+type ReadFunc func(slab []byte, packets []ReadPacket) (n int, err error)
+
 type Device interface {
 	// File returns the file descriptor of the device.
 	File() *os.File
@@ -69,6 +73,53 @@ type Device interface {
 	// written in a single read/write call. BatchSize must not change over the
 	// lifetime of a Device.
 	BatchSize() int
+}
+
+// MultiQueueDevice is a Device that exposes more than one kernel queue, each
+// backed by its own file descriptor. Distinct queues may be read and written
+// concurrently. The count is fixed for the Device's lifetime.
+type MultiQueueDevice interface {
+	Device
+
+	// ReadFuncs returns one [ReadFunc] per queue, in queue order. Each may be
+	// called concurrently with the others, but not with itself. [Device.Read]
+	// aliases to the first ReadFunc.
+	ReadFuncs() []ReadFunc
+
+	// WriteQueue is [Device.Write] against queue q. Implementations accept any
+	// non-negative q and reduce it modulo the queue count.
+	WriteQueue(q int, bufs [][]byte, offset int) (int, error)
+}
+
+// An Option configures a [Device] at creation time.
+type Option interface {
+	apply(*config)
+}
+
+type optionFunc func(*config)
+
+func (f optionFunc) apply(config *config) {
+	f(config)
+}
+
+type config struct {
+	queues int
+}
+
+func defaultConfig() config {
+	return config{
+		queues: 1,
+	}
+}
+
+// WithQueues requests that the [Device] be created with n kernel queues,
+// satisfying [MultiQueueDevice]. Implementations may clamp n to a platform
+// maximum, and only Linux implements multiqueue TUN at all. Callers must
+// consult [MultiQueueDevice.ReadFuncs] rather than assume they got n.
+func WithQueues(n int) Option {
+	return optionFunc(func(config *config) {
+		config.queues = max(1, n)
+	})
 }
 
 // GRODevice is a Device extended with methods for disabling GRO. Certain OS

@@ -31,34 +31,21 @@ func (s *StdNetBind) SetMark(mark uint32) error {
 	if fwmarkIoctl == 0 {
 		return nil
 	}
-	if s.ipv4 != nil {
-		fd, err := s.ipv4.SyscallConn()
-		if err != nil {
-			return err
-		}
-		err = fd.Control(func(fd uintptr) {
-			operr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, fwmarkIoctl, int(mark))
-		})
-		if err == nil {
-			err = operr
-		}
-		if err != nil {
-			return err
-		}
-	}
-	if s.ipv6 != nil {
-		fd, err := s.ipv6.SyscallConn()
-		if err != nil {
-			return err
-		}
-		err = fd.Control(func(fd uintptr) {
-			operr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, fwmarkIoctl, int(mark))
-		})
-		if err == nil {
-			err = operr
-		}
-		if err != nil {
-			return err
+	for _, socks := range [][]*stdNetSocket{s.v4, s.v6} {
+		for _, sock := range socks {
+			fd, err := sock.conn.SyscallConn()
+			if err != nil {
+				return err
+			}
+			err = fd.Control(func(fd uintptr) {
+				operr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, fwmarkIoctl, int(mark))
+			})
+			if err == nil {
+				err = operr
+			}
+			if err != nil {
+				return err
+			}
 		}
 	}
 	return nil

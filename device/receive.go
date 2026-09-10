@@ -543,7 +543,7 @@ func (peer *Peer) processInboundContainer(elemsContainer *QueueInboundElementsCo
 		peer.timersDataReceived()
 	}
 	if len(scratch) > 0 {
-		_, err := device.tun.device.Write(scratch, MessageTransportOffsetContent)
+		_, err := device.writeTUN(peer.tunQueue, scratch, MessageTransportOffsetContent)
 		if err != nil && !device.isClosed() {
 			device.log.Errorf("Failed to write packets to TUN device: %v", err)
 		}

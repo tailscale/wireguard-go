@@ -26,13 +26,24 @@ type controlFn func(network, address string, c syscall.RawConn) error
 // that can apply socket options.
 var controlFns = []controlFn{}
 
+// reusePortFn sets SO_REUSEPORT, or is nil on platforms that lack it.
+// See [WithQueues].
+var reusePortFn controlFn
+
 // listenConfig returns a net.ListenConfig that applies the controlFns to the
 // socket prior to bind. This is used to apply socket buffer sizing and packet
 // information OOB configuration for sticky sockets.
-func listenConfig() *net.ListenConfig {
+//
+// Extra may be used to supply additional controlFns.
+func listenConfig(extra ...controlFn) *net.ListenConfig {
 	return &net.ListenConfig{
 		Control: func(network, address string, c syscall.RawConn) error {
 			for _, fn := range controlFns {
+				if err := fn(network, address, c); err != nil {
+					return err
+				}
+			}
+			for _, fn := range extra {
 				if err := fn(network, address, c); err != nil {
 					return err
 				}

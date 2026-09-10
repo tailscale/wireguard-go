@@ -148,6 +148,13 @@ func (peer *Peer) SendPriorityMessage() {
 	elem.packet = buf.slab[offset : offset+n]
 	elem.plaintextOffset = offset
 	elem.peer = peer
+
+	// This path bypasses peer.queue.staged, so it has to take txMu itself to
+	// keep its nonce and its queue position in the same order as everything
+	// [Peer.sendOneStaged] assigns.
+	peer.txMu.Lock()
+	defer peer.txMu.Unlock()
+
 	elem.nonce = keypair.sendNonce.Add(1) - 1
 	if elem.nonce >= RejectAfterMessages {
 		keypair.sendNonce.Store(RejectAfterMessages)
@@ -277,8 +284,9 @@ func (peer *Peer) keepKeyFreshSending() {
 	}
 }
 
-func (device *Device) RoutineReadFromTUN() {
+func (device *Device) RoutineReadFromTUN(read tun.ReadFunc) {
 	defer func() {
+		// TODO: do not log per each queue.
 		device.log.Verbosef("Routine: TUN reader - stopped")
 		device.state.stopping.Done()
 		device.queue.encryption.wg.Done()
@@ -323,7 +331,7 @@ func (device *Device) RoutineReadFromTUN() {
 		}
 
 		// read packets
-		count, readErr = device.tun.device.Read(buf.slab, packets)
+		count, readErr = read(buf.slab, packets)
 		for i, meta := range packets[:count] {
 			if meta.Size < 1 || meta.Size > MaxContentSize {
 				continue
@@ -440,46 +448,69 @@ top:
 	}
 
 	for {
-		var elemsContainerOOO *QueueOutboundElementsContainer
-		select {
-		case elemsContainer := <-peer.queue.staged:
-			i := 0
-			for _, elem := range elemsContainer.elems {
-				elem.peer = peer
-				elem.nonce = keypair.sendNonce.Add(1) - 1
-				if elem.nonce >= RejectAfterMessages {
-					keypair.sendNonce.Store(RejectAfterMessages)
-					if elemsContainerOOO == nil {
-						elemsContainerOOO = peer.device.GetOutboundElementsContainer()
-					}
-					elemsContainerOOO.elems = append(elemsContainerOOO.elems, elem)
-					continue
-				} else {
-					elemsContainer.elems[i] = elem
-					i++
-				}
-
-				elem.keypair = keypair
-			}
-			elemsContainer.elems = elemsContainer.elems[:i]
-
-			if elemsContainerOOO != nil {
-				peer.StagePackets(elemsContainerOOO) // XXX: Out of order, but we can't front-load go chans
-			}
-
-			if len(elemsContainer.elems) == 0 {
-				peer.device.PutOutboundElementsContainer(elemsContainer)
-				goto top
-			}
-
-			peer.queueOutboundIfRunning(elemsContainer)
-
-			if elemsContainerOOO != nil {
-				goto top
-			}
-		default:
+		switch peer.sendOneStaged(keypair) {
+		case stagedNone:
 			return
+		case stagedRestart:
+			goto top
 		}
+	}
+}
+
+type stagedResult int
+
+const (
+	stagedNone stagedResult = iota
+	stagedMore
+	stagedRestart
+)
+
+// sendOneStaged draws a nonce from keypair for every packet in one staged
+// container and pushes the container onto the outbound and encryption queues.
+func (peer *Peer) sendOneStaged(keypair *Keypair) stagedResult {
+	peer.txMu.Lock()
+	defer peer.txMu.Unlock()
+
+	var elemsContainerOOO *QueueOutboundElementsContainer
+	select {
+	case elemsContainer := <-peer.queue.staged:
+		i := 0
+		for _, elem := range elemsContainer.elems {
+			elem.peer = peer
+			elem.nonce = keypair.sendNonce.Add(1) - 1
+			if elem.nonce >= RejectAfterMessages {
+				keypair.sendNonce.Store(RejectAfterMessages)
+				if elemsContainerOOO == nil {
+					elemsContainerOOO = peer.device.GetOutboundElementsContainer()
+				}
+				elemsContainerOOO.elems = append(elemsContainerOOO.elems, elem)
+				continue
+			} else {
+				elemsContainer.elems[i] = elem
+				i++
+			}
+
+			elem.keypair = keypair
+		}
+		elemsContainer.elems = elemsContainer.elems[:i]
+
+		if elemsContainerOOO != nil {
+			peer.StagePackets(elemsContainerOOO) // XXX: Out of order, but we can't front-load go chans
+		}
+
+		if len(elemsContainer.elems) == 0 {
+			peer.device.PutOutboundElementsContainer(elemsContainer)
+			return stagedRestart
+		}
+
+		peer.queueOutboundIfRunning(elemsContainer)
+
+		if elemsContainerOOO != nil {
+			return stagedRestart
+		}
+		return stagedMore
+	default:
+		return stagedNone
 	}
 }
 

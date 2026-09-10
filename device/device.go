@@ -90,13 +90,19 @@ type Device struct {
 
 	tun struct {
 		device tun.Device
-		mtu    atomic.Int32
+		// mq is device if it exposes more than one kernel queue, else nil.
+		mq  tun.MultiQueueDevice
+		mtu atomic.Int32
 	}
 
 	ipcMutex sync.RWMutex
 	closed   chan struct{}
 	log      *Logger
 }
+
+// MaxTAPQueues is the most kernel queues a [tun.Device] can be created with.
+// It is the kernel's MAX_TAP_QUEUES.
+const MaxTAPQueues = 256
 
 type config struct {
 	queueStagedSize            int
@@ -387,6 +393,12 @@ func NewDevice(tunDevice tun.Device, bind conn.Bind, logger *Logger, opts ...Opt
 		mtu = DefaultMTU
 	}
 	device.tun.mtu.Store(int32(mtu))
+	readFuncs := []tun.ReadFunc{tunDevice.Read}
+	if mq, ok := tunDevice.(tun.MultiQueueDevice); ok {
+		if fns := mq.ReadFuncs(); len(fns) > 1 {
+			device.tun.mq, readFuncs = mq, fns
+		}
+	}
 	device.peers.keyMap = make(map[NoisePublicKey]*Peer)
 	device.rate.limiter.Init()
 	device.indexTable.Init()
@@ -410,9 +422,11 @@ func NewDevice(tunDevice tun.Device, bind conn.Bind, logger *Logger, opts ...Opt
 		go device.RoutineHandshake(i + 1)
 	}
 
-	device.state.stopping.Add(1)      // RoutineReadFromTUN
-	device.queue.encryption.wg.Add(1) // RoutineReadFromTUN
-	go device.RoutineReadFromTUN()
+	device.state.stopping.Add(len(readFuncs))      // RoutineReadFromTUN
+	device.queue.encryption.wg.Add(len(readFuncs)) // RoutineReadFromTUN
+	for _, read := range readFuncs {
+		go device.RoutineReadFromTUN(read)
+	}
 	go device.RoutineTUNEventReader()
 
 	return device
@@ -860,4 +874,13 @@ func (device *Device) BindClose() error {
 	err := closeBindLocked(device)
 	device.net.Unlock()
 	return err
+}
+
+// writeTUN writes bufs to the TUN queue selected by q. See
+// [tun.MultiQueueDevice.WriteQueue].
+func (device *Device) writeTUN(q int, bufs [][]byte, offset int) (int, error) {
+	if device.tun.mq != nil {
+		return device.tun.mq.WriteQueue(q, bufs, offset)
+	}
+	return device.tun.device.Write(bufs, offset)
 }

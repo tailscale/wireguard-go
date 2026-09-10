@@ -77,7 +77,7 @@ type WinRingBind struct {
 	isOpen atomic.Uint32 // 0, 1, or 2
 }
 
-func NewDefaultBind() Bind { return NewWinRingBind() }
+func NewDefaultBind(_ ...Option) Bind { return NewWinRingBind() }
 
 func NewWinRingBind() Bind {
 	if !winrio.Initialize() {
@@ -522,7 +522,11 @@ func (bind *WinRingBind) Send(bufs [][]byte, endpoint Endpoint, offset int) erro
 func (s *StdNetBind) BindSocketToInterface4(interfaceIndex uint32, blackhole bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	sysconn, err := s.ipv4.SyscallConn()
+	conn, err := firstConn(s.v4) // Single-queue on Windows, see [StdNetBind.Open].
+	if err != nil {
+		return err
+	}
+	sysconn, err := conn.SyscallConn()
 	if err != nil {
 		return err
 	}
@@ -542,7 +546,11 @@ func (s *StdNetBind) BindSocketToInterface4(interfaceIndex uint32, blackhole boo
 func (s *StdNetBind) BindSocketToInterface6(interfaceIndex uint32, blackhole bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	sysconn, err := s.ipv6.SyscallConn()
+	conn, err := firstConn(s.v6) // Single-queue on Windows, see [StdNetBind.Open].
+	if err != nil {
+		return err
+	}
+	sysconn, err := conn.SyscallConn()
 	if err != nil {
 		return err
 	}

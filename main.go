@@ -111,11 +111,22 @@ func main() {
 
 	// open TUN device (or use supplied fd)
 
+	queues := 1
+	if v := os.Getenv("WG_QUEUES"); v != "" {
+		if n, perr := strconv.Atoi(v); perr == nil {
+			queues = min(max(1, n), device.MaxTAPQueues)
+		}
+	}
+
 	tdev, err := func() (tun.Device, error) {
 		tunFdStr := os.Getenv(ENV_WG_TUN_FD)
 		if tunFdStr == "" {
-			return tun.CreateTUN(interfaceName, device.DefaultMTU)
+			return tun.CreateTUN(interfaceName, device.DefaultMTU, tun.WithQueues(queues))
 		}
+		// A tun handed over as one fd has one queue. That includes the
+		// daemonized child re-exec'd below, which inherits only queue 0, so
+		// WG_QUEUES has an effect only in the foreground.
+		queues = 1
 
 		// construct tun device from supplied fd
 
@@ -222,7 +233,7 @@ func main() {
 		return
 	}
 
-	device := device.NewDevice(tdev, conn.NewDefaultBind(), logger)
+	device := device.NewDevice(tdev, conn.NewDefaultBind(conn.WithQueues(queues)), logger)
 
 	logger.Verbosef("Device started")
 

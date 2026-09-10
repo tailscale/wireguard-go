@@ -7,6 +7,7 @@ package device
 
 import (
 	"container/list"
+	"encoding/binary"
 	"errors"
 	"net/netip"
 	"runtime"
@@ -91,9 +92,17 @@ type Peer struct {
 		inbound  chan *QueueInboundElementsContainer  // sequential ordering of tun writing
 	}
 
+	// txMu serializes drawing nonces from the current keypair with the push to
+	// [Peer.queue.outbound].See [Peer.sendOneStaged] and [Peer.SendPriorityMessage].
+	txMu sync.Mutex
+
 	cookieGenerator             CookieGenerator
 	trieEntries                 list.List
 	persistentKeepaliveInterval atomic.Uint32
+
+	// tunQueue is a stable identifier selecting the TUN queue this peer's
+	// decrypted packets are written to. See [Device.writeTUN].
+	tunQueue int
 }
 
 func (device *Device) NewPeer(pk NoisePublicKey) (*Peer, error) {
@@ -118,6 +127,9 @@ func (device *Device) NewPeer(pk NoisePublicKey) (*Peer, error) {
 
 	peer.cookieGenerator.Init(pk)
 	peer.device = device
+	// Public keys are uniformly distributed, so the low bytes spread fine. The
+	// shift keeps the value non-negative where int is 32 bits.
+	peer.tunQueue = int(binary.LittleEndian.Uint32(pk[:4]) >> 1)
 
 	// staged is never closed, and it can be accessed concurrent to [Peer.Start],
 	// so we init here instead of [Peer.Start].

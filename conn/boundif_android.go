@@ -6,7 +6,11 @@
 package conn
 
 func (s *StdNetBind) PeekLookAtSocketFd4() (fd int, err error) {
-	sysconn, err := s.ipv4.SyscallConn()
+	conn, err := firstConn(s.v4) // Single-queue on Android, see StdNetBind.Open.
+	if err != nil {
+		return -1, err
+	}
+	sysconn, err := conn.SyscallConn()
 	if err != nil {
 		return -1, err
 	}
@@ -20,7 +24,11 @@ func (s *StdNetBind) PeekLookAtSocketFd4() (fd int, err error) {
 }
 
 func (s *StdNetBind) PeekLookAtSocketFd6() (fd int, err error) {
-	sysconn, err := s.ipv6.SyscallConn()
+	conn, err := firstConn(s.v6) // Single-queue on Android, see StdNetBind.Open.
+	if err != nil {
+		return -1, err
+	}
+	sysconn, err := conn.SyscallConn()
 	if err != nil {
 		return -1, err
 	}
