@@ -86,9 +86,17 @@ type ChannelTUN struct {
 	closed chan struct{}
 	events chan tun.Event
 	tun    chTun
+	queues []tun.ReadWriter
 }
 
 func NewChannelTUN() *ChannelTUN {
+	return NewMultiQueueChannelTUN(1)
+}
+
+func NewMultiQueueChannelTUN(queues int) *ChannelTUN {
+	if queues < 1 {
+		panic("tuntest: queues must be positive")
+	}
 	c := &ChannelTUN{
 		Inbound:  make(chan []byte),
 		Outbound: make(chan []byte),
@@ -96,6 +104,10 @@ func NewChannelTUN() *ChannelTUN {
 		events:   make(chan tun.Event, 1),
 	}
 	c.tun.c = c
+	c.queues = append(c.queues, &c.tun)
+	for range queues - 1 {
+		c.queues = append(c.queues, &chTun{c: c})
+	}
 	c.events <- tun.EventUp
 	return c
 }
@@ -144,6 +156,9 @@ func (t *chTun) Write(packets [][]byte, offset int) (int, error) {
 func (t *chTun) BatchSize() int {
 	return 1
 }
+
+// Queues implements [tun.MultiQueueDevice].
+func (t *chTun) Queues() []tun.ReadWriter { return t.c.queues }
 
 const DefaultMTU = 1420
 

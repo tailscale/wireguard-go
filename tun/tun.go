@@ -17,7 +17,7 @@ const (
 	EventMTUUpdate
 )
 
-// ReadPacket describes a packet read by [tun.Device.Read].
+// ReadPacket describes a packet read by [Reader.Read].
 type ReadPacket struct {
 	// Offset is the starting byte offset.
 	Offset int
@@ -26,14 +26,12 @@ type ReadPacket struct {
 }
 
 // ReadPacketSpacing is the number of bytes reserved before the first packet,
-// between adjacent packets, and after the final packet filled by [Device.Read].
+// between adjacent packets, and after the final packet filled by [Reader.Read].
 const ReadPacketSpacing = 64
 
-type Device interface {
-	// File returns the file descriptor of the device.
-	File() *os.File
-
-	// Read reads one or more packets from the [Device] into slab. On return, it
+// Reader reads packets from a single queue of a [Device].
+type Reader interface {
+	// Read reads one or more packets from the queue into slab. On return, it
 	// populates packets and returns the number of entries to evaluate. Those
 	// entries are valid even when err is non-nil. Callers must provide at least
 	// [Device.BatchSize] entries.
@@ -46,12 +44,31 @@ type Device interface {
 	// Read returns [ErrTooManySegments] if packets or slab cannot accommodate
 	// all packets produced by the read.
 	Read(slab []byte, packets []ReadPacket) (n int, err error)
+}
 
-	// Write one or more packets to the device (without any additional headers).
+// Writer writes packets to a single queue of a [Device].
+type Writer interface {
+	// Write one or more packets to the queue (without any additional headers).
 	// On a successful write it returns the number of packets written. A nonzero
 	// offset can be used to instruct the Device on where to begin writing from
 	// each packet contained within the bufs slice.
 	Write(bufs [][]byte, offset int) (int, error)
+}
+
+// ReadWriter is a single queue of a [Device]. Distinct ReadWriters of one
+// Device may be used concurrently.
+type ReadWriter interface {
+	Reader
+	Writer
+}
+
+type Device interface {
+	// ReadWriter is the Device's first queue. A [MultiQueueDevice] exposes the
+	// rest.
+	ReadWriter
+
+	// File returns the file descriptor of the device.
+	File() *os.File
 
 	// MTU returns the MTU of the Device.
 	MTU() (int, error)
@@ -69,6 +86,53 @@ type Device interface {
 	// written in a single read/write call. BatchSize must not change over the
 	// lifetime of a Device.
 	BatchSize() int
+}
+
+// MultiQueueDevice is a Device that exposes more than one kernel queue, each
+// backed by its own file descriptor. The count is fixed for the Device's
+// lifetime. Prefer [QueuesOf] over asserting to this interface.
+type MultiQueueDevice interface {
+	Device
+
+	// Queues returns one [ReadWriter] per kernel queue, in order, with
+	// at least one entry. Entry 0 is equivalent to the Device's own
+	// [Reader.Read] and [Writer.Write].
+	Queues() []ReadWriter
+}
+
+// QueuesOf returns dev's queues, or dev itself as the single queue. The result
+// always has at least one entry.
+func QueuesOf(dev Device) []ReadWriter {
+	if mq, ok := dev.(MultiQueueDevice); ok {
+		if qs := mq.Queues(); len(qs) > 0 {
+			return qs
+		}
+	}
+	return []ReadWriter{dev}
+}
+
+// An Option configures a [Device] at creation time.
+type Option interface {
+	apply(*config)
+}
+
+type optionFunc func(*config)
+
+func (f optionFunc) apply(config *config) {
+	f(config)
+}
+
+type config struct {
+	extraQueues int // Additional tun fd's in IFF_MULTI_QUEUE group to open.
+}
+
+// WithExtraQueues requests that the [Device] be created with n queues beyond
+// the first. Only Linux implements multiqueue TUN.
+// Callers must consult [QueuesOf] rather than assume they got n.
+func WithExtraQueues(n int) Option {
+	return optionFunc(func(config *config) {
+		config.extraQueues = max(0, n)
+	})
 }
 
 // GRODevice is a Device extended with methods for disabling GRO. Certain OS

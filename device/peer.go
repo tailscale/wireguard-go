@@ -7,6 +7,7 @@ package device
 
 import (
 	"container/list"
+	"encoding/binary"
 	"errors"
 	"net/netip"
 	"runtime"
@@ -94,6 +95,10 @@ type Peer struct {
 	cookieGenerator             CookieGenerator
 	trieEntries                 list.List
 	persistentKeepaliveInterval atomic.Uint32
+
+	// tunQueue indexes [Device.tun.queues], selecting the queue this peer's
+	// decrypted packets are written to. See [Peer.writeTUN].
+	tunQueue int
 }
 
 func (device *Device) NewPeer(pk NoisePublicKey) (*Peer, error) {
@@ -118,6 +123,8 @@ func (device *Device) NewPeer(pk NoisePublicKey) (*Peer, error) {
 
 	peer.cookieGenerator.Init(pk)
 	peer.device = device
+	// Public keys are uniformly distributed, so the low bytes spread fine.
+	peer.tunQueue = int(binary.LittleEndian.Uint32(pk[:4]) % uint32(len(device.tun.queues)))
 
 	// staged is never closed, and it can be accessed concurrent to [Peer.Start],
 	// so we init here instead of [Peer.Start].
@@ -212,6 +219,12 @@ func (peer *Peer) SendBuffers(buffers [][]byte) error {
 		peer.txBytes.Add(totalLen)
 	}
 	return err
+}
+
+// writeTUN writes bufs to the TUN queue this peer is pinned to, keeping the
+// peer's decrypted packets in order.
+func (peer *Peer) writeTUN(bufs [][]byte, offset int) (int, error) {
+	return peer.device.tun.queues[peer.tunQueue].Write(bufs, offset)
 }
 
 func (peer *Peer) String() string {

@@ -159,7 +159,7 @@ func tunDestroy(name string) error {
 	return nil
 }
 
-func CreateTUN(name string, mtu int) (Device, error) {
+func CreateTUN(name string, mtu int, _ ...Option) (Device, error) {
 	if len(name) > unix.IFNAMSIZ-1 {
 		return nil, errors.New("interface name too long")
 	}

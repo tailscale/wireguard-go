@@ -277,14 +277,15 @@ func (peer *Peer) keepKeyFreshSending() {
 	}
 }
 
-func (device *Device) RoutineReadFromTUN() {
+// RoutineReadFromTUN reads from one TUN queue. id identifies it in logs only.
+func (device *Device) RoutineReadFromTUN(id int, queue tun.Reader) {
 	defer func() {
-		device.log.Verbosef("Routine: TUN reader - stopped")
+		device.log.Verbosef("Routine: TUN reader %d - stopped", id)
 		device.state.stopping.Done()
 		device.queue.encryption.wg.Done()
 	}()
 
-	device.log.Verbosef("Routine: TUN reader - started")
+	device.log.Verbosef("Routine: TUN reader %d - started", id)
 
 	var (
 		batchSize = device.BatchSize()
@@ -323,7 +324,7 @@ func (device *Device) RoutineReadFromTUN() {
 		}
 
 		// read packets
-		count, readErr = device.tun.device.Read(buf.slab, packets)
+		count, readErr = queue.Read(buf.slab, packets)
 		for i, meta := range packets[:count] {
 			if meta.Size < 1 || meta.Size > MaxContentSize {
 				continue

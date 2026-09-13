@@ -90,6 +90,7 @@ type Device struct {
 
 	tun struct {
 		device tun.Device
+		queues []tun.ReadWriter // device's queues, at least one, see [tun.QueuesOf]
 		mtu    atomic.Int32
 	}
 
@@ -387,6 +388,7 @@ func NewDevice(tunDevice tun.Device, bind conn.Bind, logger *Logger, opts ...Opt
 		mtu = DefaultMTU
 	}
 	device.tun.mtu.Store(int32(mtu))
+	device.tun.queues = tun.QueuesOf(tunDevice)
 	device.peers.keyMap = make(map[NoisePublicKey]*Peer)
 	device.rate.limiter.Init()
 	device.indexTable.Init()
@@ -410,9 +412,11 @@ func NewDevice(tunDevice tun.Device, bind conn.Bind, logger *Logger, opts ...Opt
 		go device.RoutineHandshake(i + 1)
 	}
 
-	device.state.stopping.Add(1)      // RoutineReadFromTUN
-	device.queue.encryption.wg.Add(1) // RoutineReadFromTUN
-	go device.RoutineReadFromTUN()
+	device.state.stopping.Add(len(device.tun.queues))      // RoutineReadFromTUN
+	device.queue.encryption.wg.Add(len(device.tun.queues)) // RoutineReadFromTUN
+	for i, q := range device.tun.queues {
+		go device.RoutineReadFromTUN(i, q)
+	}
 	go device.RoutineTUNEventReader()
 
 	return device

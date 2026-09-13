@@ -151,6 +151,12 @@ func (pair *testPair) Send(tb testing.TB, ping SendDirection, done chan struct{}
 
 // genTestPair creates a testPair.
 func genTestPair(tb testing.TB, realSocket bool) (pair testPair) {
+	return genTestPairQueues(tb, realSocket, 1)
+}
+
+// genTestPairQueues creates a testPair whose TUNs each have the given number
+// of queues.
+func genTestPairQueues(tb testing.TB, realSocket bool, queues int) (pair testPair) {
 	cfg, endpointCfg := genConfigs(tb)
 	var binds [2]conn.Bind
 	if realSocket {
@@ -161,7 +167,7 @@ func genTestPair(tb testing.TB, realSocket bool) (pair testPair) {
 	// Bring up a ChannelTun for each config.
 	for i := range pair {
 		p := &pair[i]
-		p.tun = tuntest.NewChannelTUN()
+		p.tun = tuntest.NewMultiQueueChannelTUN(queues)
 		p.ip = netip.AddrFrom4([4]byte{1, 0, 0, byte(i + 1)})
 		level := LogLevelVerbose
 		if _, ok := tb.(*testing.B); ok && !testing.Verbose() {
@@ -273,135 +279,149 @@ func TestPriorityMessageOnEstablishment(t *testing.T) {
 	}
 }
 
+// Queue counts to run the datapath tests at: one queue (the default) and four.
+var testQueueCounts = []int{1, 4}
+
 func TestTwoDevicePing(t *testing.T) {
-	goroutineLeakCheck(t)
-	pair := genTestPair(t, true)
-	t.Run("ping 1.0.0.1", func(t *testing.T) {
-		pair.Send(t, Ping, nil)
-	})
-	t.Run("ping 1.0.0.2", func(t *testing.T) {
-		pair.Send(t, Pong, nil)
-	})
+	for _, queues := range testQueueCounts {
+		t.Run(fmt.Sprintf("queues=%d", queues), func(t *testing.T) {
+			goroutineLeakCheck(t)
+			pair := genTestPairQueues(t, true, queues)
+			t.Run("ping 1.0.0.1", func(t *testing.T) {
+				pair.Send(t, Ping, nil)
+			})
+			t.Run("ping 1.0.0.2", func(t *testing.T) {
+				pair.Send(t, Pong, nil)
+			})
+		})
+	}
 }
 
 func TestUpDown(t *testing.T) {
-	goroutineLeakCheck(t)
-	const itrials = 50
-	const otrials = 10
+	for _, queues := range testQueueCounts {
+		t.Run(fmt.Sprintf("queues=%d", queues), func(t *testing.T) {
+			goroutineLeakCheck(t)
+			const itrials = 50
+			const otrials = 10
 
-	for n := 0; n < otrials; n++ {
-		pair := genTestPair(t, false)
-		for i := range pair {
-			for k := range pair[i].dev.peers.keyMap {
-				pair[i].dev.IpcSet(fmt.Sprintf("public_key=%s\npersistent_keepalive_interval=1\n", hex.EncodeToString(k[:])))
-			}
-		}
-		var wg sync.WaitGroup
-		wg.Add(len(pair))
-		for i := range pair {
-			go func(d *Device) {
-				defer wg.Done()
-				for i := 0; i < itrials; i++ {
-					if err := d.Up(); err != nil {
-						t.Errorf("failed up bring up device: %v", err)
+			for n := 0; n < otrials; n++ {
+				pair := genTestPairQueues(t, false, queues)
+				for i := range pair {
+					for k := range pair[i].dev.peers.keyMap {
+						pair[i].dev.IpcSet(fmt.Sprintf("public_key=%s\npersistent_keepalive_interval=1\n", hex.EncodeToString(k[:])))
 					}
-					time.Sleep(time.Duration(rand.Intn(int(time.Nanosecond * (0x10000 - 1)))))
-					if err := d.Down(); err != nil {
-						t.Errorf("failed to bring down device: %v", err)
-					}
-					time.Sleep(time.Duration(rand.Intn(int(time.Nanosecond * (0x10000 - 1)))))
 				}
-			}(pair[i].dev)
-		}
-		wg.Wait()
-		for i := range pair {
-			pair[i].dev.Up()
-			pair[i].dev.Close()
-		}
+				var wg sync.WaitGroup
+				wg.Add(len(pair))
+				for i := range pair {
+					go func(d *Device) {
+						defer wg.Done()
+						for i := 0; i < itrials; i++ {
+							if err := d.Up(); err != nil {
+								t.Errorf("failed up bring up device: %v", err)
+							}
+							time.Sleep(time.Duration(rand.Intn(int(time.Nanosecond * (0x10000 - 1)))))
+							if err := d.Down(); err != nil {
+								t.Errorf("failed to bring down device: %v", err)
+							}
+							time.Sleep(time.Duration(rand.Intn(int(time.Nanosecond * (0x10000 - 1)))))
+						}
+					}(pair[i].dev)
+				}
+				wg.Wait()
+				for i := range pair {
+					pair[i].dev.Up()
+					pair[i].dev.Close()
+				}
+			}
+		})
 	}
 }
 
 // TestConcurrencySafety does other things concurrently with tunnel use.
 // It is intended to be used with the race detector to catch data races.
 func TestConcurrencySafety(t *testing.T) {
-	pair := genTestPair(t, true)
-	done := make(chan struct{})
+	for _, queues := range testQueueCounts {
+		t.Run(fmt.Sprintf("queues=%d", queues), func(t *testing.T) {
+			pair := genTestPairQueues(t, true, queues)
+			done := make(chan struct{})
 
-	const warmupIters = 10
-	var warmup sync.WaitGroup
-	warmup.Add(warmupIters)
-	go func() {
-		// Send data continuously back and forth until we're done.
-		// Note that we may continue to attempt to send data
-		// even after done is closed.
-		i := warmupIters
-		for ping := Ping; ; ping = !ping {
-			pair.Send(t, ping, done)
-			select {
-			case <-done:
-				return
-			default:
-			}
-			if i > 0 {
-				warmup.Done()
-				i--
-			}
-		}
-	}()
-	warmup.Wait()
+			const warmupIters = 10
+			var warmup sync.WaitGroup
+			warmup.Add(warmupIters)
+			go func() {
+				// Send data continuously back and forth until we're done.
+				// Note that we may continue to attempt to send data
+				// even after done is closed.
+				i := warmupIters
+				for ping := Ping; ; ping = !ping {
+					pair.Send(t, ping, done)
+					select {
+					case <-done:
+						return
+					default:
+					}
+					if i > 0 {
+						warmup.Done()
+						i--
+					}
+				}
+			}()
+			warmup.Wait()
 
-	applyCfg := func(cfg string) {
-		err := pair[0].dev.IpcSet(cfg)
-		if err != nil {
-			t.Fatal(err)
-		}
+			applyCfg := func(cfg string) {
+				err := pair[0].dev.IpcSet(cfg)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			// Change persistent_keepalive_interval concurrently with tunnel use.
+			t.Run("persistentKeepaliveInterval", func(t *testing.T) {
+				var pub NoisePublicKey
+				for key := range pair[0].dev.peers.keyMap {
+					pub = key
+					break
+				}
+				cfg := uapiCfg(
+					"public_key", hex.EncodeToString(pub[:]),
+					"persistent_keepalive_interval", "1",
+				)
+				for i := 0; i < 1000; i++ {
+					applyCfg(cfg)
+				}
+			})
+
+			// Change private keys concurrently with tunnel use.
+			t.Run("privateKey", func(t *testing.T) {
+				bad := uapiCfg("private_key", "7777777777777777777777777777777777777777777777777777777777777777")
+				good := uapiCfg("private_key", hex.EncodeToString(pair[0].dev.staticIdentity.privateKey[:]))
+				// Set iters to a large number like 1000 to flush out data races quickly.
+				// Don't leave it large. That can cause logical races
+				// in which the handshake is interleaved with key changes
+				// such that the private key appears to be unchanging but
+				// other state gets reset, which can cause handshake failures like
+				// "Received packet with invalid mac1".
+				const iters = 1
+				for i := 0; i < iters; i++ {
+					applyCfg(bad)
+					applyCfg(good)
+				}
+			})
+
+			// Perform bind updates and keepalive sends concurrently with tunnel use.
+			t.Run("bindUpdate and keepalive", func(t *testing.T) {
+				const iters = 10
+				for i := 0; i < iters; i++ {
+					for _, peer := range pair {
+						peer.dev.BindUpdate()
+						peer.dev.SendKeepalivesToPeersWithCurrentKeypair()
+					}
+				}
+			})
+			close(done)
+		})
 	}
-
-	// Change persistent_keepalive_interval concurrently with tunnel use.
-	t.Run("persistentKeepaliveInterval", func(t *testing.T) {
-		var pub NoisePublicKey
-		for key := range pair[0].dev.peers.keyMap {
-			pub = key
-			break
-		}
-		cfg := uapiCfg(
-			"public_key", hex.EncodeToString(pub[:]),
-			"persistent_keepalive_interval", "1",
-		)
-		for i := 0; i < 1000; i++ {
-			applyCfg(cfg)
-		}
-	})
-
-	// Change private keys concurrently with tunnel use.
-	t.Run("privateKey", func(t *testing.T) {
-		bad := uapiCfg("private_key", "7777777777777777777777777777777777777777777777777777777777777777")
-		good := uapiCfg("private_key", hex.EncodeToString(pair[0].dev.staticIdentity.privateKey[:]))
-		// Set iters to a large number like 1000 to flush out data races quickly.
-		// Don't leave it large. That can cause logical races
-		// in which the handshake is interleaved with key changes
-		// such that the private key appears to be unchanging but
-		// other state gets reset, which can cause handshake failures like
-		// "Received packet with invalid mac1".
-		const iters = 1
-		for i := 0; i < iters; i++ {
-			applyCfg(bad)
-			applyCfg(good)
-		}
-	})
-
-	// Perform bind updates and keepalive sends concurrently with tunnel use.
-	t.Run("bindUpdate and keepalive", func(t *testing.T) {
-		const iters = 10
-		for i := 0; i < iters; i++ {
-			for _, peer := range pair {
-				peer.dev.BindUpdate()
-				peer.dev.SendKeepalivesToPeersWithCurrentKeypair()
-			}
-		}
-	})
-
-	close(done)
 }
 
 func BenchmarkLatency(b *testing.B) {

@@ -111,10 +111,26 @@ func main() {
 
 	// open TUN device (or use supplied fd)
 
+	var extraQueues int
+	if v := os.Getenv("WG_QUEUES"); v != "" {
+		n, perr := strconv.Atoi(v)
+		if perr != nil || n < 1 {
+			fmt.Fprintf(os.Stderr, "Invalid WG_QUEUES %q: must be a positive integer\n", v)
+			os.Exit(ExitSetupFailed)
+		}
+		extraQueues = n - 1
+	}
+	if !foreground && extraQueues > 0 {
+		// The daemonized child re-execs with a single inherited tun fd.
+		// Don't open queues it cannot use.
+		fmt.Fprintf(os.Stderr, "WG_QUEUES=%d ignored: multiqueue requires --foreground\n", extraQueues+1)
+		extraQueues = 0
+	}
+
 	tdev, err := func() (tun.Device, error) {
 		tunFdStr := os.Getenv(ENV_WG_TUN_FD)
 		if tunFdStr == "" {
-			return tun.CreateTUN(interfaceName, device.DefaultMTU)
+			return tun.CreateTUN(interfaceName, device.DefaultMTU, tun.WithExtraQueues(extraQueues))
 		}
 
 		// construct tun device from supplied fd
@@ -151,6 +167,15 @@ func main() {
 		logger.Errorf("Failed to create TUN device: %v", err)
 		os.Exit(ExitSetupFailed)
 	}
+
+	queues := len(tun.QueuesOf(tdev))
+	logger.Verbosef("TUN device has %d queue(s)", queues)
+
+	// Size buffers to CPU and IO queues counts.
+	//
+	// TODO: make cgroup-aware with runtime.GOMAXPROCS(0).
+	cpus := runtime.NumCPU()
+	queueSize := min(1024, max(cpus, cpus*4/queues))
 
 	// open UAPI file (or use supplied fd)
 
@@ -222,7 +247,9 @@ func main() {
 		return
 	}
 
-	device := device.NewDevice(tdev, conn.NewDefaultBind(), logger)
+	device := device.NewDevice(tdev, conn.NewDefaultBind(), logger,
+		device.WithQueueInboundSize(queueSize),
+		device.WithQueueOutboundSize(queueSize))
 
 	logger.Verbosef("Device started")
 

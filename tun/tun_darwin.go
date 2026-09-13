@@ -98,7 +98,7 @@ func (tun *NativeTun) routineRouteListener(tunIfindex int) {
 	}
 }
 
-func CreateTUN(name string, mtu int) (Device, error) {
+func CreateTUN(name string, mtu int, _ ...Option) (Device, error) {
 	ifIndex := -1
 	if name != "utun" {
 		_, err := fmt.Sscanf(name, "utun%d", &ifIndex)
