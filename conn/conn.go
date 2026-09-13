@@ -12,6 +12,7 @@ import (
 	"net/netip"
 	"reflect"
 	"runtime"
+	"strconv"
 	"strings"
 )
 
@@ -69,6 +70,93 @@ type Bind interface {
 	// BatchSize is the number of buffers expected to be passed to
 	// the ReceiveFuncs, and the maximum expected to be passed to SendBatch.
 	BatchSize() int
+}
+
+// An Option configures a [Bind].
+type Option interface {
+	apply(*config)
+}
+
+type optionFunc func(*config)
+
+func (f optionFunc) apply(config *config) {
+	f(config)
+}
+
+type config struct {
+	sockets int
+}
+
+func defaultConfig() config {
+	return config{
+		sockets: 1,
+	}
+}
+
+// WithSockets requests that the [Bind] listens on n sockets per address family.
+// n must be at least 1.
+//
+// [Bind.Open] will return at least n [ReceiveFunc]s per family. Implementations
+// may choose to return more [ReceiveFunc]s than was requested. Callers must
+// consult the number returned by Open rather than assume they got n.
+//
+// Errors are returned if more sockets are requested than the OS supports or if
+// the per-process limit was reached.
+//
+// Platforms that do not support this option silently ignore the request, and
+// open a single socket per address family. Currently only implemented on Linux,
+// via SO_REUSEPORT.
+func WithSockets(n int) Option {
+	return optionFunc(func(config *config) {
+		config.sockets = n
+	})
+}
+
+// MultiSocketBind is a Bind that operates on more than one socket per address
+// family. The count is fixed between Open and Close.
+type MultiSocketBind interface {
+	Bind
+
+	// SendTo is [Bind.Send] directed at one of the Bind's send sockets.
+	// Data sent with the same flow id leaves from the same socket.
+	SendTo(flow int, bufs [][]byte, ep Endpoint, offset int) error
+}
+
+// SendToOf returns bind's socket-aware send, or [Bind.Send] for a Bind with a
+// single socket.
+func SendToOf(bind Bind) func(flow int, bufs [][]byte, ep Endpoint, offset int) error {
+	if s, ok := bind.(MultiSocketBind); ok {
+		return s.SendTo
+	}
+	return func(_ int, bufs [][]byte, ep Endpoint, offset int) error {
+		return bind.Send(bufs, ep, offset)
+	}
+}
+
+// A NamedBind is a [Bind] that labels the [ReceiveFunc]s it returns from Open.
+type NamedBind interface {
+	Bind
+
+	// ReceiveNames returns one label per ReceiveFunc returned by the most recent
+	// call to Open, in the same order.
+	ReceiveNames() []string
+}
+
+// NamesOf returns a label for each of fns, which must be the slice returned
+// by bind's most recent [Bind.Open]. For a Bind that cannot name its own
+// [ReceiveFunc]s it falls back to [ReceiveFunc.PrettyName] prefixed with the
+// index.
+func NamesOf(bind Bind, fns []ReceiveFunc) []string {
+	if nb, ok := bind.(NamedBind); ok {
+		if names := nb.ReceiveNames(); len(names) == len(fns) {
+			return names
+		}
+	}
+	names := make([]string, len(fns))
+	for i, fn := range fns {
+		names[i] = strconv.Itoa(i) + "/" + fn.PrettyName()
+	}
+	return names
 }
 
 // BindSocketToInterface is implemented by Bind objects that support being

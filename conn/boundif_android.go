@@ -6,7 +6,14 @@
 package conn
 
 func (s *StdNetBind) PeekLookAtSocketFd4() (fd int, err error) {
-	sysconn, err := s.ipv4.SyscallConn()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	conn, err := firstConn(s.v4)
+	if err != nil {
+		return -1, err
+	}
+	sysconn, err := conn.SyscallConn()
 	if err != nil {
 		return -1, err
 	}
@@ -20,7 +27,14 @@ func (s *StdNetBind) PeekLookAtSocketFd4() (fd int, err error) {
 }
 
 func (s *StdNetBind) PeekLookAtSocketFd6() (fd int, err error) {
-	sysconn, err := s.ipv6.SyscallConn()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	conn, err := firstConn(s.v6)
+	if err != nil {
+		return -1, err
+	}
+	sysconn, err := conn.SyscallConn()
 	if err != nil {
 		return -1, err
 	}

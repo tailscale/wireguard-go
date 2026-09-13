@@ -269,7 +269,7 @@ func (device *Device) SendHandshakeCookie(initiatingElem *QueueHandshakeElement)
 	_ = reply.marshal(packet)
 	device.config.metrics.MessageCookieReplyTXAttempt.Add(1)
 	// TODO: allocation could be avoided
-	device.net.bind.Send([][]byte{buf}, initiatingElem.packetMeta.Endpoint, MessageEncapsulatingTransportSize)
+	device.net.sendTo(0, [][]byte{buf}, initiatingElem.packetMeta.Endpoint, MessageEncapsulatingTransportSize)
 
 	return nil
 }
