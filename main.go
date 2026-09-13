@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"runtime"
 	"strconv"
+	"strings"
 
 	"github.com/tailscale/wireguard-go/conn"
 	"github.com/tailscale/wireguard-go/device"
@@ -31,6 +32,17 @@ const (
 	ENV_WG_UAPI_FD            = "WG_UAPI_FD"
 	ENV_WG_PROCESS_FOREGROUND = "WG_PROCESS_FOREGROUND"
 )
+
+func setenv(env []string, key, value string) []string {
+	prefix := key + "="
+	var filtered []string
+	for _, entry := range env {
+		if !strings.HasPrefix(entry, prefix) {
+			filtered = append(filtered, entry)
+		}
+	}
+	return append(filtered, prefix+value)
+}
 
 func printUsage() {
 	fmt.Printf("Usage: %s [-f/--foreground] INTERFACE-NAME\n", os.Args[0])
@@ -111,26 +123,60 @@ func main() {
 
 	// open TUN device (or use supplied fd)
 
+	tunQueuesCount := 1
+	if v := os.Getenv("WG_TUN_QUEUES"); v != "" {
+		var err error
+		tunQueuesCount, err = strconv.Atoi(v)
+		if err != nil || tunQueuesCount < 1 {
+			fmt.Fprintf(os.Stderr, "Invalid WG_TUN_QUEUES %q: must be a positive integer\n", v)
+			os.Exit(ExitSetupFailed)
+		}
+	}
 	tdev, err := func() (tun.Device, error) {
 		tunFdStr := os.Getenv(ENV_WG_TUN_FD)
 		if tunFdStr == "" {
-			return tun.CreateTUN(interfaceName, device.DefaultMTU)
+			return tun.CreateTUN(interfaceName, device.DefaultMTU, tun.WithQueues(tunQueuesCount))
 		}
-
-		// construct tun device from supplied fd
-
-		fd, err := strconv.ParseUint(tunFdStr, 10, 32)
-		if err != nil {
-			return nil, err
+		fields := strings.Split(tunFdStr, ",")
+		files := make([]*os.File, 0, len(fields))
+		var fds []int
+		for _, field := range fields {
+			fd, err := strconv.ParseUint(strings.TrimSpace(field), 10, 32)
+			if err != nil {
+				for _, f := range files {
+					f.Close()
+				}
+				return nil, fmt.Errorf("invalid %s %q: %w", ENV_WG_TUN_FD, tunFdStr, err)
+			}
+			fds = append(fds, int(fd))
 		}
-
-		err = unix.SetNonblock(int(fd), true)
-		if err != nil {
-			return nil, err
+		var dupes []int
+		set := map[int]struct{}{}
+		for _, v := range fds {
+			if _, dup := set[v]; dup {
+				dupes = append(dupes, v)
+				continue
+			}
+			set[v] = struct{}{}
 		}
+		if len(dupes) != 0 {
+			for fd := range set {
+				unix.Close(fd)
+			}
+			return nil, fmt.Errorf("passed duplicate file descriptors: %v", dupes)
+		}
+		for _, fd := range fds {
+			// construct tun device from supplied fds
+			if err := unix.SetNonblock(fd, true); err != nil {
+				for _, f := range files {
+					f.Close()
+				}
+				return nil, err
+			}
 
-		file := os.NewFile(uintptr(fd), "")
-		return tun.CreateTUNFromFile(file, device.DefaultMTU)
+			files = append(files, os.NewFile(uintptr(fd), ""))
+		}
+		return tun.CreateTUNFromFiles(files, device.DefaultMTU)
 	}()
 
 	if err == nil {
@@ -151,6 +197,26 @@ func main() {
 		logger.Errorf("Failed to create TUN device: %v", err)
 		os.Exit(ExitSetupFailed)
 	}
+
+	tunQueues := tun.QueuesOf(tdev)
+	if len(tunQueues) != tunQueuesCount {
+		logger.Errorf("WG_TUN_QUEUES=%d requested but the TUN device has %d queue(s)", tunQueuesCount, len(tunQueues))
+	}
+	logger.Verbosef("TUN device has %d queue(s)", len(tunQueues))
+
+	// Per-peer queue depth. Using the old default as a cap, applied to both
+	// inbound and outbound direction.
+	// TODO: make cgroup-aware with runtime.GOMAXPROCS(0).
+	queueSize := min(device.DefaultQueueInboundSize, runtime.NumCPU())
+	if v := os.Getenv("WG_QUEUE_SIZE"); v != "" {
+		n, perr := strconv.Atoi(v)
+		if perr != nil || n < 1 {
+			fmt.Fprintf(os.Stderr, "Invalid WG_QUEUE_SIZE %q: must be a positive integer\n", v)
+			os.Exit(ExitSetupFailed)
+		}
+		queueSize = n
+	}
+	logger.Verbosef("Per-peer queue size is %d", queueSize)
 
 	// open UAPI file (or use supplied fd)
 
@@ -177,30 +243,39 @@ func main() {
 	// daemonize the process
 
 	if !foreground {
-		env := os.Environ()
-		env = append(env, fmt.Sprintf("%s=3", ENV_WG_TUN_FD))
-		env = append(env, fmt.Sprintf("%s=4", ENV_WG_UAPI_FD))
-		env = append(env, fmt.Sprintf("%s=1", ENV_WG_PROCESS_FOREGROUND))
-		files := [3]*os.File{}
+		var procFiles []*os.File
+		stdin, _ := os.Open(os.DevNull)
+		procFiles = append(procFiles, stdin)
 		if os.Getenv("LOG_LEVEL") != "" && logLevel != device.LogLevelSilent {
-			files[0], _ = os.Open(os.DevNull)
-			files[1] = os.Stdout
-			files[2] = os.Stderr
+			procFiles = append(procFiles, os.Stdout, os.Stderr)
 		} else {
-			files[0], _ = os.Open(os.DevNull)
-			files[1], _ = os.Open(os.DevNull)
-			files[2], _ = os.Open(os.DevNull)
+			stdout, _ := os.Open(os.DevNull)
+			stderr, _ := os.Open(os.DevNull)
+			procFiles = append(procFiles, stdout, stderr)
 		}
+
+		uapiFD := len(procFiles)
+		procFiles = append(procFiles, fileUAPI)
+
+		tunFDs := make([]string, 0, tunQueuesCount)
+		for i, q := range tunQueues {
+			f := q.File()
+			if f == nil {
+				logger.Errorf("Failed to daemonize: TUN queue %d has no file descriptor", i)
+				os.Exit(ExitSetupFailed)
+			}
+			tunFDs = append(tunFDs, strconv.Itoa(len(procFiles)))
+			procFiles = append(procFiles, f)
+		}
+
+		env := os.Environ()
+		env = setenv(env, ENV_WG_TUN_FD, strings.Join(tunFDs, ","))
+		env = setenv(env, ENV_WG_UAPI_FD, strconv.Itoa(uapiFD))
+		env = setenv(env, ENV_WG_PROCESS_FOREGROUND, "1")
 		attr := &os.ProcAttr{
-			Files: []*os.File{
-				files[0], // stdin
-				files[1], // stdout
-				files[2], // stderr
-				tdev.File(),
-				fileUAPI,
-			},
-			Dir: ".",
-			Env: env,
+			Files: procFiles,
+			Dir:   ".",
+			Env:   env,
 		}
 
 		path, err := os.Executable()
@@ -222,7 +297,9 @@ func main() {
 		return
 	}
 
-	device := device.NewDevice(tdev, conn.NewDefaultBind(), logger)
+	device := device.NewDevice(tdev, conn.NewDefaultBind(), logger,
+		device.WithQueueInboundSize(queueSize),
+		device.WithQueueOutboundSize(queueSize))
 
 	logger.Verbosef("Device started")
 

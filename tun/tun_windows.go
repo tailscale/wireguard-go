@@ -59,7 +59,7 @@ func nanotime() int64
 
 // CreateTUN creates a Wintun interface with the given name. Should a Wintun
 // interface with the same name exist, it is reused.
-func CreateTUN(ifname string, mtu int) (Device, error) {
+func CreateTUN(ifname string, mtu int, _ ...Option) (Device, error) {
 	return CreateTUNWithRequestedGUID(ifname, WintunStaticRequestedGUID, mtu)
 }
 

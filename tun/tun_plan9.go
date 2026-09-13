@@ -23,7 +23,7 @@ type NativeTun struct {
 	closeOnce sync.Once
 }
 
-func CreateTUN(_ string, mtu int) (Device, error) {
+func CreateTUN(_ string, mtu int, _ ...Option) (Device, error) {
 	ctl, err := os.OpenFile("/net/ipifc/clone", os.O_RDWR, 0)
 	if err != nil {
 		return nil, err
