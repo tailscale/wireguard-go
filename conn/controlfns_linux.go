@@ -66,4 +66,17 @@ func init() {
 			return nil
 		},
 	)
+
+	// Value memory over throughput on mobile.
+	if runtime.GOOS != "android" {
+		reusePortFn = func(network, address string, c syscall.RawConn) error {
+			var serr error
+			if err := c.Control(func(fd uintptr) {
+				serr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSEPORT, 1)
+			}); err != nil {
+				return err
+			}
+			return serr
+		}
+	}
 }

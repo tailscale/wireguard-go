@@ -217,6 +217,17 @@ func main() {
 	}
 	logger.Verbosef("TUN device has %d queue(s)", len(tunQueues))
 
+	connSocketsCount := 1
+	if v := os.Getenv("WG_CONN_SOCKETS"); v != "" {
+		n, perr := strconv.Atoi(v)
+		if perr != nil || n < 1 {
+			fmt.Fprintf(os.Stderr, "Invalid WG_CONN_SOCKETS %q: must be a positive integer\n", v)
+			os.Exit(ExitSetupFailed)
+		}
+		connSocketsCount = n
+	}
+	logger.Verbosef("UDP bind requested %d sockets", connSocketsCount)
+
 	// Per-peer queue depth. Using the old default as a cap, applied to both
 	// inbound and outbound direction.
 	// TODO: make cgroup-aware with runtime.GOMAXPROCS(0).
@@ -310,9 +321,10 @@ func main() {
 		return
 	}
 
-	device := device.NewDevice(tdev, conn.NewDefaultBind(), logger,
-		device.WithQueueInboundSize(queueSize*len(tunQueues)),
-		device.WithQueueOutboundSize(queueSize*len(tunQueues)),
+	bind := conn.NewDefaultBind(conn.WithSockets(connSocketsCount))
+	device := device.NewDevice(tdev, bind, logger,
+		device.WithQueueInboundSize(queueSize*connSocketsCount),
+		device.WithQueueOutboundSize(queueSize*tunQueuesCount),
 		device.WithPeerQueueInboundSize(queueSize),
 		device.WithPeerQueueOutboundSize(queueSize),
 		device.WithMetrics(deviceMetrics()),

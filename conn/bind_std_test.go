@@ -2,7 +2,12 @@ package conn
 
 import (
 	"encoding/binary"
+	"errors"
+	"fmt"
 	"net"
+	"slices"
+	"strconv"
+	"strings"
 	"testing"
 
 	"golang.org/x/net/ipv6"
@@ -22,6 +27,118 @@ func TestStdNetBindReceiveFuncAfterClose(t *testing.T) {
 		// unguarded. Close() nils the conn-related fields resulting in a panic
 		// if they violate the mutex.
 		fn(slab, packets)
+	}
+}
+
+func TestSocketName(t *testing.T) {
+	tests := []struct {
+		family   string
+		i, total int
+		want     string
+	}{
+		{"v4", 0, 1, "v4"},
+		{"v6", 0, 1, "v6"},
+		{"v4", 0, 4, "v4:0"},
+		{"v4", 3, 4, "v4:3"},
+		{"v6", 3, 4, "v6:3"},
+	}
+	for _, tt := range tests {
+		if got := socketName(tt.family, tt.i, tt.total); got != tt.want {
+			t.Errorf("socketName(%q, %d, %d) = %q, want %q",
+				tt.family, tt.i, tt.total, got, tt.want)
+		}
+	}
+}
+
+func TestStdNetBindNames(t *testing.T) {
+	want := func(bind *StdNetBind) []string {
+		var names []string
+		for i := range bind.v4 {
+			names = append(names, socketName("v4", i, len(bind.v4)))
+		}
+		for i := range bind.v6 {
+			names = append(names, socketName("v6", i, len(bind.v6)))
+		}
+		return names
+	}
+
+	for _, sockets := range []int{1, 4} {
+		t.Run(fmt.Sprintf("sockets=%d", sockets), func(t *testing.T) {
+			bind := NewStdNetBind(WithSockets(sockets)).(*StdNetBind)
+			fns, _, err := bind.Open(0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer bind.Close()
+
+			names := bind.ReceiveNames()
+			if len(names) != len(fns) {
+				t.Fatalf("len(Names()) = %d, len(fns) = %d", len(names), len(fns))
+			}
+			if got := want(bind); !slices.Equal(names, got) {
+				t.Errorf("ReceiveNames() = %q, want %q", names, got)
+			}
+			wantMulti := sockets > 1 && reusePortFn != nil
+			if gotMulti := len(bind.v4) > 1; gotMulti != wantMulti {
+				t.Errorf("len(v4) = %d, want %d sockets", len(bind.v4), sockets)
+			}
+			if wantMulti && !slices.Contains(names, "v4:3") {
+				t.Errorf("ReceiveNames() = %q, want it to contain v4:3", names)
+			}
+			if len(slices.Compact(slices.Clone(names))) != len(names) {
+				t.Errorf("ReceiveNames() = %q, want all distinct", names)
+			}
+			if got := NamesOf(bind, fns); !slices.Equal(got, names) {
+				t.Errorf("ReceiveNamesOf() = %q, want %q", got, names)
+			}
+		})
+	}
+}
+
+func TestStdNetBindNamesAfterClose(t *testing.T) {
+	bind := NewStdNetBind().(*StdNetBind)
+	fns, _, err := bind.Open(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bind.Close()
+	if names := bind.ReceiveNames(); len(names) != 0 {
+		t.Errorf("ReceiveNames() after Close = %q, want empty", names)
+	}
+	for i, name := range NamesOf(bind, fns) {
+		if want := strconv.Itoa(i) + "/"; !strings.HasPrefix(name, want) {
+			t.Errorf("ReceiveNamesOf()[%d] = %q, want prefix %q", i, name, want)
+		}
+	}
+}
+
+// openMultiSocketBind returns a bind with n v4 sockets, skipping the test if
+// this platform cannot supply them.
+func openMultiSocketBind(t *testing.T, n int) *StdNetBind {
+	t.Helper()
+	if reusePortFn == nil {
+		t.Skip("no SO_REUSEPORT on this platform")
+	}
+	bind := NewStdNetBind(WithSockets(n)).(*StdNetBind)
+	if _, _, err := bind.Open(0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { bind.Close() })
+	if len(bind.v4) != n {
+		t.Fatalf("len(v4) = %d, want %d", len(bind.v4), n)
+	}
+	return bind
+}
+
+func TestStdNetBindOpenRefusesExistingGroup(t *testing.T) {
+	held := openMultiSocketBind(t, 2)
+	defer held.Close()
+	port := held.v4[0].conn.LocalAddr().(*net.UDPAddr).Port
+
+	bind := NewStdNetBind(WithSockets(2))
+	if _, _, err := bind.Open(uint16(port)); !errors.Is(err, errEADDRINUSE) {
+		bind.Close()
+		t.Fatalf("Open() on a held port = %v, want EADDRINUSE", err)
 	}
 }
 

@@ -45,6 +45,7 @@ type Device struct {
 		stopping sync.WaitGroup
 		sync.RWMutex
 		bind          conn.Bind // bind interface
+		sendTo        func(flow int, bufs [][]byte, ep conn.Endpoint, offset int) error
 		netlinkCancel *rwcancel.RWCancel
 		port          uint16 // listening port
 		fwmark        uint32 // mark value (0 = disabled)
@@ -493,6 +494,7 @@ func NewDevice(tunDevice tun.Device, bind conn.Bind, logger *Logger, opts ...Opt
 	device.closed = make(chan struct{})
 	device.log = logger
 	device.net.bind = bind
+	device.net.sendTo = conn.SendToOf(bind)
 	device.tun.device = tunDevice
 	mtu, err := device.tun.device.MTU()
 	if err != nil {
@@ -972,8 +974,9 @@ func (device *Device) BindUpdate() error {
 	device.queue.decryption.wg.Add(len(recvFns)) // each RoutineReceiveIncoming goroutine writes to device.queue.decryption
 	device.queue.handshake.wg.Add(len(recvFns))  // each RoutineReceiveIncoming goroutine writes to device.queue.handshake
 	batchSize := netc.bind.BatchSize()
-	for _, fn := range recvFns {
-		go device.RoutineReceiveIncoming(batchSize, fn)
+	names := conn.NamesOf(netc.bind, recvFns)
+	for i, fn := range recvFns {
+		go device.RoutineReceiveIncoming(names[i], batchSize, fn)
 	}
 
 	device.log.Verbosef("UDP bind has been updated")

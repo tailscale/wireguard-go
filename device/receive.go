@@ -71,13 +71,11 @@ func (peer *Peer) keepKeyFreshReceiving() {
 	}
 }
 
-/* Receives incoming datagrams for the device
- *
- * Every time the bind is updated a new routine is started for
- * IPv4 and IPv6 (separately)
- */
-func (device *Device) RoutineReceiveIncoming(maxBatchSize int, recv conn.ReceiveFunc) {
-	recvName := recv.PrettyName()
+// RoutineReceiveIncoming receives incoming datagrams from one of the bind's
+// receive queues. A new routine is started for each queue every time the bind
+// is updated.
+// recvName identifies the queue in logs; see [conn.NamesOf].
+func (device *Device) RoutineReceiveIncoming(recvName string, maxBatchSize int, recv conn.ReceiveFunc) {
 	defer func() {
 		device.log.Verbosef("Routine: receive incoming %s - stopped", recvName)
 		device.queue.decryption.wg.Done()
