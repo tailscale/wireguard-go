@@ -101,7 +101,7 @@ func (tun *NativeTun) routineRouteListener(tunIfindex int) {
 	}
 }
 
-func CreateTUN(name string, mtu int) (Device, error) {
+func CreateTUN(name string, mtu int, _ ...Option) (Device, error) {
 	ifIndex := -1
 	if name != "tun" {
 		_, err := fmt.Sscanf(name, "tun%d", &ifIndex)
@@ -138,6 +138,16 @@ func CreateTUN(name string, mtu int) (Device, error) {
 	}
 
 	return tun, err
+}
+
+func CreateTUNFromFiles(files []*os.File, mtu int) (Device, error) {
+	if len(files) != 1 {
+		for _, f := range files {
+			f.Close()
+		}
+		return nil, fmt.Errorf("got %d TUN queue files: multiqueue TUN is only supported on Linux", len(files))
+	}
+	return CreateTUNFromFile(files[0], mtu)
 }
 
 func CreateTUNFromFile(file *os.File, mtu int) (Device, error) {

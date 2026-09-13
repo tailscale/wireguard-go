@@ -159,7 +159,7 @@ func tunDestroy(name string) error {
 	return nil
 }
 
-func CreateTUN(name string, mtu int) (Device, error) {
+func CreateTUN(name string, mtu int, _ ...Option) (Device, error) {
 	if len(name) > unix.IFNAMSIZ-1 {
 		return nil, errors.New("interface name too long")
 	}
@@ -259,6 +259,16 @@ func CreateTUN(name string, mtu int) (Device, error) {
 	}
 
 	return CreateTUNFromFile(tunFile, mtu)
+}
+
+func CreateTUNFromFiles(files []*os.File, mtu int) (Device, error) {
+	if len(files) != 1 {
+		for _, f := range files {
+			f.Close()
+		}
+		return nil, fmt.Errorf("got %d TUN queue files: multiqueue TUN is only supported on Linux", len(files))
+	}
+	return CreateTUNFromFile(files[0], mtu)
 }
 
 func CreateTUNFromFile(file *os.File, mtu int) (Device, error) {

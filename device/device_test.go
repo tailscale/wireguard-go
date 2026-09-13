@@ -151,6 +151,10 @@ func (pair *testPair) Send(tb testing.TB, ping SendDirection, done chan struct{}
 
 // genTestPair creates a testPair.
 func genTestPair(tb testing.TB, realSocket bool) (pair testPair) {
+	return genTestPairQueues(tb, realSocket, 1)
+}
+
+func genTestPairQueues(tb testing.TB, realSocket bool, queues int) (pair testPair) {
 	cfg, endpointCfg := genConfigs(tb)
 	var binds [2]conn.Bind
 	if realSocket {
@@ -161,7 +165,7 @@ func genTestPair(tb testing.TB, realSocket bool) (pair testPair) {
 	// Bring up a ChannelTun for each config.
 	for i := range pair {
 		p := &pair[i]
-		p.tun = tuntest.NewChannelTUN()
+		p.tun = tuntest.NewMultiQueueChannelTUN(queues)
 		p.ip = netip.AddrFrom4([4]byte{1, 0, 0, byte(i + 1)})
 		level := LogLevelVerbose
 		if _, ok := tb.(*testing.B); ok && !testing.Verbose() {
@@ -273,9 +277,20 @@ func TestPriorityMessageOnEstablishment(t *testing.T) {
 	}
 }
 
-func TestTwoDevicePing(t *testing.T) {
+func forEachQueueCount(t *testing.T, fn func(t *testing.T, queues int)) {
+	var testQueueCounts = []int{1, 4}
+	for _, queues := range testQueueCounts {
+		t.Run(fmt.Sprintf("queues=%d", queues), func(t *testing.T) {
+			fn(t, queues)
+		})
+	}
+}
+
+func TestTwoDevicePing(t *testing.T) { forEachQueueCount(t, testTwoDevicePing) }
+
+func testTwoDevicePing(t *testing.T, queues int) {
 	goroutineLeakCheck(t)
-	pair := genTestPair(t, true)
+	pair := genTestPairQueues(t, true, queues)
 	t.Run("ping 1.0.0.1", func(t *testing.T) {
 		pair.Send(t, Ping, nil)
 	})
@@ -284,13 +299,15 @@ func TestTwoDevicePing(t *testing.T) {
 	})
 }
 
-func TestUpDown(t *testing.T) {
+func TestUpDown(t *testing.T) { forEachQueueCount(t, testUpDown) }
+
+func testUpDown(t *testing.T, queues int) {
 	goroutineLeakCheck(t)
 	const itrials = 50
 	const otrials = 10
 
 	for n := 0; n < otrials; n++ {
-		pair := genTestPair(t, false)
+		pair := genTestPairQueues(t, false, queues)
 		for i := range pair {
 			for k := range pair[i].dev.peers.keyMap {
 				pair[i].dev.IpcSet(fmt.Sprintf("public_key=%s\npersistent_keepalive_interval=1\n", hex.EncodeToString(k[:])))
@@ -323,8 +340,10 @@ func TestUpDown(t *testing.T) {
 
 // TestConcurrencySafety does other things concurrently with tunnel use.
 // It is intended to be used with the race detector to catch data races.
-func TestConcurrencySafety(t *testing.T) {
-	pair := genTestPair(t, true)
+func TestConcurrencySafety(t *testing.T) { forEachQueueCount(t, testConcurrencySafety) }
+
+func testConcurrencySafety(t *testing.T, queues int) {
+	pair := genTestPairQueues(t, true, queues)
 	done := make(chan struct{})
 
 	const warmupIters = 10
