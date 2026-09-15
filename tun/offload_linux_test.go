@@ -286,6 +286,55 @@ func flipUDP4Checksum(b []byte) []byte {
 	return b
 }
 
+// zeroUDP4Checksum clears the UDP checksum field, which per RFC 768 signals
+// "no checksum" for IPv4 UDP. VXLAN encapsulators commonly emit such datagrams.
+func zeroUDP4Checksum(b []byte) []byte {
+	at := virtioNetHdrLen + 20 + 6 // 20 byte ipv4 header; udp csum offset is 6
+	b[at] = 0
+	b[at+1] = 0
+	return b
+}
+
+// Test_handleGRO_zeroChecksumUDPCoalesces verifies that IPv4 UDP datagrams
+// carrying a zero (absent, per RFC 768) checksum are coalesced by UDP GRO, while
+// a genuinely bad checksum is still refused. Zero-checksum outer UDP is the
+// common shape for VXLAN-encapsulated traffic (e.g. Cilium).
+func Test_handleGRO_zeroChecksumUDPCoalesces(t *testing.T) {
+	pktsIn := [][]byte{
+		zeroUDP4Checksum(udp4Packet(ip4PortA, ip4PortB, 100)), // udp4 flow 1, no checksum
+		zeroUDP4Checksum(udp4Packet(ip4PortA, ip4PortB, 100)), // udp4 flow 1, no checksum
+		zeroUDP4Checksum(udp4Packet(ip4PortA, ip4PortB, 100)), // udp4 flow 1, no checksum
+		flipUDP4Checksum(udp4Packet(ip4PortA, ip4PortC, 100)), // udp4 flow 2, genuinely bad checksum
+	}
+	want := [][]int{
+		{virtioNetHdrLen, 128, 100, 100}, // flow 1: three zero-csum datagrams coalesced
+		{virtioNetHdrLen, 128},           // flow 2: bad csum, unmerged
+	}
+
+	wi := newGROToWrite()
+	pkts := make([][]byte, len(pktsIn))
+	for k, p := range pktsIn {
+		pkts[k] = slices.Clone(p)
+	}
+	if err := handleGRO(pkts, offset, newTCPGROTable(), newUDPGROTable(), 0, &wi); err != nil {
+		t.Fatalf("handleGRO: %v", err)
+	}
+	if len(wi.iovs) != len(want) {
+		t.Fatalf("got %d outputs, want %d", len(wi.iovs), len(want))
+	}
+	for i, wantFragLens := range want {
+		iov := wi.iovs[i]
+		if len(iov) != len(wantFragLens) {
+			t.Fatalf("output[%d]: got %d fragments, want %d", i, len(iov), len(wantFragLens))
+		}
+		for j, wantLen := range wantFragLens {
+			if len(iov[j]) != wantLen {
+				t.Errorf("output[%d][%d]: got len %d, want %d", i, j, len(iov[j]), wantLen)
+			}
+		}
+	}
+}
+
 func Fuzz_handleGRO(f *testing.F) {
 	pkt0 := tcp4Packet(ip4PortA, ip4PortB, header.TCPFlagAck, 100, 1)
 	pkt1 := tcp4Packet(ip4PortA, ip4PortB, header.TCPFlagAck, 100, 101)
