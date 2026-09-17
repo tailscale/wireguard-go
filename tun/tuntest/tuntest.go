@@ -161,7 +161,7 @@ func (t *chTun) BatchSize() int {
 func (t *chTun) Queues() []tun.Queue { return t.c.queues }
 
 // WriteTo implements [tun.MultiQueueDevice]. Every queue shares one channel.
-func (t *chTun) WriteTo(queue int, packets [][]byte, offset int) (int, error) {
+func (t *chTun) WriteTo(flow int, packets [][]byte, offset int) (int, error) {
 	return t.Write(packets, offset)
 }
 

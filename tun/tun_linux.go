@@ -390,8 +390,8 @@ func (tun *NativeTun) Write(bufs [][]byte, offset int) (int, error) {
 }
 
 // WriteTo implements [MultiQueueDevice].
-func (tun *NativeTun) WriteTo(queue int, bufs [][]byte, offset int) (int, error) {
-	return tun.queues[uint(queue)%uint(len(tun.queues))].write(bufs, offset)
+func (tun *NativeTun) WriteTo(flow int, bufs [][]byte, offset int) (int, error) {
+	return tun.queues[uint(flow)%uint(len(tun.queues))].write(bufs, offset)
 }
 
 func (q *tunQueue) write(bufs [][]byte, offset int) (int, error) {

@@ -100,16 +100,15 @@ type MultiQueueDevice interface {
 	Queues() []Queue
 
 	// WriteTo is [Device.Write] directed at one of the Device's write queues.
-	// queue is an opaque hint which need not equal len(Queues()).
-	// A caller using a stable id stays in order.
-	WriteTo(queue int, bufs [][]byte, offset int) (int, error)
+	// Data written with the same flow id lands on the same write queue.
+	WriteTo(flow int, bufs [][]byte, offset int) (int, error)
 }
 
 // WriteToOf returns dev's queue-aware write, or [Device.Write] for a Device
 // with one write queue. Resolve once per Device rather than asserting per write.
-func WriteToOf(dev Device) func(queue int, bufs [][]byte, offset int) (int, error) {
+func WriteToOf(dev Device) func(flow int, bufs [][]byte, offset int) (int, error) {
 	if w, ok := dev.(interface {
-		WriteTo(queue int, bufs [][]byte, offset int) (int, error)
+		WriteTo(flow int, bufs [][]byte, offset int) (int, error)
 	}); ok {
 		return w.WriteTo
 	}

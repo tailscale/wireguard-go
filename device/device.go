@@ -91,7 +91,7 @@ type Device struct {
 	tun struct {
 		device  tun.Device
 		queues  []tun.Queue // device's read queues, at least one, see [tun.QueuesOf]
-		writeTo func(queue int, bufs [][]byte, offset int) (int, error)
+		writeTo func(flow int, bufs [][]byte, offset int) (int, error)
 		mtu     atomic.Int32
 	}
 
