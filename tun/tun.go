@@ -95,9 +95,8 @@ type Device interface {
 type MultiQueueDevice interface {
 	Device
 
-	// Queues returns one [Queue] per kernel queue, in order, with
-	// at least one entry. Entry 0 is equivalent to the Device's own
-	// [Reader.Read].
+	// Queues returns one [Queue] per kernel queue with at least one entry.
+	// Entry 0 is equivalent to the Device's own [Reader.Read].
 	Queues() []Queue
 
 	// WriteTo is [Device.Write] directed at one of the Device's write queues.
