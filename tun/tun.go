@@ -65,7 +65,7 @@ type Device interface {
 	// rest.
 	Queue
 
-	// Write one or more packets to the Device (without any additional headers).
+	// Write one or more packets to the Device.
 	// On a successful write it returns the number of packets written. A nonzero
 	// offset can be used to instruct the Device on where to begin writing from
 	// each packet contained within the bufs slice.
