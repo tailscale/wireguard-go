@@ -48,6 +48,10 @@ type Reader interface {
 
 // Queue is a single read queue of a [Device]. Distinct Queues of one Device
 // may be used concurrently.
+//
+// A [Device] implementation may return read-only Queues in addition to those
+// backed by file descriptors. [MultiQueueDevice.WriteTo] is the way to
+// dispatch writes to the queues that accept them.
 type Queue interface {
 	Reader
 
