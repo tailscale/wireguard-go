@@ -130,8 +130,8 @@ func (f optionFunc) apply(config *config) {
 }
 
 // WithQueueStagedSize sets the capacity of each peer's staged packet queue.
-// Staged packet queues must be buffered, so max(1, size) is applied to the
-// user-supplied value. [DefaultQueueStagedSize] is the default.
+// Staged packet queues must be buffered, so max(tun readers, size) is applied
+// to the user-supplied value. [DefaultQueueStagedSize] is the default.
 func WithQueueStagedSize(size int) Option {
 	return optionFunc(func(config *config) {
 		config.queueStagedSize = max(1, size)
@@ -395,6 +395,15 @@ func NewDevice(tunDevice tun.Device, bind conn.Bind, logger *Logger, opts ...Opt
 	device.peers.keyMap = make(map[NoisePublicKey]*Peer)
 	device.rate.limiter.Init()
 	device.indexTable.Init()
+
+	if want := len(device.tun.queues); want > device.config.queueStagedSize {
+		device.log.Errorf(
+			"Raising staged queue size to fit concurrent tun readers: %d -> %d",
+			device.config.queueStagedSize,
+			want,
+		)
+		device.config.queueStagedSize = want
+	}
 
 	device.PopulatePools()
 

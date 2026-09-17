@@ -146,6 +146,9 @@ type config struct {
 // WithExtraQueues requests that the [Device] be created with n queues beyond
 // the first. Only Linux implements multiqueue TUN.
 // Callers must consult [QueuesOf] rather than assume they got n.
+//
+// EXPERIMENTAL: Current implementation introduces nonce reordering with
+// non-zero extra queues.
 func WithExtraQueues(n int) Option {
 	return optionFunc(func(config *config) {
 		config.extraQueues = max(0, n)
