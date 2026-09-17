@@ -89,10 +89,12 @@ type Device struct {
 	}
 
 	tun struct {
+		// Fields in this block are read-only after instantiation.
 		device  tun.Device
 		queues  []tun.Queue // device's read queues, at least one, see [tun.QueuesOf]
 		writeTo func(flow int, bufs [][]byte, offset int) (int, error)
-		mtu     atomic.Int32
+
+		mtu atomic.Int32
 	}
 
 	ipcMutex sync.RWMutex
