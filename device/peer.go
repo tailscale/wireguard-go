@@ -96,9 +96,9 @@ type Peer struct {
 	trieEntries                 list.List
 	persistentKeepaliveInterval atomic.Uint32
 
-	// queueID selects the queue this peer's decrypted packets are written to.
-	// It is stored unreduced. See [Peer.writeTUN].
-	queueID uint32
+	// flowID selects the [tun.Queue] this peer's decrypted packets are
+	// written to. It is stored unreduced. See [Peer.writeTUN].
+	flowID uint32
 }
 
 func (device *Device) NewPeer(pk NoisePublicKey) (*Peer, error) {
@@ -124,7 +124,7 @@ func (device *Device) NewPeer(pk NoisePublicKey) (*Peer, error) {
 	peer.cookieGenerator.Init(pk)
 	peer.device = device
 	// Public keys are uniformly distributed, so the low bytes spread fine.
-	peer.queueID = binary.LittleEndian.Uint32(pk[:4])
+	peer.flowID = binary.LittleEndian.Uint32(pk[:4])
 
 	// staged is never closed, and it can be accessed concurrent to [Peer.Start],
 	// so we init here instead of [Peer.Start].
@@ -224,7 +224,7 @@ func (peer *Peer) SendBuffers(buffers [][]byte) error {
 // writeTUN writes bufs to the TUN queue this peer is pinned to, keeping the
 // peer's decrypted packets in order.
 func (peer *Peer) writeTUN(bufs [][]byte, offset int) (int, error) {
-	return peer.device.tun.writeTo(int(peer.queueID), bufs, offset)
+	return peer.device.tun.writeTo(int(peer.flowID), bufs, offset)
 }
 
 func (peer *Peer) String() string {

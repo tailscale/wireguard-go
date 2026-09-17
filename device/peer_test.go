@@ -32,7 +32,7 @@ func TestPeerTunQueueAssignment(t *testing.T) {
 			if err != nil {
 				t.Fatalf("NewPeer: %v", err)
 			}
-			seen[int(uint(peer.queueID)%uint(queues))]++
+			seen[int(uint(peer.flowID)%uint(queues))]++
 		}
 		if len(seen) != queues {
 			t.Errorf("queues=%d: peers landed on %d distinct queues, want %d (%v)",
