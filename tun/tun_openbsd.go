@@ -141,13 +141,7 @@ func CreateTUN(name string, mtu int, _ ...Option) (Device, error) {
 }
 
 func CreateTUNFromFiles(files []*os.File, mtu int) (Device, error) {
-	if len(files) != 1 {
-		for _, f := range files {
-			f.Close()
-		}
-		return nil, fmt.Errorf("got %d TUN queue files: multiqueue TUN is only supported on Linux", len(files))
-	}
-	return CreateTUNFromFile(files[0], mtu)
+	return createTUNFromFilesNoMQ(files, mtu)
 }
 
 func CreateTUNFromFile(file *os.File, mtu int) (Device, error) {
