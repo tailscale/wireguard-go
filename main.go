@@ -128,6 +128,7 @@ func main() {
 		}
 		fields := strings.Split(tunFdStr, ",")
 		files := make([]*os.File, 0, len(fields))
+		var fds []int
 		for _, field := range fields {
 			fd, err := strconv.ParseUint(strings.TrimSpace(field), 10, 32)
 			if err != nil {
@@ -136,9 +137,26 @@ func main() {
 				}
 				return nil, fmt.Errorf("invalid %s %q: %w", ENV_WG_TUN_FD, tunFdStr, err)
 			}
-
+			fds = append(fds, int(fd))
+		}
+		var dupes []int
+		set := map[int]struct{}{}
+		for _, v := range fds {
+			if _, dup := set[v]; dup {
+				dupes = append(dupes, v)
+				continue
+			}
+			set[v] = struct{}{}
+		}
+		if len(dupes) != 0 {
+			for fd := range set {
+				unix.Close(fd)
+			}
+			return nil, fmt.Errorf("passed duplicate file descriptors: %v", dupes)
+		}
+		for _, fd := range fds {
 			// construct tun device from supplied fds
-			if err := unix.SetNonblock(int(fd), true); err != nil {
+			if err := unix.SetNonblock(fd, true); err != nil {
 				for _, f := range files {
 					f.Close()
 				}

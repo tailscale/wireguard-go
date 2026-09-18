@@ -257,25 +257,6 @@ func TestCreateTUNFromFilesNonTUNClosesFile(t *testing.T) {
 	}
 }
 
-func TestCreateTUNFromFilesRejectsDuplicateFDs(t *testing.T) {
-	f, err := os.Open(os.DevNull)
-	if err != nil {
-		t.Fatalf("Open %s: %v", os.DevNull, err)
-	}
-	defer f.Close()
-	dev, err := CreateTUNFromFiles([]*os.File{f, f}, testMTU)
-	if err == nil {
-		dev.Close()
-		t.Fatal("CreateTUNFromFiles with a repeated fd succeeded, want an error")
-	}
-	if !strings.Contains(err.Error(), "same file descriptor") {
-		t.Errorf("err = %v, want it to mention the repeated file descriptor", err)
-	}
-	if _, err := f.Stat(); !errors.Is(err, os.ErrClosed) {
-		t.Errorf("file not closed by a failed CreateTUNFromFiles: err = %v", err)
-	}
-}
-
 func TestCreateTUNFromFilesRejectsEmpty(t *testing.T) {
 	dev, err := CreateTUNFromFiles(nil, testMTU)
 	if err == nil {

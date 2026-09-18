@@ -706,54 +706,12 @@ func CreateTUNFromFile(file *os.File, mtu int) (Device, error) {
 	return CreateTUNFromFiles([]*os.File{file}, mtu)
 }
 
-// rawFd returns the file descriptor of file without moving it back to blocking
-// mode, as [os.File.Fd] would.
-func rawFd(file *os.File) (uintptr, error) {
-	conn, err := file.SyscallConn()
-	if err != nil {
-		return 0, err
-	}
-	var fd uintptr
-	if err := conn.Control(func(f uintptr) { fd = f }); err != nil {
-		return 0, err
-	}
-	return fd, nil
-}
-
-// closeDistinct closes every file in files, skipping any whose descriptor an
-// earlier entry already closed.
-func closeDistinct(files []*os.File) {
-	closed := make(map[uintptr]struct{}, len(files))
-	for _, file := range files {
-		if fd, err := rawFd(file); err == nil {
-			if _, dup := closed[fd]; dup {
-				continue
-			}
-			closed[fd] = struct{}{}
-		}
-		file.Close()
-	}
-}
-
 // CreateTUNFromFiles creates a Device with the provided MTU from one file per
 // kernel queue. It satisfies [MultiQueueDevice] when there is more than one.
+// Files must be distinct and ownership transfers.
 func CreateTUNFromFiles(files []*os.File, mtu int) (Device, error) {
 	if len(files) == 0 {
 		return nil, errors.New("CreateTUNFromFiles requires at least one file")
-	}
-	// Error if passed duplicate FDs.
-	fds := make(map[uintptr]int, len(files))
-	for i, file := range files {
-		fd, err := rawFd(file)
-		if err != nil {
-			closeDistinct(files)
-			return nil, fmt.Errorf("tun queue %d: %w", i, err)
-		}
-		if j, dup := fds[fd]; dup {
-			closeDistinct(files)
-			return nil, fmt.Errorf("tun queues %d and %d are the same file descriptor (%d)", j, i, fd)
-		}
-		fds[fd] = i
 	}
 	tun := &NativeTun{
 		events:                  make(chan Event, 5),
@@ -763,7 +721,9 @@ func CreateTUNFromFiles(files []*os.File, mtu int) (Device, error) {
 	// Append every queue before spawning routineHackListener et al.
 	for _, file := range files {
 		if err := appendQueue(tun, file); err != nil {
-			closeDistinct(files)
+			for _, f := range files {
+				f.Close()
+			}
 			return nil, err
 		}
 	}
@@ -836,6 +796,22 @@ func CreateUnmonitoredTUNFromFD(fd int) (Device, string, error) {
 func CreateUnmonitoredTUNFromFDs(fds []int) (Device, string, error) {
 	if len(fds) == 0 {
 		return nil, "", errors.New("CreateUnmonitoredTUNFromFDs requires at least one fd")
+	}
+	// Error if passed duplicate FDs.
+	var dupes []int
+	set := map[int]struct{}{}
+	for _, v := range fds {
+		if _, dup := set[v]; dup {
+			dupes = append(dupes, v)
+			continue
+		}
+		set[v] = struct{}{}
+	}
+	if len(dupes) != 0 {
+		for fd := range set {
+			unix.Close(fd)
+		}
+		return nil, "", fmt.Errorf("passed duplicate file descriptors: %v", dupes)
 	}
 	tun := &NativeTun{
 		events: make(chan Event, 5),
