@@ -52,8 +52,9 @@ type NativeTun struct {
 }
 
 // tunQueue is a single kernel queue of a tun device, and is the [Queue]
-// handed out by [NativeTun.Queues]. Distinct queues can be accessed
-// concurrently without sharing a lock.
+// handed out by [NativeTun.Queues].
+// An individual tunQueue is not concurrency-safe, but distinct queues can
+// be read or written concurrently.
 type tunQueue struct {
 	tun     *NativeTun
 	file    *os.File
