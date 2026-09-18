@@ -112,19 +112,19 @@ func main() {
 
 	// open TUN device (or use supplied fd)
 
-	queues := 1
-	if v := os.Getenv("WG_QUEUES"); v != "" {
+	tunQueuesCount := 1
+	if v := os.Getenv("WG_TUN_QUEUES"); v != "" {
 		var err error
-		queues, err = strconv.Atoi(v)
-		if err != nil || queues < 1 {
-			fmt.Fprintf(os.Stderr, "Invalid WG_QUEUES %q: must be a positive integer\n", v)
+		tunQueuesCount, err = strconv.Atoi(v)
+		if err != nil || tunQueuesCount < 1 {
+			fmt.Fprintf(os.Stderr, "Invalid WG_TUN_QUEUES %q: must be a positive integer\n", v)
 			os.Exit(ExitSetupFailed)
 		}
 	}
 	tdev, err := func() (tun.Device, error) {
 		tunFdStr := os.Getenv(ENV_WG_TUN_FD)
 		if tunFdStr == "" {
-			return tun.CreateTUN(interfaceName, device.DefaultMTU, tun.WithExtraQueues(queues-1))
+			return tun.CreateTUN(interfaceName, device.DefaultMTU, tun.WithExtraQueues(tunQueuesCount-1))
 		}
 		fields := strings.Split(tunFdStr, ",")
 		files := make([]*os.File, 0, len(fields))
@@ -188,14 +188,15 @@ func main() {
 	}
 
 	tunQueues := tun.QueuesOf(tdev)
-	if len(tunQueues) != queues {
-		logger.Errorf("WG_QUEUES=%d requested but the TUN device has %d queue(s)", queues, len(tunQueues))
+	if len(tunQueues) != tunQueuesCount {
+		logger.Errorf("WG_TUN_QUEUES=%d requested but the TUN device has %d queue(s)", tunQueuesCount, len(tunQueues))
 	}
 	logger.Verbosef("TUN device has %d queue(s)", len(tunQueues))
 
-	// Per-peer queue depth.
+	// Per-peer queue depth. Using the old default as a cap, applied to both
+	// inbound and outbound direction.
 	// TODO: make cgroup-aware with runtime.GOMAXPROCS(0).
-	queueSize := min(1024, runtime.NumCPU())
+	queueSize := min(device.DefaultQueueInboundSize, runtime.NumCPU())
 	if v := os.Getenv("WG_QUEUE_SIZE"); v != "" {
 		n, perr := strconv.Atoi(v)
 		if perr != nil || n < 1 {
@@ -231,7 +232,7 @@ func main() {
 	// daemonize the process
 
 	if !foreground {
-		procFiles := make([]*os.File, 0, 3+queues+1)
+		var procFiles []*os.File
 		stdin, _ := os.Open(os.DevNull)
 		procFiles = append(procFiles, stdin)
 		if os.Getenv("LOG_LEVEL") != "" && logLevel != device.LogLevelSilent {
@@ -245,7 +246,7 @@ func main() {
 		uapiFD := len(procFiles)
 		procFiles = append(procFiles, fileUAPI)
 
-		tunFDs := make([]string, 0, queues)
+		tunFDs := make([]string, 0, tunQueuesCount)
 		for i, q := range tunQueues {
 			f := q.File()
 			if f == nil {
