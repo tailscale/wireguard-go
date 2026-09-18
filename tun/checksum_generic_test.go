@@ -2,6 +2,8 @@
 
 package tun
 
+import "simd"
+
 var archChecksumFuncs = []archChecksumDetails{
 	{
 		name:      "generic32",
@@ -22,5 +24,10 @@ var archChecksumFuncs = []archChecksumDetails{
 		name:      "generic64Alternate",
 		available: true,
 		f:         checksumGeneric64Alternate,
+	},
+	{
+		name:      "genericSIMD",
+		available: !simd.Emulated() && simd.VectorBitSize() >= 64,
+		f:         checksumGenericSIMD,
 	},
 }

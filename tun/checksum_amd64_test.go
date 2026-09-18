@@ -42,4 +42,14 @@ var archChecksumFuncs = []archChecksumDetails{
 		available: cpu.X86.HasAVX && cpu.X86.HasAVX2 && cpu.X86.HasBMI2,
 		f:         checksumAVX2,
 	},
+	{
+		name:      "genericSIMD",
+		available: true,
+		f:         checksumGenericSIMD,
+	},
+	{
+		name:      "genericSIMDAlternate",
+		available: true,
+		f:         checksumGenericSIMDAlternate,
+	},
 }
