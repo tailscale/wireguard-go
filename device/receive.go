@@ -366,7 +366,7 @@ func (device *Device) RoutineHandshake(id int) {
 			peer.timersAnyAuthenticatedPacketTraversal()
 			peer.timersAnyAuthenticatedPacketReceived()
 
-			device.log.Verbosef("%v - Received handshake initiation", peer)
+			device.log.Verbosef("%v - Received handshake initiation, self: %v", peer, device)
 			peer.rxBytes.Add(uint64(len(elem.packet)))
 
 			peer.SendHandshakeResponse()
@@ -390,7 +390,7 @@ func (device *Device) RoutineHandshake(id int) {
 				goto skip
 			}
 
-			device.log.Verbosef("%v - Received handshake response", peer)
+			device.log.Verbosef("%v - Received handshake response, self: %v", peer, device)
 			peer.rxBytes.Add(uint64(len(elem.packet)))
 
 			// update timers
@@ -483,7 +483,7 @@ func (peer *Peer) processInboundContainer(elemsContainer *QueueInboundElementsCo
 		rxBytesLen += uint64(len(elem.packet) + MinMessageSize)
 
 		if len(elem.packet) == 0 {
-			device.log.Verbosef("%v - Receiving keepalive packet", peer)
+			device.log.Verbosef("%v - Receiving keepalive packet, self: %v", peer, device)
 			continue
 		}
 		dataPacketReceived = true

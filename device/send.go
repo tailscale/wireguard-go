@@ -92,7 +92,7 @@ func (peer *Peer) SendKeepalive() {
 		if queued := peer.doIfRunning(func() {
 			select {
 			case peer.queue.staged <- elemsContainer:
-				peer.device.log.Verbosef("%v - Sending keepalive packet", peer)
+				peer.device.log.Verbosef("%v - Sending keepalive packet, self: %v", peer, peer.device)
 			default:
 				peer.device.PutOutboundElement(elem)
 				peer.device.PutOutboundElementsContainer(elemsContainer)
@@ -185,7 +185,7 @@ func (peer *Peer) SendHandshakeInitiation(isRetry bool) error {
 	peer.handshake.lastSentHandshake = time.Now()
 	peer.handshake.mutex.Unlock()
 
-	peer.device.log.Verbosef("%v - Sending handshake initiation", peer)
+	peer.device.log.Verbosef("%v - Sending handshake initiation, self: %v", peer, peer.device)
 
 	msg, err := peer.device.CreateMessageInitiation(peer)
 	if err != nil {
@@ -215,7 +215,7 @@ func (peer *Peer) SendHandshakeResponse() error {
 	peer.handshake.lastSentHandshake = time.Now()
 	peer.handshake.mutex.Unlock()
 
-	peer.device.log.Verbosef("%v - Sending handshake response", peer)
+	peer.device.log.Verbosef("%v - Sending handshake response, self: %v", peer, peer.device)
 
 	response, err := peer.device.CreateMessageResponse(peer)
 	if err != nil {

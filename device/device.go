@@ -6,6 +6,7 @@
 package device
 
 import (
+	"encoding/base64"
 	"errors"
 	"net/netip"
 	"runtime"
@@ -194,6 +195,19 @@ const (
 // See those docs for how to interpret this value.
 func (device *Device) deviceState() deviceState {
 	return deviceState(device.state.state.Load())
+}
+
+// String returns the Tailscale-conventional short form of the device's own
+// static public key: the first five base64 digits, in square brackets, e.g.
+// "[AbCdE]". This matches key.NodePublic.ShortString() so a device's self
+// key reads the same as a peer's key once rewritten by wgengine/wglog.
+func (device *Device) String() string {
+	device.staticIdentity.RLock()
+	publicKey := device.staticIdentity.publicKey
+	device.staticIdentity.RUnlock()
+
+	b64 := base64.StdEncoding.EncodeToString(publicKey[:])
+	return "[" + b64[:5] + "]"
 }
 
 // isClosed reports whether the device is closed (or is closing).
