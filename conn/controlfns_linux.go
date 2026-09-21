@@ -65,5 +65,14 @@ func init() {
 			})
 			return nil
 		},
+
+		// don't frag
+		func(network, address string, c syscall.RawConn) error {
+			c.Control(func(fd uintptr) {
+				_ = unix.SetsockoptInt(int(fd), unix.IPPROTO_IP, unix.IP_MTU_DISCOVER, unix.IP_PMTUDISC_DO)
+				_ = unix.SetsockoptInt(int(fd), unix.IPPROTO_IPV6, unix.IPV6_MTU_DISCOVER, unix.IPV6_PMTUDISC_DO)
+			})
+			return nil
+		},
 	)
 }

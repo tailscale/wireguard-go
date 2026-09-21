@@ -62,7 +62,10 @@ const (
 )
 
 const (
-	MessageInitiationSize             = 148                                           // size of handshake initiation message
+	MessageInitiationSize = 148 + // size of handshake initiation message
+		8 + // geneve header
+		1184 + // ml-kem-768 kem key size
+		poly1305.TagSize
 	MessageResponseSize               = 92                                            // size of response message
 	MessageCookieReplySize            = 64                                            // size of cookie reply message
 	MessageTransportHeaderSize        = 16                                            // size of data preceding content in transport message
