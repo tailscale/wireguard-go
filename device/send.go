@@ -148,6 +148,8 @@ func (peer *Peer) SendPriorityMessage() {
 	elem.packet = buf.slab[offset : offset+n]
 	elem.plaintextOffset = offset
 	elem.peer = peer
+	peer.queue.nonceMu.Lock()
+	defer peer.queue.nonceMu.Unlock()
 	elem.nonce = keypair.sendNonce.Add(1) - 1
 	if elem.nonce >= RejectAfterMessages {
 		keypair.sendNonce.Store(RejectAfterMessages)
@@ -479,13 +481,22 @@ func (peer *Peer) StagePackets(elems *QueueOutboundElementsContainer) {
 
 // SendStagedPackets sends any staged packets to Peer.
 func (peer *Peer) SendStagedPackets() {
+	// Locking above 'top' means draining runs to completion before unlock.
+	// This is stronger than the original single TUN reader behaviour:
+	// keepalive and UAPI senders that previously interleaved at the channel
+	// now wait out the drain.
+	//
+	// Unlocked by hand to keep SendHandshakeInitiation out of the section.
+	peer.queue.nonceMu.Lock()
 top:
 	if len(peer.queue.staged) == 0 || !peer.device.isUp() {
+		peer.queue.nonceMu.Unlock()
 		return
 	}
 
 	keypair := peer.keypairs.Current()
 	if keypair == nil || keypair.sendNonce.Load() >= RejectAfterMessages || time.Since(keypair.created) >= RejectAfterTime {
+		peer.queue.nonceMu.Unlock()
 		peer.SendHandshakeInitiation(false)
 		return
 	}
@@ -529,6 +540,7 @@ top:
 				goto top
 			}
 		default:
+			peer.queue.nonceMu.Unlock()
 			return
 		}
 	}

@@ -156,9 +156,6 @@ func defaultConfig() config {
 //
 // Implementations may choose to return more read queues than was requested.
 // Callers must consult [QueuesOf] rather than assume they got n.
-//
-// EXPERIMENTAL: Current implementation introduces nonce reordering with more
-// than one queue.
 func WithQueues(n int) Option {
 	return optionFunc(func(config *config) {
 		config.queues = n

@@ -87,6 +87,13 @@ type Peer struct {
 
 	// queue channel write operations must be wrapped by [Peer.doIfRunning]
 	queue struct {
+		// nonceMu serializes nonce stamping during the outbound enqueue in
+		// [Peer.SendStagedPackets] and [Peer.SendPriorityMessage].
+		//
+		// NOTE: nonceMu use relies on [Peer.StagePackets] being non-blocking.
+		// Changing this will lead to deadlocks in its interaction with
+		// [Peer.SendStagedPackets].
+		nonceMu  sync.Mutex
 		staged   chan *QueueOutboundElementsContainer // staged packets before a handshake is available
 		outbound chan *QueueOutboundElementsContainer // sequential ordering of udp transmission
 		inbound  chan *QueueInboundElementsContainer  // sequential ordering of tun writing
