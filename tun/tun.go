@@ -150,15 +150,16 @@ func defaultConfig() config {
 // WithQueues requests that the [Device] be created with n queues. n must be at
 // least 1.
 //
+// Implementations may choose to return more read queues than was requested.
+// Callers must consult [QueuesOf] rather than assume they got n.
+//
 // Only Linux implements multiqueue TUN. Errors are returned if more queues
 // are requested than the Linux kernel supports (at the time of writing,
 // v7.0 has MAX_TAP_QUEUES at 256) or if the per-process limit was reached.
 //
-// Implementations may choose to return more read queues than was requested.
-// Callers must consult [QueuesOf] rather than assume they got n.
-//
-// EXPERIMENTAL: Current implementation introduces nonce reordering with more
-// than one queue.
+// WARNING Overlay flows initiated locally experience a TUN queue switch
+// when Linux kernel adopts our pin during the return Write. This introduces
+// a flow reordering event after initiation or a 3s pause. See Peer.flowID.
 func WithQueues(n int) Option {
 	return optionFunc(func(config *config) {
 		config.queues = n
