@@ -13,6 +13,7 @@ import (
 
 	"github.com/tailscale/wireguard-go/conn"
 	"github.com/tailscale/wireguard-go/tun/tuntest"
+	"golang.org/x/crypto/poly1305"
 )
 
 func TestCurveWrappers(t *testing.T) {
@@ -204,4 +205,195 @@ func TestNoiseHandshake(t *testing.T) {
 		assertNil(t, err)
 		assertEqual(t, out, testMsg)
 	}()
+}
+
+func TestHybridHandshake(t *testing.T) {
+	dev1 := randDevice(t)
+	dev2 := randDevice(t)
+
+	defer dev1.Close()
+	defer dev2.Close()
+
+	peer1, err := dev2.NewPeer(dev1.staticIdentity.privateKey.publicKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	peer1.SetHybridHandshake(true)
+	peer2, err := dev1.NewPeer(dev2.staticIdentity.privateKey.publicKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	peer2.SetHybridHandshake(true)
+	peer1.Start()
+	peer2.Start()
+
+	// Handshake initiation
+	msg1, err := dev1.CreateMessageInitiation(peer2)
+	assertNil(t, err)
+	if !msg1.HasKEM {
+		t.Fatal("hybrid handshake initiation has no KEM key")
+	}
+	var zeroKey [NoiseKEMEncapsulationKeySize + poly1305.TagSize]byte
+	if msg1.EphemeralKEM == zeroKey {
+		// An all zeros public key is technically a structurally valid ML-KEM
+		// encapsulation key according to FIPS 203, however, it's a "trivial"
+		// public key which would send the secret value in cleartext if used,
+		// and one that is overwhelmingly unlikely to be produced when generating
+		// ML-KEM keypairs correctly.
+		t.Fatal("hybrid handshake initiation KEM key is all zeros")
+	}
+
+	initEP := &initAwareEP{}
+	peer := dev2.ConsumeMessageInitiation(msg1, initEP)
+	if peer == nil {
+		t.Fatal("handshake failed at initiation message")
+	}
+	if initEP.calledWith == nil {
+		t.Fatal("initAwareEP never called")
+	}
+	if *initEP.calledWith != dev1.staticIdentity.publicKey {
+		t.Fatal("initAwareEP called with unexpected public key")
+	}
+
+	assertEqual(
+		t,
+		peer1.handshake.chainKey[:],
+		peer2.handshake.chainKey[:],
+	)
+
+	assertEqual(
+		t,
+		peer1.handshake.hash[:],
+		peer2.handshake.hash[:],
+	)
+
+	// Handshake response
+	msg2, err := dev2.CreateMessageResponse(peer1)
+	assertNil(t, err)
+	if !msg2.HasKEM {
+		t.Fatal("hybrid handshake response has no KEM key")
+	}
+	var zeroCiphertext [NoiseKEMCiphertextSize + poly1305.TagSize]byte
+	if msg2.EphemeralKEM == zeroCiphertext {
+		t.Fatal("hybrid handshake response KEM ciphertext is all zeros")
+	}
+
+	peer = dev1.ConsumeMessageResponse(msg2)
+	if peer == nil {
+		t.Fatal("handshake failed at response message")
+	}
+
+	assertEqual(
+		t,
+		peer1.handshake.chainKey[:],
+		peer2.handshake.chainKey[:],
+	)
+
+	assertEqual(
+		t,
+		peer1.handshake.hash[:],
+		peer2.handshake.hash[:],
+	)
+
+	// Start session
+	err = peer1.BeginSymmetricSession()
+	if err != nil {
+		t.Fatal("failed to derive keypair for peer 1", err)
+	}
+
+	err = peer2.BeginSymmetricSession()
+	if err != nil {
+		t.Fatal("failed to derive keypair for peer 2", err)
+	}
+
+	key1 := peer1.keypairs.next.Load()
+	key2 := peer2.keypairs.current
+
+	func() {
+		testMsg := []byte("wireguard test message 1")
+		var err error
+		var out []byte
+		var nonce [12]byte
+		out = key1.send.Seal(out, nonce[:], testMsg, nil)
+		out, err = key2.receive.Open(out[:0], nonce[:], out, nil)
+		assertNil(t, err)
+		assertEqual(t, out, testMsg)
+	}()
+
+	func() {
+		testMsg := []byte("wireguard test message 2")
+		var err error
+		var out []byte
+		var nonce [12]byte
+		out = key2.send.Seal(out, nonce[:], testMsg, nil)
+		out, err = key1.receive.Open(out[:0], nonce[:], out, nil)
+		assertNil(t, err)
+		assertEqual(t, out, testMsg)
+	}()
+}
+
+func TestHybridInitiatorOnly(t *testing.T) {
+	dev1 := randDevice(t)
+	dev2 := randDevice(t)
+
+	defer dev1.Close()
+	defer dev2.Close()
+
+	peer1, err := dev2.NewPeer(dev1.staticIdentity.privateKey.publicKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	peer2, err := dev1.NewPeer(dev2.staticIdentity.privateKey.publicKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	peer2.SetHybridHandshake(true)
+	peer1.Start()
+	peer2.Start()
+
+	// Handshake initiation
+	msg1, err := dev1.CreateMessageInitiation(peer2)
+	assertNil(t, err)
+	if !msg1.HasKEM {
+		t.Fatal("hybrid handshake initiation has no KEM key")
+	}
+
+	initEP := &initAwareEP{}
+	peer := dev2.ConsumeMessageInitiation(msg1, initEP)
+	if peer != nil {
+		t.Fatal("responder accepted hybrid handshake when configured not to")
+	}
+}
+
+func TestHybridResponderOnly(t *testing.T) {
+	dev1 := randDevice(t)
+	dev2 := randDevice(t)
+
+	defer dev1.Close()
+	defer dev2.Close()
+
+	peer1, err := dev2.NewPeer(dev1.staticIdentity.privateKey.publicKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	peer1.SetHybridHandshake(true)
+	peer2, err := dev1.NewPeer(dev2.staticIdentity.privateKey.publicKey())
+	if err != nil {
+		t.Fatal(err)
+	}
+	peer1.Start()
+	peer2.Start()
+
+	// Handshake initiation
+	msg1, err := dev1.CreateMessageInitiation(peer2)
+	assertNil(t, err)
+	if msg1.HasKEM {
+		t.Fatal("classical handshake initiation has KEM key")
+	}
+
+	initEP := &initAwareEP{}
+	peer := dev2.ConsumeMessageInitiation(msg1, initEP)
+	if peer != nil {
+		t.Fatal("responder accepted classical handshake when configured for hybrid handshake")
+	}
 }
