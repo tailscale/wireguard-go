@@ -201,6 +201,11 @@ func (peer *Peer) SendHandshakeInitiation(isRetry bool) error {
 	peer.timersAnyAuthenticatedPacketTraversal()
 	peer.timersAnyAuthenticatedPacketSent()
 
+	if isRetry {
+		peer.device.config.metrics.MessageInitiationTXAttemptRetry.Add(1)
+	} else {
+		peer.device.config.metrics.MessageInitiationTXAttemptInitial.Add(1)
+	}
 	err = peer.SendBuffers([][]byte{buf})
 	if err != nil {
 		peer.device.log.Errorf("%v - Failed to send handshake initiation: %v", peer, err)
@@ -238,6 +243,7 @@ func (peer *Peer) SendHandshakeResponse() error {
 	peer.timersAnyAuthenticatedPacketTraversal()
 	peer.timersAnyAuthenticatedPacketSent()
 
+	peer.device.config.metrics.MessageResponseTXAttempt.Add(1)
 	// TODO: allocation could be avoided
 	err = peer.SendBuffers([][]byte{buf})
 	if err != nil {
