@@ -19,7 +19,7 @@ import (
 // synctest bubble. It uses channel-based [conn.Bind]s instead of goroutines
 // performing "real" I/O, which can never durably block. The returned [Device]
 // is registered to Close() at tb.Cleanup time.
-func newSynctestCapableDevice(tb testing.TB) *Device {
+func newSynctestCapableDevice(tb testing.TB, opts ...Option) *Device {
 	tb.Helper()
 	sk, err := newPrivateKey()
 	if err != nil {
@@ -27,7 +27,7 @@ func newSynctestCapableDevice(tb testing.TB) *Device {
 	}
 	binds := bindtest.NewChannelBinds()
 	tun := tuntest.NewChannelTUN()
-	dev := NewDevice(tun.TUN(), binds[0], NewLogger(LogLevelError, ""))
+	dev := NewDevice(tun.TUN(), binds[0], NewLogger(LogLevelError, ""), opts...)
 	dev.SetPrivateKey(sk)
 	tb.Cleanup(dev.Close)
 	return dev

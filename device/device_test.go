@@ -8,6 +8,7 @@ package device
 import (
 	"bytes"
 	"encoding/hex"
+	"expvar"
 	"fmt"
 	"io"
 	"math/rand"
@@ -150,7 +151,7 @@ func (pair *testPair) Send(tb testing.TB, ping SendDirection, done chan struct{}
 }
 
 // genTestPair creates a testPair.
-func genTestPair(tb testing.TB, realSocket bool) (pair testPair) {
+func genTestPair(tb testing.TB, realSocket bool, opts ...Option) (pair testPair) {
 	cfg, endpointCfg := genConfigs(tb)
 	var binds [2]conn.Bind
 	if realSocket {
@@ -167,7 +168,7 @@ func genTestPair(tb testing.TB, realSocket bool) (pair testPair) {
 		if _, ok := tb.(*testing.B); ok && !testing.Verbose() {
 			level = LogLevelError
 		}
-		p.dev = NewDevice(p.tun.TUN(), binds[i], NewLogger(level, fmt.Sprintf("dev%d: ", i)))
+		p.dev = NewDevice(p.tun.TUN(), binds[i], NewLogger(level, fmt.Sprintf("dev%d: ", i)), opts...)
 		if err := p.dev.IpcSet(cfg[i]); err != nil {
 			tb.Errorf("failed to configure device %d: %v", i, err)
 			p.dev.Close()
@@ -765,4 +766,101 @@ func TestPopulatePoolsPacketBufs(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestMessageInitiationMetrics(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var initial, retry expvar.Int
+		dev := newSynctestCapableDevice(t,
+			WithMetrics(Metrics{
+				MessageInitiationTXAttemptInitial: &initial,
+				MessageInitiationTXAttemptRetry:   &retry,
+			}),
+		)
+
+		sk, err := newPrivateKey()
+		if err != nil {
+			t.Fatal(err)
+		}
+		peer, err := dev.NewPeer(sk.publicKey())
+		if err != nil {
+			t.Fatal(err)
+		}
+		synctest.Wait()
+
+		// We intentionally leave the [Device] down, to suppress timer-triggered
+		// handshakes.
+
+		// We intentionally leave [Peer.endpoint] unconfigured, so that
+		// [Peer.SendBuffers] returns an error. We expect network send attempt
+		// counters to still increment.
+		if err := peer.SendHandshakeInitiation(false); err == nil {
+			t.Fatal("expected send error")
+		}
+		if got := initial.Value(); got != 1 {
+			t.Fatalf("initial attempts = %d, want 1", got)
+		}
+		if got := retry.Value(); got != 0 {
+			t.Fatalf("retry attempts = %d, want 0", got)
+		}
+
+		// Since we didn't advance the clock, SendHandshakeInitiation should
+		// suppress due to [RekeyTimeout], and counters should remain unchanged.
+		if err := peer.SendHandshakeInitiation(false); err != nil {
+			t.Fatal(err)
+		}
+		if got := initial.Value(); got != 1 {
+			t.Fatalf("initial attempts after suppression = %d, want 1", got)
+		}
+		if got := retry.Value(); got != 0 {
+			t.Fatalf("retry attempts after suppression = %d, want 0", got)
+		}
+
+		time.Sleep(RekeyTimeout)
+
+		if err := peer.SendHandshakeInitiation(true); err == nil {
+			t.Fatal("expected send error")
+		}
+		if got := initial.Value(); got != 1 {
+			t.Fatalf("initial attempts = %d, want 1", got)
+		}
+		if got := retry.Value(); got != 1 {
+			t.Fatalf("retry attempts = %d, want 1", got)
+		}
+	})
+}
+
+func TestHandshakeMetrics(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var initial, retry, response, initiatorCompleted, responderCompleted expvar.Int
+		pair := genTestPair(t, false, WithMetrics(Metrics{
+			MessageInitiationTXAttemptInitial: &initial,
+			MessageInitiationTXAttemptRetry:   &retry,
+			MessageResponseTXAttempt:          &response,
+			HandshakeInitiatorCompleted:       &initiatorCompleted,
+			HandshakeResponderCompleted:       &responderCompleted,
+		}))
+
+		pair.Send(t, Ping, nil)
+		// pair.Send returns only after the encrypted packet crosses the tunnel,
+		// so the handshake must have completed. Within the synctest bubble, the
+		// handshake runs without advancing fake time, so no initiation retry
+		// can race with the assertions below.
+		metricAssertions := []struct {
+			name    string
+			counter *expvar.Int
+			want    int64
+		}{
+			{"initial attempts", &initial, 1},
+			{"retry attempts", &retry, 0},
+			{"response attempts", &response, 1},
+			{"initiator completions", &initiatorCompleted, 1},
+			{"responder completions", &responderCompleted, 1},
+		}
+		for _, tt := range metricAssertions {
+			if got := tt.counter.Value(); got != tt.want {
+				t.Errorf("%s = %d, want %d", tt.name, got, tt.want)
+			}
+		}
+	})
 }

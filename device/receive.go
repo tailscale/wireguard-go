@@ -407,6 +407,7 @@ func (device *Device) RoutineHandshake(id int) {
 				goto skip
 			}
 
+			device.config.metrics.HandshakeInitiatorCompleted.Add(1)
 			peer.timersSessionDerived()
 			peer.timersHandshakeComplete()
 			peer.SendPriorityMessage()
@@ -473,6 +474,7 @@ func (peer *Peer) processInboundContainer(elemsContainer *QueueInboundElementsCo
 
 		validTailPacket = i
 		if peer.ReceivedWithKeypair(elem.keypair) {
+			peer.device.config.metrics.HandshakeResponderCompleted.Add(1)
 			peer.timersHandshakeComplete()
 			peer.SendPriorityMessage()
 			peer.SendStagedPackets()
