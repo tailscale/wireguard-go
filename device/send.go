@@ -193,7 +193,11 @@ func (peer *Peer) SendHandshakeInitiation(isRetry bool) error {
 		return err
 	}
 
-	buf := make([]byte, MessageEncapsulatingTransportSize+MessageInitiationSize)
+	sz := MessageInitiationSize
+	if msg.HasKEM {
+		sz = MessageHybridInitiationSize
+	}
+	buf := make([]byte, MessageEncapsulatingTransportSize+sz)
 	packet := buf[MessageEncapsulatingTransportSize:]
 	_ = msg.marshal(packet)
 	peer.cookieGenerator.AddMacs(packet)
@@ -223,7 +227,11 @@ func (peer *Peer) SendHandshakeResponse() error {
 		return err
 	}
 
-	buf := make([]byte, MessageEncapsulatingTransportSize+MessageResponseSize)
+	sz := MessageResponseSize
+	if response.HasKEM {
+		sz = MessageHybridResponseSize
+	}
+	buf := make([]byte, MessageEncapsulatingTransportSize+sz)
 	packet := buf[MessageEncapsulatingTransportSize:]
 	_ = response.marshal(packet)
 	peer.cookieGenerator.AddMacs(packet)
