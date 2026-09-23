@@ -6,15 +6,18 @@
 package device
 
 import (
+	"crypto/mlkem"
 	"crypto/subtle"
 	"encoding/hex"
 	"errors"
 )
 
 const (
-	NoisePublicKeySize    = 32
-	NoisePrivateKeySize   = 32
-	NoisePresharedKeySize = 32
+	NoisePublicKeySize           = 32
+	NoisePrivateKeySize          = 32
+	NoisePresharedKeySize        = 32
+	NoiseKEMEncapsulationKeySize = mlkem.EncapsulationKeySize768
+	NoiseKEMCiphertextSize       = mlkem.CiphertextSize768
 )
 
 type (

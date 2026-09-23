@@ -176,6 +176,7 @@ func (device *Device) newPeer(pk NoisePublicKey, conf *NewPeerConfig, deleteOnId
 	handshake.remoteStatic = pk
 	if conf != nil {
 		handshake.presharedKey = conf.PresharedKey
+		handshake.hybridHandshake = conf.Hybrid
 	}
 	handshake.mutex.Unlock()
 
@@ -228,6 +229,14 @@ func (p *Peer) SetPresharedKey(psk NoisePresharedKey) {
 	p.handshake.mutex.Lock()
 	defer p.handshake.mutex.Unlock()
 	p.handshake.presharedKey = psk
+}
+
+// SetHybridHandshake sets whether this peer should use hybrid post-quantum handshakes.
+// Both peers must use the same setting for communication to be possible.
+func (p *Peer) SetHybridHandshake(hybrid bool) {
+	p.handshake.mutex.Lock()
+	defer p.handshake.mutex.Unlock()
+	p.handshake.hybridHandshake = hybrid
 }
 
 // SendBuffers sends buffers to peer. WireGuard packet data in each element of
