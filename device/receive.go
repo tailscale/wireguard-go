@@ -192,12 +192,12 @@ func (device *Device) RoutineReceiveIncoming(maxBatchSize int, recv conn.Receive
 			// otherwise it is a fixed size & handshake related packet
 
 			case MessageInitiationType:
-				if len(packet) != MessageInitiationSize {
+				if len(packet) != MessageInitiationSize && len(packet) != MessageHybridInitiationSize {
 					continue
 				}
 
 			case MessageResponseType:
-				if len(packet) != MessageResponseSize {
+				if len(packet) != MessageResponseSize && len(packet) != MessageHybridResponseSize {
 					continue
 				}
 

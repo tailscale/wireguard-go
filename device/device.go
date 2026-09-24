@@ -552,6 +552,7 @@ func (device *Device) LookupPeer(pk NoisePublicKey) *Peer {
 		return nil
 	}
 	p.SetPresharedKey(conf.PresharedKey)
+	p.SetHybridHandshake(conf.HybridHandshake)
 	p.SetAllowedIPs(conf.AllowedIPs)
 	p.deleteOnIdle = true
 	if conf.Endpoint != nil {
@@ -626,6 +627,9 @@ type NewPeerConfig struct {
 	// PresharedKey is the initial pre-shared key for the new peer. The zero
 	// value disables the optional WireGuard pre-shared-key layer.
 	PresharedKey NoisePresharedKey
+
+	// Whether to use a hybrid post-quantum handshake with this peer.
+	HybridHandshake bool
 
 	// Endpoint, if non-nil, sets the endpoint for newly created peers.
 	// The endpoint is pinned for the lifetime of the peer.
