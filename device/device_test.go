@@ -694,6 +694,8 @@ func TestDeviceOptions(t *testing.T) {
 		WithQueueInboundSize(3),
 		WithQueueHandshakeSize(4),
 		WithPreallocatedBuffersPerPool(5),
+		WithPeerQueueOutboundSize(6),
+		WithPeerQueueInboundSize(7),
 	}
 	for _, opt := range opts {
 		opt.apply(&c)
@@ -702,8 +704,36 @@ func TestDeviceOptions(t *testing.T) {
 		c.queueOutboundSize != 2 ||
 		c.queueInboundSize != 3 ||
 		c.queueHandshakeSize != 4 ||
-		c.preallocatedBuffersPerPool != 5 {
+		c.preallocatedBuffersPerPool != 5 ||
+		c.peerQueueOutboundSize != 6 ||
+		c.peerQueueInboundSize != 7 {
 		t.Fatalf("configured device config: %+v", c)
+	}
+}
+
+func TestDeviceOptionsResolve(t *testing.T) {
+	c := defaultConfig()
+	opts := []Option{
+		WithPeerQueueOutboundSize(6),
+		WithPeerQueueInboundSize(7),
+		WithQueueStagedSize(1),
+		WithQueueOutboundSize(2),
+		WithQueueInboundSize(3),
+		WithQueueHandshakeSize(4),
+		WithPreallocatedBuffersPerPool(5),
+	}
+	for _, opt := range opts {
+		opt.apply(&c)
+	}
+	c.resolve()
+	if c.queueStagedSize != 1 ||
+		c.queueOutboundSize != 2 ||
+		c.queueInboundSize != 3 ||
+		c.queueHandshakeSize != 4 ||
+		c.preallocatedBuffersPerPool != 5 ||
+		c.peerQueueOutboundSize != 6 ||
+		c.peerQueueInboundSize != 7 {
+		t.Fatalf("resolved device config: %+v", c)
 	}
 }
 

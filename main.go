@@ -298,8 +298,10 @@ func main() {
 	}
 
 	device := device.NewDevice(tdev, conn.NewDefaultBind(), logger,
-		device.WithQueueInboundSize(queueSize),
-		device.WithQueueOutboundSize(queueSize))
+		device.WithQueueInboundSize(queueSize*len(tunQueues)),
+		device.WithQueueOutboundSize(queueSize*len(tunQueues)),
+		device.WithPeerQueueInboundSize(queueSize),
+		device.WithPeerQueueOutboundSize(queueSize))
 
 	logger.Verbosef("Device started")
 

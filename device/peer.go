@@ -284,8 +284,8 @@ func (peer *Peer) Start() {
 	device.log.Verbosef("%v - Starting", peer)
 
 	// init inbound & outbound packet queues
-	peer.queue.outbound = make(chan *QueueOutboundElementsContainer, device.config.queueOutboundSize)
-	peer.queue.inbound = make(chan *QueueInboundElementsContainer, device.config.queueInboundSize)
+	peer.queue.outbound = make(chan *QueueOutboundElementsContainer, device.config.peerQueueOutboundSize)
+	peer.queue.inbound = make(chan *QueueInboundElementsContainer, device.config.peerQueueInboundSize)
 
 	// reset routine state
 	peer.runningState.queueReaders.Wait()
