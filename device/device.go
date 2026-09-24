@@ -109,9 +109,20 @@ type config struct {
 	queueStagedSize            int
 	queueOutboundSize          int
 	queueInboundSize           int
+	peerQueueOutboundSize      int // zero inherits queueOutboundSize
+	peerQueueInboundSize       int // zero inherits queueInboundSize
 	queueHandshakeSize         int
 	preallocatedBuffersPerPool uint32
 	metrics                    Metrics
+}
+
+func (c *config) resolve() {
+	if c.peerQueueOutboundSize == 0 {
+		c.peerQueueOutboundSize = c.queueOutboundSize
+	}
+	if c.peerQueueInboundSize == 0 {
+		c.peerQueueInboundSize = c.queueInboundSize
+	}
 }
 
 func defaultConfig() config {
@@ -144,9 +155,9 @@ func WithQueueStagedSize(size int) Option {
 	})
 }
 
-// WithQueueOutboundSize sets the capacity of each peer's outbound packet queue.
-// It also sets the capacity of the device-wide outbound queue, whose total
-// capacity is size multiplied by the number of TUN queues.
+// WithQueueOutboundSize sets the capacity of the device-wide outbound packet
+// queue, and of each peer's outbound packet queue unless overridden by
+// [WithPeerQueueOutboundSize].
 // [DefaultQueueOutboundSize] is the default.
 func WithQueueOutboundSize(size int) Option {
 	return optionFunc(func(config *config) {
@@ -154,11 +165,29 @@ func WithQueueOutboundSize(size int) Option {
 	})
 }
 
-// WithQueueInboundSize sets the capacity of the device and per-peer inbound
-// packet queues. [DefaultQueueInboundSize] is the default.
+// WithQueueInboundSize sets the capacity of the device-wide inbound packet
+// queue, and of each peer's inbound packet queue unless overridden by
+// [WithPeerQueueInboundSize].
+// [DefaultQueueInboundSize] is the default.
 func WithQueueInboundSize(size int) Option {
 	return optionFunc(func(config *config) {
 		config.queueInboundSize = size
+	})
+}
+
+// WithPeerQueueOutboundSize sets the capacity of each peer's outbound packet
+// queue, overriding [WithQueueOutboundSize].
+func WithPeerQueueOutboundSize(size int) Option {
+	return optionFunc(func(config *config) {
+		config.peerQueueOutboundSize = size
+	})
+}
+
+// WithPeerQueueInboundSize sets the capacity of each peer's inbound packet
+// queue, overriding [WithQueueInboundSize].
+func WithPeerQueueInboundSize(size int) Option {
+	return optionFunc(func(config *config) {
+		config.peerQueueInboundSize = size
 	})
 }
 
@@ -444,6 +473,7 @@ func NewDevice(tunDevice tun.Device, bind conn.Bind, logger *Logger, opts ...Opt
 	for _, opt := range opts {
 		opt.apply(&device.config)
 	}
+	device.config.resolve()
 	device.config.metrics.fillNils()
 	device.state.state.Store(uint32(deviceStateDown))
 	device.closed = make(chan struct{})
@@ -474,12 +504,8 @@ func NewDevice(tunDevice tun.Device, bind conn.Bind, logger *Logger, opts ...Opt
 	device.PopulatePools()
 
 	// create queues
-
 	device.queue.handshake = newHandshakeQueue(device.config.queueHandshakeSize)
-	// Scale to the number of producers
-	device.queue.encryption = newOutboundQueue(
-		device.config.queueOutboundSize * len(device.tun.queues),
-	)
+	device.queue.encryption = newOutboundQueue(device.config.queueOutboundSize)
 	device.queue.decryption = newInboundQueue(device.config.queueInboundSize)
 
 	// start workers
