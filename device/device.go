@@ -92,8 +92,12 @@ type Device struct {
 	}
 
 	tun struct {
-		device tun.Device
-		mtu    atomic.Int32
+		// Fields in this block are read-only after instantiation.
+		device  tun.Device
+		queues  []tun.Queue // device's read queues, at least one, see [tun.QueuesOf]
+		writeTo func(flow int, bufs [][]byte, offset int) (int, error)
+
+		mtu atomic.Int32
 	}
 
 	ipcMutex sync.RWMutex
@@ -132,16 +136,18 @@ func (f optionFunc) apply(config *config) {
 }
 
 // WithQueueStagedSize sets the capacity of each peer's staged packet queue.
-// Staged packet queues must be buffered, so max(1, size) is applied to the
-// user-supplied value. [DefaultQueueStagedSize] is the default.
+// Staged packet queues must be buffered, so max(tun readers, size) is applied
+// to the user-supplied value. [DefaultQueueStagedSize] is the default.
 func WithQueueStagedSize(size int) Option {
 	return optionFunc(func(config *config) {
 		config.queueStagedSize = max(1, size)
 	})
 }
 
-// WithQueueOutboundSize sets the capacity of the device and per-peer outbound
-// packet queues. [DefaultQueueOutboundSize] is the default.
+// WithQueueOutboundSize sets the capacity of each peer's outbound packet queue.
+// It also sets the capacity of the device-wide outbound queue, whose total
+// capacity is size multiplied by the number of TUN queues.
+// [DefaultQueueOutboundSize] is the default.
 func WithQueueOutboundSize(size int) Option {
 	return optionFunc(func(config *config) {
 		config.queueOutboundSize = size
@@ -450,16 +456,30 @@ func NewDevice(tunDevice tun.Device, bind conn.Bind, logger *Logger, opts ...Opt
 		mtu = DefaultMTU
 	}
 	device.tun.mtu.Store(int32(mtu))
+	device.tun.queues = tun.QueuesOf(tunDevice)
+	device.tun.writeTo = tun.WriteToOf(tunDevice)
 	device.peers.keyMap = make(map[NoisePublicKey]*Peer)
 	device.rate.limiter.Init()
 	device.indexTable.Init()
+
+	if want := len(device.tun.queues); want > device.config.queueStagedSize {
+		device.log.Errorf(
+			"Raising staged queue size to fit concurrent tun readers: %d -> %d",
+			device.config.queueStagedSize,
+			want,
+		)
+		device.config.queueStagedSize = want
+	}
 
 	device.PopulatePools()
 
 	// create queues
 
 	device.queue.handshake = newHandshakeQueue(device.config.queueHandshakeSize)
-	device.queue.encryption = newOutboundQueue(device.config.queueOutboundSize)
+	// Scale to the number of producers
+	device.queue.encryption = newOutboundQueue(
+		device.config.queueOutboundSize * len(device.tun.queues),
+	)
 	device.queue.decryption = newInboundQueue(device.config.queueInboundSize)
 
 	// start workers
@@ -473,9 +493,11 @@ func NewDevice(tunDevice tun.Device, bind conn.Bind, logger *Logger, opts ...Opt
 		go device.RoutineHandshake(i + 1)
 	}
 
-	device.state.stopping.Add(1)      // RoutineReadFromTUN
-	device.queue.encryption.wg.Add(1) // RoutineReadFromTUN
-	go device.RoutineReadFromTUN()
+	device.state.stopping.Add(len(device.tun.queues))      // RoutineReadFromTUN
+	device.queue.encryption.wg.Add(len(device.tun.queues)) // RoutineReadFromTUN
+	for i, q := range device.tun.queues {
+		go device.RoutineReadFromTUN(i, q)
+	}
 	go device.RoutineTUNEventReader()
 
 	return device

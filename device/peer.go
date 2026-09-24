@@ -7,6 +7,7 @@ package device
 
 import (
 	"container/list"
+	"encoding/binary"
 	"errors"
 	"net/netip"
 	"runtime"
@@ -94,6 +95,23 @@ type Peer struct {
 	cookieGenerator             CookieGenerator
 	trieEntries                 list.List
 	persistentKeepaliveInterval atomic.Uint32
+
+	// flowID pins this peer's decrypted packets to a single TUN write queue
+	// when the device is a [tun.MultiQueueDevice].
+	// See [Peer.writeTUN].
+	//
+	// The kernel picks a TUN queue by 5-tuple for new (or quiescent,
+	// TUN_FLOW_EXPIRE=3s) flows. A pin learned from our writes overrides
+	// the hash. Kernel delivers a packet to the stack before recording the pin,
+	// so the first reply to a flow we write leaves on the hashed queue and the
+	// rest on ours. Both queues then carry that flow briefly, which may
+	// introduce overlay reordering.
+	// See https://elixir.bootlin.com/linux/v7.0/source/drivers/net/tun.c#L461
+	//
+	// TODO match or influence kernel hashing when writing to TUN to avoid
+	// reorders. Note that the kernel hash is siphash keyed by an unexported
+	// random value. This can be overridden with TUNSETSTEERINGEBPF ioctl.
+	flowID uint32
 }
 
 func (device *Device) NewPeer(pk NoisePublicKey) (*Peer, error) {
@@ -118,6 +136,8 @@ func (device *Device) NewPeer(pk NoisePublicKey) (*Peer, error) {
 
 	peer.cookieGenerator.Init(pk)
 	peer.device = device
+	// Public keys are uniformly distributed, so the low bytes spread fine.
+	peer.flowID = binary.LittleEndian.Uint32(pk[:4])
 
 	// staged is never closed, and it can be accessed concurrent to [Peer.Start],
 	// so we init here instead of [Peer.Start].
@@ -212,6 +232,12 @@ func (peer *Peer) SendBuffers(buffers [][]byte) error {
 		peer.txBytes.Add(totalLen)
 	}
 	return err
+}
+
+// writeTUN writes bufs to the TUN queue this peer is pinned to, keeping the
+// peer's decrypted packets in order.
+func (peer *Peer) writeTUN(bufs [][]byte, offset int) (int, error) {
+	return peer.device.tun.writeTo(int(peer.flowID), bufs, offset)
 }
 
 func (peer *Peer) String() string {

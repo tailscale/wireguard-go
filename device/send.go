@@ -308,14 +308,14 @@ func copyPacketBufIfFits(dst, src *packetBuf, packets []tun.ReadPacket) bool {
 	return true
 }
 
-func (device *Device) RoutineReadFromTUN() {
+func (device *Device) RoutineReadFromTUN(id int, queue tun.Reader) {
 	defer func() {
-		device.log.Verbosef("Routine: TUN reader - stopped")
+		device.log.Verbosef("Routine: TUN reader %d - stopped", id)
 		device.state.stopping.Done()
 		device.queue.encryption.wg.Done()
 	}()
 
-	device.log.Verbosef("Routine: TUN reader - started")
+	device.log.Verbosef("Routine: TUN reader %d - started", id)
 
 	var (
 		batchSize   = device.BatchSize()
@@ -370,7 +370,7 @@ func (device *Device) RoutineReadFromTUN() {
 		bufHandedOff = false
 
 		// read packets
-		count, readErr = device.tun.device.Read(fullSizeBuf.slab, packets)
+		count, readErr = queue.Read(fullSizeBuf.slab, packets)
 		if copyPacketBufIfFits(smallBuf, fullSizeBuf, packets[:count]) {
 			buf = smallBuf
 		}
