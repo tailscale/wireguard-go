@@ -678,6 +678,9 @@ func (peer *Peer) processOutboundContainer(elemsContainer *QueueOutboundElements
 	peer.timersAnyAuthenticatedPacketSent()
 
 	err := peer.SendBuffers(scratch)
+	// SendBuffers has finished consuming this batch; keep only the reusable
+	// slice storage, not references to completed packet slabs.
+	releasePacketReferences(scratch)
 	if dataSent {
 		peer.timersDataSent()
 	}
