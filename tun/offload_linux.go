@@ -123,7 +123,7 @@ func (w *groToWrite) appendIov(pkt []byte) int {
 	if n < w.allocated {
 		w.iovs = w.iovs[:n+1]
 	} else {
-		iov := make([][]byte, 1, conn.IdealBatchSize)
+		iov := make([][]byte, 1, initialGROVectorCapacity)
 		iov[iovVirtioNetHdrIdx] = make([]byte, virtioNetHdrLen)
 		w.iovs = append(w.iovs, iov)
 		w.allocated++
@@ -163,7 +163,7 @@ func newTCPGROTable() *tcpGROTable {
 		itemsPool:   make([][]tcpGROItem, conn.IdealBatchSize),
 	}
 	for i := range t.itemsPool {
-		t.itemsPool[i] = make([]tcpGROItem, 0, conn.IdealBatchSize)
+		t.itemsPool[i] = make([]tcpGROItem, 0, initialGROFlowCapacity)
 	}
 	return t
 }
@@ -273,7 +273,7 @@ func newUDPGROTable() *udpGROTable {
 		itemsPool:   make([][]udpGROItem, conn.IdealBatchSize),
 	}
 	for i := range u.itemsPool {
-		u.itemsPool[i] = make([]udpGROItem, 0, conn.IdealBatchSize)
+		u.itemsPool[i] = make([]udpGROItem, 0, initialGROFlowCapacity)
 	}
 	return u
 }
