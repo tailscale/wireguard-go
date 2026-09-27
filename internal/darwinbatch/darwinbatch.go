@@ -36,6 +36,8 @@ type State struct {
 	msgs []msghdrX
 	iovs []unix.Iovec
 	lens []int // capacity staged by StageRecv, restored before each Recv
+
+	names []unix.RawSockaddrAny // each datagram's source, once RecvNames is called
 }
 
 // New returns a State for batches of up to n datagrams.
@@ -46,6 +48,22 @@ func New(n int) *State {
 		s.msgs[i].iovlen = 1
 	}
 	return s
+}
+
+// RecvNames makes Recv record each datagram's source address, for [State.Name].
+func (s *State) RecvNames() {
+	s.names = make([]unix.RawSockaddrAny, len(s.msgs))
+	for i := range s.msgs {
+		s.msgs[i].name = (*byte)(unsafe.Pointer(&s.names[i]))
+	}
+}
+
+// Name is the source address of the datagram Recv placed in slot i, or nil if RecvNames was not called or the kernel gave none.
+func (s *State) Name(i int) *unix.RawSockaddrAny {
+	if s.names == nil || s.msgs[i].namelen == 0 {
+		return nil
+	}
+	return &s.names[i]
 }
 
 // Cap is the largest batch the State holds.
@@ -112,6 +130,9 @@ func (s *State) Recv(fd uintptr, want int) (int, error) {
 		s.iovs[i].SetLen(s.lens[i])
 		s.msgs[i].datalen = uint64(s.lens[i])
 		s.msgs[i].flags = 0
+		if s.names != nil {
+			s.msgs[i].namelen = uint32(unsafe.Sizeof(s.names[i]))
+		}
 	}
 	r, e := recvmsgX(fd, &s.msgs[0], want, 0)
 	if e != 0 {
