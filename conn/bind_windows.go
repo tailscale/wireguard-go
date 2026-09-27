@@ -77,7 +77,8 @@ type WinRingBind struct {
 	isOpen atomic.Uint32 // 0, 1, or 2
 }
 
-func NewDefaultBind() Bind { return NewWinRingBind() }
+// NewDefaultBind ignores opts: WinRingBind supports none of them.
+func NewDefaultBind(opts ...Option) Bind { return NewWinRingBind() }
 
 func NewWinRingBind() Bind {
 	if !winrio.Initialize() {

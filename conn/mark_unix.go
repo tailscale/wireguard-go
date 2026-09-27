@@ -61,5 +61,16 @@ func (s *StdNetBind) SetMark(mark uint32) error {
 			return err
 		}
 	}
+	// Redial connected sockets to apply the mark; later dials read s.mark.
+	s.mark.Store(mark)
+	s.mu.Lock()
+	cs := s.cs
+	s.mu.Unlock()
+	cs.reset()
 	return nil
+}
+
+// applyMark sets mark on fd. Without it, a connected socket's packets could loop back into the tunnel.
+func applyMark(fd uintptr, mark uint32) error {
+	return unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, fwmarkIoctl, int(mark))
 }

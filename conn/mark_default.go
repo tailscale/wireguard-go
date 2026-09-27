@@ -10,3 +10,5 @@ package conn
 func (s *StdNetBind) SetMark(mark uint32) error {
 	return nil
 }
+
+func applyMark(fd uintptr, mark uint32) error { return nil }

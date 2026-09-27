@@ -15,6 +15,7 @@ import (
 	"runtime"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"syscall"
 
 	"golang.org/x/net/ipv4"
@@ -48,10 +49,23 @@ type StdNetBind struct {
 
 	blackhole4 bool
 	blackhole6 bool
+
+	connected bool              // use ConnectedSockets; fixed at construction, see WithConnectedSockets
+	cs        *ConnectedSockets // nil unless connected and open
+	mark      atomic.Uint32     // last SetMark, which connected sockets dialled later must also carry
 }
 
-func NewStdNetBind() Bind {
+func NewStdNetBind(opts ...Option) Bind {
+	var cfg config
+	for _, o := range opts {
+		o.apply(&cfg)
+	}
+	connected := connectedByDefault
+	if cfg.connected != nil {
+		connected = *cfg.connected
+	}
 	return &StdNetBind{
+		connected: connected && connectedSupported,
 		udpAddrPool: sync.Pool{
 			New: func() any {
 				return &net.UDPAddr{
@@ -119,8 +133,18 @@ func (e *StdNetEndpoint) DstToString() string {
 	return e.AddrPort.String()
 }
 
-func listenNet(network string, port int) (*net.UDPConn, int, error) {
-	conn, err := listenConfig().ListenPacket(context.Background(), network, ":"+strconv.Itoa(port))
+func listenNet(network string, port int, reusePort bool) (*net.UDPConn, int, error) {
+	lc := listenConfig()
+	if reusePort {
+		base := lc.Control
+		lc.Control = func(network, address string, c syscall.RawConn) error {
+			if err := base(network, address, c); err != nil {
+				return err
+			}
+			return ReusePortControl(network, address, c)
+		}
+	}
+	conn, err := lc.ListenPacket(context.Background(), network, ":"+strconv.Itoa(port))
 	if err != nil {
 		return nil, 0, err
 	}
@@ -161,13 +185,13 @@ again:
 	var v4pc *ipv4.PacketConn
 	var v6pc *ipv6.PacketConn
 
-	v4conn, port, err = listenNet("udp4", port)
+	v4conn, port, err = listenNet("udp4", port, s.connected)
 	if err != nil && !errors.Is(err, syscall.EAFNOSUPPORT) {
 		return nil, 0, err
 	}
 
 	// Listen on the same port as we're using for ipv4.
-	v6conn, port, err = listenNet("udp6", port)
+	v6conn, port, err = listenNet("udp6", port, s.connected)
 	if uport == 0 && errors.Is(err, errEADDRINUSE) && tries < 100 {
 		v4conn.Close()
 		tries++
@@ -200,6 +224,12 @@ again:
 		return nil, 0, syscall.EAFNOSUPPORT
 	}
 
+	if s.connected {
+		s.cs = NewConnectedSockets(ConnectedConfig{Port: port, Control: s.connectedControl})
+		if s.cs != nil {
+			fns = append(fns, s.receiveConnected(s.cs))
+		}
+	}
 	return fns, uint16(port), nil
 }
 
@@ -297,7 +327,8 @@ func (s *StdNetBind) makeReceiveIPv6(pc *ipv6.PacketConn, conn *net.UDPConn, rxO
 // TODO: When all Binds handle IdealBatchSize, remove this dynamic function and
 // rename the IdealBatchSize constant to BatchSize.
 func (s *StdNetBind) BatchSize() int {
-	if runtime.GOOS == "linux" {
+	// Connected sockets batch their reads on every platform that has them, not only Linux.
+	if runtime.GOOS == "linux" || s.connected {
 		return IdealBatchSize
 	}
 	return 1
@@ -306,6 +337,10 @@ func (s *StdNetBind) BatchSize() int {
 func (s *StdNetBind) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// First, so that the ReceiveFunc blocked in its ReadBatch returns and BindUpdate can reopen.
+	s.cs.Close()
+	s.cs = nil
 
 	var err1, err2 error
 	if s.ipv4 != nil {
@@ -357,7 +392,16 @@ func (s *StdNetBind) Send(bufs [][]byte, endpoint Endpoint, offset int) error {
 		is6 = true
 		offload = s.ipv6TxOffload
 	}
+	cs := s.cs
 	s.mu.Unlock()
+
+	if cs != nil {
+		// Send from the sticky source, if any, so replies leave from the address the peer sent to.
+		ep := endpoint.(*StdNetEndpoint)
+		if handled, err := cs.SendFrom(ep.AddrPort, ep.SrcIP(), bufs, offset); handled {
+			return err
+		}
+	}
 
 	if blackhole {
 		return nil

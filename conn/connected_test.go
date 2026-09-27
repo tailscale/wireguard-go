@@ -25,7 +25,35 @@ func socketTo(s *ConnectedSockets, dst netip.AddrPort) *connectedSocket {
 	return nil
 }
 
-// listenPeer returns a plain UDP socket standing in for a remote peer.
+// openPairThroughBind sends enough through b to open a pair and returns the source address the peer saw.
+func openPairThroughBind(t *testing.T, b Bind, ep Endpoint, peer *net.UDPConn) netip.AddrPort {
+	t.Helper()
+	bufs := make([][]byte, 64)
+	for i := range bufs {
+		bufs[i] = make([]byte, 1024)
+	}
+	for sent := 0; sent <= DefaultOpenAfter; sent += len(bufs) * 1024 {
+		if err := b.Send(bufs, ep, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var from netip.AddrPort
+	buf := make([]byte, 2048)
+	for {
+		peer.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+		_, src, err := peer.ReadFromUDPAddrPort(buf)
+		if err != nil {
+			break
+		}
+		from = src
+	}
+	if !from.IsValid() {
+		t.Fatal("the peer received nothing")
+	}
+	return from
+}
+
+// listenPeer returns a UDP socket standing in for a remote peer.
 func listenPeer(t *testing.T, network string) (*net.UDPConn, netip.AddrPort) {
 	t.Helper()
 	ip := net.IPv4(127, 0, 0, 1)
@@ -492,5 +520,51 @@ func TestConnectedPortZeroTakesNothing(t *testing.T) {
 	s.Rebind(0)
 	if handled, err := s.Send(peerAP, [][]byte{[]byte("x")}, 0); handled || err != nil {
 		t.Fatalf("Send after Rebind(0) = %v, %v; want false, nil", handled, err)
+	}
+}
+
+// WithConnectedSockets is honoured per Bind, and a send and its reply use the connected socket.
+func TestStdNetBindConnected(t *testing.T) {
+	on := NewStdNetBind(WithConnectedSockets(true)).(*StdNetBind)
+	off := NewStdNetBind(WithConnectedSockets(false)).(*StdNetBind)
+	def := NewStdNetBind().(*StdNetBind)
+	if !on.connected || off.connected || def.connected != connectedByDefault {
+		t.Fatalf("connected: on %v off %v default %v (platform default %v)", on.connected, off.connected, def.connected, connectedByDefault)
+	}
+	if on.BatchSize() != IdealBatchSize {
+		t.Fatalf("BatchSize with connected sockets = %d, want %d", on.BatchSize(), IdealBatchSize)
+	}
+
+	peer, peerAP := listenPeer(t, "udp4")
+	fns, port, err := on.Open(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer on.Close()
+	if on.cs == nil {
+		t.Fatal("no connected sockets after Open")
+	}
+	ep := &StdNetEndpoint{AddrPort: peerAP}
+	from := openPairThroughBind(t, on, ep, peer)
+	if socketTo(on.cs, peerAP) == nil {
+		t.Fatal("no connected socket after sending the threshold's worth")
+	}
+	if from.Port() != port {
+		t.Fatalf("source port %d, want the bind's %d", from.Port(), port)
+	}
+	peer.WriteToUDPAddrPort([]byte("pong"), from)
+	recv := fns[len(fns)-1] // the connected ReceiveFunc is last
+	slab := make([]byte, 1<<16)
+	packets := make([]ReceivedPacket, IdealBatchSize)
+	done := make(chan int, 1)
+	go func() { n, _ := recv(slab, packets); done <- n }()
+	select {
+	case n := <-done:
+		p := packets[0]
+		if n != 1 || string(slab[p.Offset:p.Offset+p.Size]) != "pong" || p.Endpoint.DstToString() != peerAP.String() {
+			t.Fatalf("got %d packets, %q from %v", n, slab[p.Offset:p.Offset+p.Size], p.Endpoint.DstToString())
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("reply never reached the connected ReceiveFunc")
 	}
 }
