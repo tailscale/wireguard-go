@@ -50,10 +50,11 @@ type StdNetBind struct {
 	blackhole4 bool
 	blackhole6 bool
 
-	connected bool                                               // use ConnectedSockets; fixed at construction, see WithConnectedSockets
-	cs        *ConnectedSockets                                  // nil unless connected and open
-	starter   func(fn ReceiveFunc, slabSize, batchSize int) bool // from the device, see SetReceiveFuncStarter
-	mark      atomic.Uint32                                      // last SetMark, which connected sockets dialled later must also carry
+	connected    bool                                               // use ConnectedSockets; fixed at construction, see WithConnectedSockets
+	dontFragment bool                                               // set DF on every socket; fixed at construction, see WithDontFragment
+	cs           *ConnectedSockets                                  // nil unless connected and open
+	starter      func(fn ReceiveFunc, slabSize, batchSize int) bool // see SetReceiveFuncStarter
+	mark         atomic.Uint32                                      // last SetMark, applied to connected sockets dialled later
 }
 
 func NewStdNetBind(opts ...Option) Bind {
@@ -66,7 +67,8 @@ func NewStdNetBind(opts ...Option) Bind {
 		connected = *cfg.connected
 	}
 	return &StdNetBind{
-		connected: connected && connectedSupported,
+		connected:    connected && connectedSupported,
+		dontFragment: cfg.dontFragment && dontFragmentSupported,
 		udpAddrPool: sync.Pool{
 			New: func() any {
 				return &net.UDPAddr{
@@ -134,16 +136,22 @@ func (e *StdNetEndpoint) DstToString() string {
 	return e.AddrPort.String()
 }
 
-func listenNet(network string, port int, reusePort bool) (*net.UDPConn, int, error) {
+func listenNet(network string, port int, reusePort, dontFragment bool) (*net.UDPConn, int, error) {
 	lc := listenConfig()
-	if reusePort {
-		base := lc.Control
-		lc.Control = func(network, address string, c syscall.RawConn) error {
-			if err := base(network, address, c); err != nil {
+	base := lc.Control
+	lc.Control = func(network, address string, c syscall.RawConn) error {
+		if err := base(network, address, c); err != nil {
+			return err
+		}
+		if dontFragment {
+			if err := setDontFragment(network, c); err != nil {
 				return err
 			}
+		}
+		if reusePort {
 			return ReusePortControl(network, address, c)
 		}
+		return nil
 	}
 	conn, err := lc.ListenPacket(context.Background(), network, ":"+strconv.Itoa(port))
 	if err != nil {
@@ -186,13 +194,13 @@ again:
 	var v4pc *ipv4.PacketConn
 	var v6pc *ipv6.PacketConn
 
-	v4conn, port, err = listenNet("udp4", port, s.connected)
+	v4conn, port, err = listenNet("udp4", port, s.connected, s.dontFragment)
 	if err != nil && !errors.Is(err, syscall.EAFNOSUPPORT) {
 		return nil, 0, err
 	}
 
 	// Listen on the same port as we're using for ipv4.
-	v6conn, port, err = listenNet("udp6", port, s.connected)
+	v6conn, port, err = listenNet("udp6", port, s.connected, s.dontFragment)
 	if uport == 0 && errors.Is(err, errEADDRINUSE) && tries < 100 {
 		v4conn.Close()
 		tries++
