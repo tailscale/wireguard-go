@@ -8,7 +8,10 @@
 package main
 
 import (
+	"errors"
+	"expvar"
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"runtime"
@@ -31,7 +34,17 @@ const (
 	ENV_WG_TUN_FD             = "WG_TUN_FD"
 	ENV_WG_UAPI_FD            = "WG_UAPI_FD"
 	ENV_WG_PROCESS_FOREGROUND = "WG_PROCESS_FOREGROUND"
+	ENV_WG_DEBUG_ADDR         = "WG_DEBUG_ADDR"
 )
+
+// deviceMetrics returns the [device.Metrics] to instrument the [device.Device]
+// with, backed by expvars. They are readable at /debug/vars when
+// WG_DEBUG_ADDR is set.
+func deviceMetrics() device.Metrics {
+	return device.Metrics{
+		MessageTransportRXDroppedReplay: expvar.NewInt("wireguard_message_transport_rx_dropped_replay"),
+	}
+}
 
 func setenv(env []string, key, value string) []string {
 	prefix := key + "="
@@ -299,9 +312,21 @@ func main() {
 
 	device := device.NewDevice(tdev, conn.NewDefaultBind(), logger,
 		device.WithQueueInboundSize(queueSize),
-		device.WithQueueOutboundSize(queueSize))
+		device.WithQueueOutboundSize(queueSize),
+		device.WithMetrics(deviceMetrics()))
 
 	logger.Verbosef("Device started")
+
+	if debugAddr := os.Getenv(ENV_WG_DEBUG_ADDR); debugAddr != "" {
+		logger.Verbosef("Serving expvars at http://%s/debug/vars", debugAddr)
+		debug := &http.Server{Addr: debugAddr, Handler: http.DefaultServeMux}
+		go func() {
+			if err := debug.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+				logger.Errorf("Debug listener on %s stopped: %v", debugAddr, err)
+			}
+		}()
+		defer debug.Close()
+	}
 
 	errs := make(chan error)
 	term := make(chan os.Signal, 1)

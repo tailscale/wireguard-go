@@ -209,6 +209,9 @@ type Metrics struct {
 	// HandshakeResponderCompleted counts responder-side handshake completions,
 	// observed when an authenticated transport packet confirms the new keypair.
 	HandshakeResponderCompleted Counter
+	// MessageTransportRXDroppedReplay counts inbound transport packets rejected by the
+	// replay filter.
+	MessageTransportRXDroppedReplay Counter
 }
 
 // noopCounter is a noop implementation of [Counter].
@@ -235,6 +238,9 @@ func (m *Metrics) fillNils() {
 	}
 	if m.HandshakeResponderCompleted == nil {
 		m.HandshakeResponderCompleted = noopCounter{}
+	}
+	if m.MessageTransportRXDroppedReplay == nil {
+		m.MessageTransportRXDroppedReplay = noopCounter{}
 	}
 }
 
