@@ -51,10 +51,11 @@ type StdNetBind struct {
 	blackhole4 bool
 	blackhole6 bool
 
-	connected bool                                               // use ConnectedSockets; fixed at construction, see WithConnectedSockets
-	cs        *ConnectedSockets                                  // nil unless connected and open
-	starter   func(fn ReceiveFunc, slabSize, batchSize int) bool // from the device, see SetReceiveFuncStarter
-	mark      atomic.Uint32                                      // last SetMark, which connected sockets dialled later must also carry
+	connected    bool                                               // use ConnectedSockets; fixed at construction, see WithConnectedSockets
+	dontFragment bool                                               // set DF on every socket; fixed at construction, see WithDontFragment
+	cs           *ConnectedSockets                                  // nil unless connected and open
+	starter      func(fn ReceiveFunc, slabSize, batchSize int) bool // see SetReceiveFuncStarter
+	mark         atomic.Uint32                                      // last SetMark, applied to connected sockets dialled later
 }
 
 // stdNetSocket is one UDP socket. See [WithSockets].
@@ -113,6 +114,7 @@ func NewStdNetBind(opts ...Option) Bind {
 		connected = *b.config.connected
 	}
 	b.connected = connected && connectedSupported
+	b.dontFragment = b.config.dontFragment && dontFragmentSupported
 	return b
 }
 
@@ -180,11 +182,11 @@ func listenNet(network string, port int, ctrl ...controlFn) (*net.UDPConn, int, 
 // it's at least non-nil.
 var errEADDRINUSE error = errors.New("")
 
-// bindGroup opens n [net.UDPConn]s sharing one local port, via SO_REUSEPORT
-// when n is more than one. If port is 0, all sockets join the same ephemeral
+// bindGroup opens n [net.UDPConn]s sharing one local port, via reuse
+// when it is non-nil. If port is 0, all sockets join the same ephemeral
 // port. The returned group is either empty or the full n.
-// bindGroup binds n sockets to port. When reuse is non-nil every socket gets it, the first only after its bind succeeds; [StdNetBind.Open] passes reusePortFn for more than one socket, and [ReusePortControl] when connected sockets must share the port.
-func bindGroup(network string, port, n int, reuse controlFn) ([]*net.UDPConn, int, error) {
+// The first socket gets reuse only after its bind succeeds, and every socket gets extra; [StdNetBind.Open] passes reusePortFn as reuse for more than one socket, and [ReusePortControl] when connected sockets must share the port.
+func bindGroup(network string, port, n int, reuse controlFn, extra ...controlFn) ([]*net.UDPConn, int, error) {
 	var conns []*net.UDPConn
 	for i := range n {
 		// UDP on Linux guards against the ephemeral port reuse across different
@@ -198,9 +200,9 @@ func bindGroup(network string, port, n int, reuse controlFn) ([]*net.UDPConn, in
 		//
 		// For now, bind first socket without SO_REUSEPORT, then apply
 		// the option if successful.
-		var ctrl []controlFn
+		ctrl := append([]controlFn(nil), extra...)
 		if i > 0 && reuse != nil {
-			ctrl = []controlFn{reuse}
+			ctrl = append(ctrl, reuse)
 		}
 		c, p, err := listenNet(network, port, ctrl...)
 		if err != nil {
@@ -259,6 +261,10 @@ func (s *StdNetBind) Open(uport uint16) ([]ReceiveFunc, uint16, error) {
 		// Connected sockets share the port on every platform that has them, not only where reusePortFn is set.
 		reuse = ReusePortControl
 	}
+	var extra []controlFn
+	if s.dontFragment {
+		extra = append(extra, func(network, _ string, c syscall.RawConn) error { return setDontFragment(network, c) })
+	}
 
 	// Attempt to open ipv4 and ipv6 listeners on the same port.
 	// If uport is 0, we can retry on failure.
@@ -266,13 +272,13 @@ again:
 	port := int(uport)
 	var v4conns, v6conns []*net.UDPConn
 
-	v4conns, port, err = bindGroup("udp4", port, ns, reuse)
+	v4conns, port, err = bindGroup("udp4", port, ns, reuse, extra...)
 	if err != nil && !errors.Is(err, syscall.EAFNOSUPPORT) {
 		return nil, 0, err
 	}
 
 	// Listen on the same port as we're using for ipv4.
-	v6conns, port, err = bindGroup("udp6", port, ns, reuse)
+	v6conns, port, err = bindGroup("udp6", port, ns, reuse, extra...)
 	if uport == 0 && errors.Is(err, errEADDRINUSE) && tries < 100 {
 		closeConns(v4conns)
 		tries++

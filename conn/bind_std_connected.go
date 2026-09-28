@@ -5,8 +5,13 @@ import (
 	"syscall"
 )
 
-// connectedControl gives StdNetBind's connected sockets the same fwmark as its own sockets.
+// connectedControl gives connected sockets the same don't-fragment setting and mark as s's own sockets.
 func (s *StdNetBind) connectedControl(network, address string, c syscall.RawConn) error {
+	if s.dontFragment {
+		if err := setDontFragment(network, c); err != nil {
+			return err
+		}
+	}
 	mark := s.mark.Load()
 	if mark == 0 {
 		return nil
