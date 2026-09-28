@@ -91,8 +91,9 @@ func (f optionFunc) apply(config *config) {
 }
 
 type config struct {
-	sockets   int
-	connected *bool // nil means the default, off
+	sockets      int
+	connected    *bool // nil means connectedByDefault
+	dontFragment bool
 }
 
 func defaultConfig() config {
@@ -125,6 +126,11 @@ func WithSockets(n int) Option {
 // On Linux the Bind's sockets then use SO_REUSEPORT, so another process of the same user can bind the port and receive some of its traffic.
 func WithConnectedSockets(on bool) Option {
 	return optionFunc(func(c *config) { c.connected = &on })
+}
+
+// WithDontFragment sets the don't-fragment bit on every datagram a [StdNetBind] sends. It is off by default and only has an effect on darwin, where IPv4 datagrams without DF get a random IP ID, which is slow to generate and defeats GRO on a Linux receiver. With DF, datagrams larger than the path MTU are dropped rather than fragmented.
+func WithDontFragment(on bool) Option {
+	return optionFunc(func(c *config) { c.dontFragment = on })
 }
 
 // MultiSocketBind is a Bind that operates on more than one socket per address
