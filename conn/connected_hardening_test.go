@@ -150,41 +150,38 @@ func TestConnectedDialRacingResetIsDiscarded(t *testing.T) {
 	}
 }
 
-// A datagram larger than the caller's whole slab is dropped, so ReadBatch returns the next one rather than nothing forever.
-func TestConnectedSlabTooSmallDrops(t *testing.T) {
-	peer, peerAP := listenPeer(t, "udp4")
+// A slab too small for one slot is an error, not an endless empty read.
+func TestConnectedReadSlabTooSmall(t *testing.T) {
+	_, peerAP := listenPeer(t, "udp4")
 	_, port := listenShared(t, "udp4")
-	s := newSet(t, ConnectedConfig{Port: port})
+	got := make(chan started, 1)
+	s := newSet(t, ConnectedConfig{Port: port, Reader: capture(got)})
 	s.Send(peerAP, [][]byte{[]byte("x")}, 0)
-	_, from := peerRead(t, peer)
-	peer.WriteToUDPAddrPort(make([]byte, 1000), from)
-	peer.WriteToUDPAddrPort([]byte("small"), from)
-	time.Sleep(50 * time.Millisecond)
-	slab := make([]byte, 500)
-	pkts := make([]ConnectedPacket, 8)
-	n := readWithin(t, s, slab, pkts)
-	if n != 1 || string(slab[pkts[0].Offset:pkts[0].Offset+pkts[0].Size]) != "small" {
-		t.Fatalf("ReadBatch into a 500-byte slab returned %d packets; want the small one", n)
+	st := <-got
+	if n, err := st.read(make([]byte, 500), make([]ConnectedPacket, st.batchSize)); err == nil || errors.Is(err, net.ErrClosed) {
+		t.Fatalf("read into a 500-byte slab = %d, %v; want an error that is not net.ErrClosed", n, err)
 	}
 }
 
-// ReadBatch reports net.ErrClosed after Close even with datagrams left over from an earlier call.
+// A ConnectedReadFunc reports net.ErrClosed after Close even when its socket had datagrams waiting.
 func TestConnectedReadAfterCloseIsClosed(t *testing.T) {
 	peer, peerAP := listenPeer(t, "udp4")
 	_, port := listenShared(t, "udp4")
-	s := NewConnectedSockets(ConnectedConfig{Port: port, OpenAfter: 1})
+	got := make(chan started, 1)
+	s := newSet(t, ConnectedConfig{Port: port, Reader: capture(got)})
 	s.Send(peerAP, [][]byte{[]byte("x")}, 0)
 	_, from := peerRead(t, peer)
+	st := <-got
 	peer.WriteToUDPAddrPort([]byte("a"), from)
 	peer.WriteToUDPAddrPort([]byte("b"), from)
 	time.Sleep(50 * time.Millisecond)
-	slab := make([]byte, 1<<16)
-	for got := 0; got == 0; {
-		got = readWithin(t, s, slab, make([]ConnectedPacket, 1))
+	slab := make([]byte, st.slabSize)
+	if n, err := st.read(slab, make([]ConnectedPacket, st.batchSize)); err != nil || n < 1 {
+		t.Fatalf("read before Close = %d, %v", n, err)
 	}
 	s.Close()
-	if n, err := s.ReadBatch(slab, make([]ConnectedPacket, 8)); !errors.Is(err, net.ErrClosed) {
-		t.Fatalf("ReadBatch after Close = %d, %v; want net.ErrClosed", n, err)
+	if n, err := st.read(slab, make([]ConnectedPacket, st.batchSize)); !errors.Is(err, net.ErrClosed) {
+		t.Fatalf("read after Close = %d, %v; want net.ErrClosed", n, err)
 	}
 }
 
@@ -531,16 +528,14 @@ func TestConnectedOpeningMidStreamLosesNothing(t *testing.T) {
 			}
 		}
 	}()
+	c, _ := collectors.Load(s)
 	go func() {
-		slab := make([]byte, 1<<16)
-		pkts := make([]ConnectedPacket, 128)
 		for {
-			n, err := s.ReadBatch(slab, pkts)
-			if err != nil {
+			select {
+			case <-stop:
 				return
-			}
-			for _, p := range pkts[:n] {
-				note(p.Source, slab[p.Offset:p.Offset+p.Size])
+			case r := <-c.(*collector).ch:
+				note(r.p.Source, r.data)
 			}
 		}
 	}()

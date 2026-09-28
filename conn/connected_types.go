@@ -21,25 +21,24 @@ type ConnectedConfig struct {
 
 	// OpenAfter is how many bytes an address pair must carry, sent and received together, before it gets its own socket. Zero means [DefaultOpenAfter], and 1 opens on the first datagram.
 	OpenAfter int
+
+	// Reader is required. When a socket opens, the set calls Reader with its [ConnectedReadFunc], which the caller calls from its own goroutine (avoiding a copy and a handoff) until it returns [net.ErrClosed]. slabSize and batchSize are what one full batch needs.
+	// Reader returns false if the caller can no longer read, and the socket is closed unused.
+	Reader func(read ConnectedReadFunc, slabSize, batchSize int) bool
 }
 
-/*
-DefaultOpenAfter is the default for ConnectedConfig.OpenAfter: 1 MiB.
+// ConnectedReadFunc reads datagrams from one connected socket into slab, describing them in packets, and returns how many it read, at least one; it blocks until one arrives. Only one goroutine may call it at a time. See ConnectedConfig.Reader.
+type ConnectedReadFunc func(slab []byte, packets []ConnectedPacket) (int, error)
 
-A connected socket only pays under load, and costs a file descriptor, a goroutine and its receive buffers, so a pair that carries only handshakes, keepalives and small exchanges is better left on the caller's socket. Counts start again at every idle check, so a pair must carry this much within one 30 to 60 second interval: about 8 ms of a 1 Gbit/s flow, or 80 ms at 100 Mbit/s.
-
-Closing is deliberately a different test. A socket closes only after a whole interval with no traffic at all in either direction, so once open it stays open through any lull short of the peer going quiet, and a rate that hovers near this threshold cannot open and close it over and over.
-*/
+// DefaultOpenAfter is the default ConnectedConfig.OpenAfter. A connected socket only pays under load, so pairs carrying only handshakes and keepalives stay on the caller's socket.
+// Counts reset at each idle check, but a socket closes only after a whole idle interval, so a rate near the threshold cannot flap.
 const DefaultOpenAfter = 1 << 20
 
-/*
-DefaultMaxConnectedSockets is the default socket limit.
-
-It is set by memory rather than by anything else, because falling back to the caller's socket is much slower per packet for the addresses that do, so a limit below the working set costs throughput out of proportion to the number of addresses left over. A socket costs about 0.26 MiB, or about 1.15 MiB once it carries jumbo datagrams and from the start on Linux with GRO, whose coalesced reads need 64 KiB slots, so the limit is between about 67 and 295 MiB. The OpenAfter threshold keeps sockets to the peers carrying real traffic, so few exist at once in practice. An embedder with a tight memory budget, such as an iOS network extension, should set a lower one.
-*/
+// DefaultMaxConnectedSockets is the default socket limit. Each socket costs a file descriptor, kernel buffers and a few tens of KiB of read state (a few hundred with GRO).
+// Embedders with a tight memory budget, such as an iOS network extension, should set a lower one.
 const DefaultMaxConnectedSockets = 256
 
-// ConnectedPacket describes one datagram returned by [ConnectedSockets.ReadBatch].
+// ConnectedPacket describes one datagram a [ConnectedReadFunc] read.
 type ConnectedPacket struct {
 	Offset int            // start of the datagram in the slab
 	Size   int            // length of the datagram

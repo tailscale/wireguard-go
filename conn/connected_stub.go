@@ -4,7 +4,6 @@ package conn
 
 import (
 	"errors"
-	"net"
 	"net/netip"
 	"syscall"
 )
@@ -28,8 +27,6 @@ func (*ConnectedSockets) Send(netip.AddrPort, [][]byte, int) (bool, error) { ret
 func (*ConnectedSockets) SendFrom(netip.AddrPort, netip.Addr, [][]byte, int) (bool, error) {
 	return false, nil
 }
-
-func (*ConnectedSockets) ReadBatch([]byte, []ConnectedPacket) (int, error) { return 0, net.ErrClosed }
 
 func (*ConnectedSockets) Dial(netip.AddrPort, netip.Addr, int) bool { return false }
 

@@ -48,6 +48,12 @@ type Device struct {
 		netlinkCancel *rwcancel.RWCancel
 		port          uint16 // listening port
 		fwmark        uint32 // mark value (0 = disabled)
+		// started orders startReceiveFunc against closeBindLocked, so no routine joins stopping after the close waits on it.
+		started struct {
+			sync.Mutex
+			open  bool
+			count int // routines started since the device was created, for tests
+		}
 	}
 
 	staticIdentity struct {
@@ -83,6 +89,10 @@ type Device struct {
 		// smallPacketBufs aliases packetBufs when no distinct small packet pool
 		// is used. See [Device.PopulatePools].
 		smallPacketBufs *WaitPool
+		// Per slab size pools for receive routines started after Open; see [Device.slabGetter].
+		slabsMu       sync.Mutex
+		slabPools     map[int]*slabPool
+		slabWaitPools map[int]*WaitPool
 	}
 
 	queue struct {
@@ -880,12 +890,105 @@ func closeBindLocked(device *Device) error {
 	if netc.netlinkCancel != nil {
 		netc.netlinkCancel.Cancel()
 	}
+	device.setStartsOpen(false)
 	if netc.bind != nil {
 		err = netc.bind.Close()
 	}
 	netc.stopping.Wait()
 	return err
 }
+
+// setStartsOpen sets whether a Bind may start receive routines after Open.
+func (device *Device) setStartsOpen(open bool) {
+	device.net.started.Lock()
+	device.net.started.open = open
+	device.net.started.Unlock()
+}
+
+// startReceiveFunc is the start function given to a [conn.ReceiveFuncStarter].
+func (device *Device) startReceiveFunc(fn conn.ReceiveFunc, slabSize, batchSize int) bool {
+	st := &device.net.started
+	st.Lock()
+	defer st.Unlock()
+	if !st.open {
+		return false
+	}
+	device.net.stopping.Add(1)
+	device.queue.decryption.wg.Add(1)
+	device.queue.handshake.wg.Add(1)
+	st.count++
+	go device.receiveIncoming(batchSize, fn, device.slabGetter(slabSize))
+	return true
+}
+
+// slabGetter returns a getter for slabs of size bytes, from a WaitPool if the device preallocates buffers and a slabPool otherwise.
+func (device *Device) slabGetter(size int) func() *packetBuf {
+	device.pool.slabsMu.Lock()
+	defer device.pool.slabsMu.Unlock()
+	if device.config.preallocatedBuffersPerPool != 0 {
+		p := device.pool.slabWaitPools[size]
+		if p == nil {
+			p = NewWaitPool(device.config.preallocatedBuffersPerPool, func() any {
+				return newPacketBuf(size, func(buf *packetBuf) { p.Put(buf) })
+			})
+			if device.pool.slabWaitPools == nil {
+				device.pool.slabWaitPools = make(map[int]*WaitPool)
+			}
+			device.pool.slabWaitPools[size] = p
+		}
+		return func() *packetBuf {
+			b := p.Get().(*packetBuf)
+			b.incRef()
+			return b
+		}
+	}
+	free := device.pool.slabPools[size]
+	if free == nil {
+		free = newSlabPool(size, max(1, slabMaxBytes/size))
+		if device.pool.slabPools == nil {
+			device.pool.slabPools = make(map[int]*slabPool)
+		}
+		device.pool.slabPools[size] = free
+	}
+	return free.get
+}
+
+// slabPool hands out at most limit slabs of one size and keeps every slab it makes, so memory is bounded however many sockets share it. When all are in flight, get blocks and new datagrams wait in the socket buffer.
+type slabPool struct {
+	size  int
+	free  chan *packetBuf
+	mu    sync.Mutex
+	made  int
+	limit int
+}
+
+func newSlabPool(size, limit int) *slabPool {
+	return &slabPool{size: size, free: make(chan *packetBuf, limit), limit: limit}
+}
+
+func (p *slabPool) get() *packetBuf {
+	var b *packetBuf
+	select {
+	case b = <-p.free:
+	default:
+		p.mu.Lock()
+		if p.made < p.limit {
+			p.made++
+			p.mu.Unlock()
+			b = newPacketBuf(p.size, p.put)
+		} else {
+			p.mu.Unlock()
+			b = <-p.free
+		}
+	}
+	b.incRef()
+	return b
+}
+
+func (p *slabPool) put(b *packetBuf) { p.free <- b }
+
+// slabMaxBytes bounds slab memory per size. A connected socket with GRO reads into 64 KiB slots that may each hold only a few packets, so an unbounded pool grows large behind a slow TUN writer.
+const slabMaxBytes = 32 << 20
 
 func (device *Device) Bind() conn.Bind {
 	device.net.Lock()
@@ -939,15 +1042,22 @@ func (device *Device) BindUpdate() error {
 	var recvFns []conn.ReceiveFunc
 	netc := &device.net
 
+	if st, ok := netc.bind.(conn.ReceiveFuncStarter); ok {
+		st.SetReceiveFuncStarter(device.startReceiveFunc)
+	}
+	device.setStartsOpen(true)
 	recvFns, netc.port, err = netc.bind.Open(netc.port)
 	if err != nil {
+		device.setStartsOpen(false)
 		netc.port = 0
 		return err
 	}
 
 	netc.netlinkCancel, err = device.startRouteListener(netc.bind)
 	if err != nil {
+		device.setStartsOpen(false)
 		netc.bind.Close()
+		netc.stopping.Wait()
 		netc.port = 0
 		return err
 	}

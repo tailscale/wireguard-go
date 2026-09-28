@@ -4,6 +4,7 @@ package conn
 
 import (
 	"errors"
+	"fmt"
 	"net"
 	"net/netip"
 	"runtime"
@@ -22,7 +23,7 @@ ConnectedSockets keeps one UDP socket per address pair in use, each bound to the
 
 A connected socket settles the route once rather than per send, and gives each remote address its own receive queue. This matters most where an unconnected socket cannot batch (darwin has neither sendmmsg nor UDP GSO).
 
-The sockets share the caller's port, so their packets are indistinguishable on the wire from the caller's own and NAT mappings are unaffected. How they share it is per platform, and the caller's socket must allow it; see [ReusePortControl]. The kernel delivers each datagram to the most specific matching socket, so traffic from an address that has a connected socket arrives on that socket and not on the caller's, and the caller has to read both: its own socket as before, and this one through [ConnectedSockets.ReadBatch].
+The sockets share the caller's port (see [ReusePortControl]), so NAT mappings are unaffected. The kernel delivers each datagram to the most specific matching socket, so the caller must read each connected socket as well as its own, through [ConnectedConfig.Reader].
 
 Addresses past the socket limit, or that cannot be dialled, are left to the caller's socket. A nil *ConnectedSockets is valid and takes nothing.
 */
@@ -40,34 +41,30 @@ type ConnectedSockets struct {
 	route   func(netip.AddrPort) (netip.Addr, error) // routeSource, replaced in tests
 	closed  bool
 
-	queue   chan *rxBatch
 	done    chan struct{}
 	closing sync.Once
-	running sync.WaitGroup
+	running sync.WaitGroup // the idle check
 
-	readMu sync.Mutex
-	carry  *rxBatch // partially delivered batch, guarded by readMu
-
-	slots     []int       // receive slot sizes a socket steps through, smallest first; see read
-	pools     []sync.Pool // one per slot size
+	slots     []int // receive slot sizes a socket steps through, smallest first; see reader
 	oversize  atomic.Uint64
 	coalesced atomic.Uint64 // reads the kernel coalesced with GRO
 }
 
 const (
-	/*
-		Receive slots start at connectedSmallSlot and grow per socket, on demand, to connectedJumboSlot and then connectedHugeSlot.
+	// Receive slots grow per socket from connectedSmallSlot up to connectedHugeSlot, since datagram size depends on the remote MTU: the first datagram that fills a slot is dropped and moves the socket up a size. GRO sockets always use connectedHugeSlot.
+	connectedSmallSlot   = 2048      // a WireGuard datagram from a peer with any tunnel MTU up to about 2000
+	connectedJumboSlot   = 9216 + 1  // a 9000-byte tunnel MTU and its overhead
+	connectedHugeSlot    = 1<<16 - 1 // the largest UDP datagram
+	connectedSlabSize    = IdealBatchSize * connectedJumboSlot
+	connectedGROSlabSize = connectedGROSlots * connectedHugeSlot
 
-		What arrives is set by the remote end's MTU, not the local one, so a socket cannot know its datagram size in advance. It starts with slots big enough for any ordinary MTU, and the first datagram that fills one (which cannot be told apart from a truncated one on every platform, so is dropped) moves that socket to the next size for the rest of its life. That costs the large datagrams in that one read, which the kernel has already truncated, once per socket, and nothing for sockets that never see large datagrams. A caller that knows it needs large ones can start there with ConnectedConfig.MaxDatagram.
+	// connectedGROSlots is how many 64 KiB slots one GRO read takes. A poorly merged flow puts only one to three datagrams in each, so a read needs many.
+	connectedGROSlots = 64
 
-		A jumbo socket keeps a full batch of IdealBatchSize slots, which is what reaches line rate at a 9000-byte MTU. Beyond that the batch is shortened so that no socket's buffers exceed connectedBatchBytes.
-	*/
-	connectedSmallSlot  = 2048      // a WireGuard datagram from a peer with any tunnel MTU up to about 2000
-	connectedJumboSlot  = 9216 + 1  // a 9000-byte tunnel MTU and its overhead
-	connectedHugeSlot   = 1<<16 - 1 // the largest UDP datagram
-	connectedBatchBytes = IdealBatchSize * connectedJumboSlot
+	// groMaxSegments is UDP_GRO_CNT_MAX, the most datagrams the kernel coalesces into one read.
+	groMaxSegments = 64
 
-	// connectedIdle is how often sockets that neither sent nor received anything since the previous check are closed, so a socket goes after 30 to 60 seconds without traffic. An address that stops being used, because its peer moved or went quiet, would otherwise hold a socket and a goroutine for the life of the process.
+	// connectedIdle is the idle check interval. A socket unused for a whole interval is closed.
 	connectedIdle = 30 * time.Second
 
 	// connectedRetry is how long a pair whose dial failed is left to the caller's socket before it is dialled again.
@@ -90,27 +87,12 @@ type pairKey struct {
 type connectedSocket struct {
 	key pairKey
 	c   *net.UDPConn
-	gro bool        // the kernel coalesces what it receives; see read
+	gro bool        // the kernel coalesces what it receives; see reader
 	bs  batchSender // nil where the platform has no batched send
 	br  batchReader
 
 	// used is set on every send and every read that returns data, and cleared by the idle check.
 	used atomic.Bool
-}
-
-// rxBatch is one read's worth of datagrams from one socket.
-type rxBatch struct {
-	bufs  [][]byte   // the slots one read fills
-	segs  []rxSeg    // the datagrams in them, in order; a GRO read puts several in one slot
-	off   int        // datagrams already delivered, for a batch that did not fit in one ReadBatch
-	tier  int        // index into slots and pools
-	local netip.Addr // the local address of the socket that read it
-}
-
-// rxSeg is one datagram in an rxBatch.
-type rxSeg struct {
-	slot, off, size int
-	src             netip.AddrPort
 }
 
 // batchSender writes several datagrams to one connected socket in as few syscalls as the platform allows.
@@ -134,7 +116,6 @@ func NewConnectedSockets(cfg ConnectedConfig) *ConnectedSockets {
 		failed:  make(map[pairKey]time.Time),
 		pending: make(map[pairKey]int),
 		port:    cfg.Port,
-		queue:   make(chan *rxBatch, 8),
 		done:    make(chan struct{}),
 	}
 	for _, slot := range []int{connectedSmallSlot, connectedJumboSlot, connectedHugeSlot} {
@@ -146,11 +127,6 @@ func NewConnectedSockets(cfg ConnectedConfig) *ConnectedSockets {
 		s.slots = []int{connectedHugeSlot}
 	}
 	s.route = s.routeSource
-	s.pools = make([]sync.Pool, len(s.slots))
-	for i := range s.pools {
-		slot, n := s.slots[i], min(IdealBatchSize, connectedBatchBytes/s.slots[i])
-		s.pools[i].New = func() any { return newRxBatch(slot, n, i) }
-	}
 	s.running.Add(1)
 	go func() {
 		defer s.running.Done()
@@ -230,59 +206,6 @@ func (cs *connectedSocket) send(bufs [][]byte, offset int) error {
 	return nil
 }
 
-// ReadBatch copies datagrams received on any connected socket into slab, packed end to end, and describes them in packets. It blocks until at least one is available or the set is closed, when it returns net.ErrClosed. What does not fit is kept for the next call.
-func (s *ConnectedSockets) ReadBatch(slab []byte, packets []ConnectedPacket) (int, error) {
-	if s == nil {
-		return 0, net.ErrClosed
-	}
-	s.readMu.Lock()
-	defer s.readMu.Unlock()
-	select {
-	case <-s.done:
-		return 0, net.ErrClosed
-	default:
-	}
-	total, off := 0, 0
-	for total < len(packets) {
-		b := s.carry
-		s.carry = nil
-		if b == nil && total == 0 {
-			select {
-			case b = <-s.queue:
-			case <-s.done:
-				return 0, net.ErrClosed
-			}
-		} else if b == nil {
-			select {
-			case b = <-s.queue: // already queued; take it, but never wait
-			default:
-				return total, nil
-			}
-		}
-		for b.off < len(b.segs) && total < len(packets) {
-			seg := b.segs[b.off]
-			if off+seg.size > len(slab) {
-				if off > 0 {
-					break // for the next call
-				}
-				b.off++ // larger than the whole slab
-				continue
-			}
-			copy(slab[off:], b.bufs[seg.slot][seg.off:seg.off+seg.size])
-			packets[total] = ConnectedPacket{Offset: off, Size: seg.size, Source: seg.src, Local: b.local}
-			off += seg.size
-			total++
-			b.off++
-		}
-		if b.off < len(b.segs) {
-			s.carry = b
-			break
-		}
-		s.putBatch(b)
-	}
-	return total, nil
-}
-
 // Rebind closes every socket so each is redialled on its next send, bound to port. Call it after the caller's socket is rebound and after any network change, including a change of interface that keeps the source address; port 0 means the set takes nothing until the next Rebind.
 func (s *ConnectedSockets) Rebind(port int) {
 	if s == nil {
@@ -294,7 +217,7 @@ func (s *ConnectedSockets) Rebind(port int) {
 	s.reset()
 }
 
-// reset closes every socket. Each is redialled on its next send, and so picks up any change in what cfg.Control does. A dial in progress at the time is discarded rather than kept, since it may have used the old port or Control.
+// reset closes every socket, so each is redialled on its next send with the current port and Control. A dial in progress is discarded, since it may have used the old ones.
 func (s *ConnectedSockets) reset() {
 	if s == nil {
 		return
@@ -311,7 +234,7 @@ func (s *ConnectedSockets) reset() {
 	s.mu.Unlock()
 }
 
-// Close closes every socket and waits for their readers to exit. A ReadBatch blocked at the time returns net.ErrClosed.
+// Close closes every socket, which makes every ConnectedReadFunc return net.ErrClosed, and stops the idle check.
 func (s *ConnectedSockets) Close() error {
 	if s == nil {
 		return nil
@@ -452,16 +375,19 @@ func (s *ConnectedSockets) dialFrom(dst netip.AddrPort, local *net.UDPAddr) (*ne
 	return nc.(*net.UDPConn), nil
 }
 
-// adopt makes c the socket for k and starts its reader. s.mu must be held, and s not closed, so that the reader is counted before Close waits.
+// adopt makes c the socket for k and hands it to cfg.Reader. s.mu must be held, and s not closed.
 func (s *ConnectedSockets) adopt(k pairKey, c *net.UDPConn) *connectedSocket {
 	cs := &connectedSocket{key: k, c: c, gro: hasGRO(c), bs: newBatchSender(c, k.remote), br: newBatchReader(c, k.remote)}
 	cs.used.Store(true)
+	slab, batch := connectedSlabSize, IdealBatchSize
+	if cs.gro {
+		slab, batch = connectedGROSlabSize, connectedGROSlots*groMaxSegments
+	}
+	if s.cfg.Reader == nil || !s.cfg.Reader(s.reader(cs), slab, batch) {
+		c.Close() // unread, it would swallow the peer's traffic
+		return nil
+	}
 	s.socks[k] = cs
-	s.running.Add(1)
-	go func() {
-		defer s.running.Done()
-		s.read(cs, k.remote)
-	}()
 	return cs
 }
 
@@ -489,83 +415,6 @@ func (s *ConnectedSockets) control(network, address string, c syscall.RawConn) e
 		return s.cfg.Control(network, address, c)
 	}
 	return nil
-}
-
-// read drains dst's socket into batches until the socket is closed.
-func (s *ConnectedSockets) read(cs *connectedSocket, dst netip.AddrPort) {
-	msgs := make([]ipv6.Message, IdealBatchSize)
-	for i := range msgs {
-		msgs[i].Buffers = make(net.Buffers, 1)
-		if cs.gro {
-			msgs[i].OOB = make([]byte, controlSize)
-		}
-	}
-	tier := 0
-	if cs.gro {
-		// A GRO read coalesces up to 64 KiB of datagrams, and one that does not fit its slot is truncated whole, so slots start at the largest size.
-		tier = len(s.slots) - 1
-	}
-	for {
-		b := s.pools[tier].Get().(*rxBatch)
-		b.local = cs.key.local
-		m := msgs[:len(b.bufs)]
-		for i := range m {
-			m[i].Buffers[0] = b.bufs[i]
-			m[i].OOB = m[i].OOB[:cap(m[i].OOB)]
-			m[i].N, m[i].NN, m[i].Flags = 0, 0, 0
-			m[i].Addr = nil
-		}
-		n, err := cs.br.ReadBatch(m, 0)
-		if err != nil {
-			s.putBatch(b)
-			switch {
-			case errors.Is(err, net.ErrClosed):
-				return // closed by the idle check, a send error, reset or Close
-			case transientRecvErr(err):
-				continue
-			}
-			// Anything else leaves the socket unusable; forget it so the next send dials a new one rather than keeping one nobody reads.
-			s.remove(cs)
-			return
-		}
-		for i := 0; i < n; i++ {
-			size := m[i].N
-			// A reader that reports MSG_TRUNC says so; otherwise a read that fills its slot may have been cut short. Either way it is never delivered short, and this socket carries larger datagrams than its slots hold, so later reads use the next size. A GRO read may legitimately fill its slot, so for one only the flag counts.
-			if m[i].Flags&unix.MSG_TRUNC != 0 || !cs.gro && size >= len(b.bufs[i]) {
-				s.oversize.Add(1)
-				tier = min(tier+1, len(s.slots)-1)
-				continue
-			}
-			src := dst
-			if a, ok := m[i].Addr.(*net.UDPAddr); ok && a != nil {
-				src = a.AddrPort() // as StdNetBind reports the source of what its own socket reads
-			}
-			seg := size
-			if cs.gro {
-				if g, err := getGSOSize(m[i].OOB[:m[i].NN]); err == nil && g > 0 && g < size {
-					seg = g // coalesced: datagrams of g bytes, the last perhaps shorter
-					s.coalesced.Add(1)
-				}
-			}
-			for o := 0; o < size; o += seg {
-				b.segs = append(b.segs, rxSeg{slot: i, off: o, size: min(seg, size-o), src: src})
-			}
-		}
-		if len(b.segs) == 0 {
-			s.putBatch(b)
-		} else {
-			cs.used.Store(true) // a socket that only receives, opened by Dial, is in use too
-			select {
-			case s.queue <- b:
-			case <-s.done:
-				s.putBatch(b)
-				return
-			}
-		}
-		if n >= coalesceMin && n < len(m) {
-			time.Sleep(coalesceDelay)
-		}
-	}
 }
 
 // classify handles a send error on cs. ECONNREFUSED (ICMP port unreachable, typically a restarting peer) is ignored.
@@ -626,11 +475,7 @@ func (s *ConnectedSockets) closeIdle() {
 	}
 }
 
-/*
-recheckRoutes looks up the route to every remote address Send has looked one up for, and moves any whose route now picks a different local address to the new pair, so that a connected socket follows the kernel's route selection as an unconnected socket does per datagram. It runs with the idle check, so a change the caller does not report with Rebind, such as a new preferred route or a source address added or removed on a multi-homed host, takes effect within connectedIdle.
-
-The socket on the old pair is left as it is: it still receives whatever the peer sends to the old address, and the idle check closes it once the peer follows and it carries nothing. Pairs chosen by the caller, through Dial or SendFrom, are not the route's and are not affected.
-*/
+// recheckRoutes redoes the route lookup for every address in s.routes and moves any whose local address changed to the new pair. The old pair's socket stays until the idle check closes it.
 func (s *ConnectedSockets) recheckRoutes() {
 	s.mu.Lock()
 	gen := s.gen
@@ -656,23 +501,91 @@ func (s *ConnectedSockets) recheckRoutes() {
 	}
 }
 
+// reader returns cs's ConnectedReadFunc, which reads a batch straight into the caller's slab, splitting GRO reads back into datagrams in place.
+func (s *ConnectedSockets) reader(cs *connectedSocket) ConnectedReadFunc {
+	msgs := make([]ipv6.Message, max(IdealBatchSize, connectedGROSlots))
+	for i := range msgs {
+		msgs[i].Buffers = make(net.Buffers, 1)
+		if cs.gro {
+			msgs[i].OOB = make([]byte, controlSize)
+		}
+	}
+	tier := 0
+	if cs.gro {
+		tier = len(s.slots) - 1 // see connectedGROSlots
+	}
+	pause := false
+	return func(slab []byte, packets []ConnectedPacket) (int, error) {
+		for {
+			if pause {
+				time.Sleep(coalesceDelay)
+				pause = false
+			}
+			slot := s.slots[tier]
+			segs := 1
+			if cs.gro {
+				segs = groMaxSegments
+			}
+			m := msgs[:min(len(msgs), len(slab)/slot, len(packets)/segs)]
+			if len(m) == 0 {
+				return 0, fmt.Errorf("connected socket read: slab of %d bytes or %d packets too small for one %d-byte slot", len(slab), len(packets), slot)
+			}
+			for i := range m {
+				m[i].Buffers[0] = slab[i*slot : (i+1)*slot]
+				m[i].OOB = m[i].OOB[:cap(m[i].OOB)]
+				m[i].N, m[i].NN, m[i].Flags = 0, 0, 0
+				m[i].Addr = nil
+			}
+			n, err := cs.br.ReadBatch(m, 0)
+			if err != nil {
+				switch {
+				case errors.Is(err, net.ErrClosed):
+					return 0, net.ErrClosed // closed by the idle check, a send error, reset or Close
+				case transientRecvErr(err):
+					continue
+				}
+				// Anything else leaves the socket unusable; forget it so the next send dials a new one.
+				s.remove(cs)
+				return 0, net.ErrClosed
+			}
+			total := 0
+			for i := 0; i < n; i++ {
+				size := m[i].N
+				// Truncated: drop it and use the next slot size. Without MSG_TRUNC a full slot counts as truncated, except for GRO, where it is legitimate.
+				if m[i].Flags&unix.MSG_TRUNC != 0 || !cs.gro && size >= slot {
+					s.oversize.Add(1)
+					tier = min(tier+1, len(s.slots)-1)
+					continue
+				}
+				src := cs.key.remote
+				if a, ok := m[i].Addr.(*net.UDPAddr); ok && a != nil {
+					src = a.AddrPort() // as StdNetBind reports the source of what its own socket reads
+				}
+				seg := size
+				if cs.gro {
+					if g, err := getGSOSize(m[i].OOB[:m[i].NN]); err == nil && g > 0 && g < size {
+						seg = g // coalesced: datagrams of g bytes, the last perhaps shorter
+						s.coalesced.Add(1)
+					}
+				}
+				for o := 0; o < size && total < len(packets); o += seg {
+					packets[total] = ConnectedPacket{Offset: i*slot + o, Size: min(seg, size-o), Source: src, Local: cs.key.local}
+					total++
+				}
+			}
+			pause = n >= coalesceMin && n < len(m)
+			if total > 0 {
+				cs.used.Store(true) // a receive-only socket from Dial is in use too
+				return total, nil
+			}
+		}
+	}
+}
+
 // newPacketConnReader reads through x/net, which batches with recvmmsg on Linux and reads one datagram per call elsewhere.
 func newPacketConnReader(c *net.UDPConn, is6 bool) batchReader {
 	if is6 {
 		return ipv6.NewPacketConn(c)
 	}
 	return ipv4.NewPacketConn(c)
-}
-
-func newRxBatch(slot, n, tier int) *rxBatch {
-	b := &rxBatch{bufs: make([][]byte, n), segs: make([]rxSeg, 0, n), tier: tier}
-	for i := range b.bufs {
-		b.bufs[i] = make([]byte, slot)
-	}
-	return b
-}
-
-func (s *ConnectedSockets) putBatch(b *rxBatch) {
-	b.segs, b.off = b.segs[:0], 0
-	s.pools[b.tier].Put(b)
 }

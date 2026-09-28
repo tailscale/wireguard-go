@@ -7,6 +7,8 @@ import (
 	"errors"
 	"net"
 	"net/netip"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -86,35 +88,90 @@ func newSet(t *testing.T, cfg ConnectedConfig) *ConnectedSockets {
 	if cfg.OpenAfter == 0 {
 		cfg.OpenAfter = 1 // open on first use
 	}
+	var c *collector
+	if cfg.Reader == nil {
+		c = newCollector()
+		cfg.Reader = c.reader
+	}
 	s := NewConnectedSockets(cfg)
 	if s == nil {
 		t.Skip("connected sockets unavailable on this platform")
+	}
+	if c != nil {
+		collectors.Store(s, c)
+		t.Cleanup(func() { collectors.Delete(s) })
 	}
 	t.Cleanup(func() { s.Close() })
 	return s
 }
 
-// readWithin runs ReadBatch with a deadline, since it blocks by design.
+// collected is one datagram copied out of a collector's slab.
+type collected struct {
+	data []byte
+	p    ConnectedPacket
+}
+
+// collector stands in for a device, reading each socket in its own goroutine.
+type collector struct {
+	ch    chan collected
+	reads atomic.Int32 // ConnectedReadFunc calls that returned datagrams
+}
+
+// collectors maps a set made by newSet to its collector.
+var collectors sync.Map
+
+func newCollector() *collector { return &collector{ch: make(chan collected, 1<<14)} }
+
+func (c *collector) reader(read ConnectedReadFunc, slabSize, batchSize int) bool {
+	go func() {
+		slab := make([]byte, slabSize)
+		pkts := make([]ConnectedPacket, batchSize)
+		for {
+			n, err := read(slab, pkts)
+			if err != nil {
+				return // the socket closed
+			}
+			c.reads.Add(1)
+			for _, p := range pkts[:n] {
+				c.ch <- collected{append([]byte(nil), slab[p.Offset:p.Offset+p.Size]...), p}
+			}
+		}
+	}()
+	return true
+}
+
+// readWithin waits up to 3 seconds for datagrams on s and packs those waiting into slab and pkts.
 func readWithin(t *testing.T, s *ConnectedSockets, slab []byte, pkts []ConnectedPacket) int {
 	t.Helper()
-	type result struct {
-		n   int
-		err error
+	v, ok := collectors.Load(s)
+	if !ok {
+		t.Fatal("readWithin on a set that newSet did not make")
 	}
-	ch := make(chan result, 1)
-	go func() {
-		n, err := s.ReadBatch(slab, pkts)
-		ch <- result{n, err}
-	}()
+	c := v.(*collector)
+	var r collected
 	select {
-	case r := <-ch:
-		if r.err != nil {
-			t.Fatalf("ReadBatch: %v", r.err)
-		}
-		return r.n
+	case r = <-c.ch:
 	case <-time.After(3 * time.Second):
-		t.Fatal("ReadBatch timed out")
+		t.Fatal("nothing arrived on the connected sockets")
 		return 0
+	}
+	n, off := 0, 0
+	for {
+		if off+len(r.data) <= len(slab) {
+			copy(slab[off:], r.data)
+			r.p.Offset, r.p.Size = off, len(r.data)
+			pkts[n] = r.p
+			off += len(r.data)
+			n++
+		}
+		if n == len(pkts) {
+			return n
+		}
+		select {
+		case r = <-c.ch:
+		case <-time.After(20 * time.Millisecond):
+			return n
+		}
 	}
 }
 
@@ -257,25 +314,28 @@ func TestConnectedConcurrentSends(t *testing.T) {
 	}
 }
 
-// A read that does not fit the caller's descriptors or slab is kept for the next call, not dropped.
-func TestConnectedReadBatchCarries(t *testing.T) {
+// A ConnectedReadFunc returns at most len(pkts) datagrams, in order.
+func TestConnectedReadRespectsPackets(t *testing.T) {
 	peer, peerAP := listenPeer(t, "udp4")
 	_, port := listenShared(t, "udp4")
-	s := newSet(t, ConnectedConfig{Port: port})
+	got := make(chan started, 1)
+	s := newSet(t, ConnectedConfig{Port: port, Reader: capture(got)})
 	s.Send(peerAP, [][]byte{[]byte("x")}, 0)
 	_, from := peerRead(t, peer)
+	st := <-got
 	for i := range 10 {
 		peer.WriteToUDPAddrPort([]byte{byte(i)}, from)
 	}
-	time.Sleep(100 * time.Millisecond) // let them queue so one read collects several
-
+	time.Sleep(100 * time.Millisecond) // let them queue
+	slab := make([]byte, st.slabSize)
 	pkts := make([]ConnectedPacket, 3)
-	slab := make([]byte, 1<<16)
-	seen := 0
-	for seen < 10 {
-		n := readWithin(t, s, slab, pkts)
-		if n > 3 {
-			t.Fatalf("ReadBatch returned %d, more than the %d descriptors it was given", n, len(pkts))
+	if socketTo(s, peerAP).gro {
+		pkts = make([]ConnectedPacket, groMaxSegments) // room for a whole coalesced read
+	}
+	for seen := 0; seen < 10; {
+		n, err := st.read(slab, pkts)
+		if err != nil || n > len(pkts) {
+			t.Fatalf("read = %d, %v; want at most %d datagrams", n, err, len(pkts))
 		}
 		for _, p := range pkts[:n] {
 			if slab[p.Offset] != byte(seen) {
@@ -286,7 +346,21 @@ func TestConnectedReadBatchCarries(t *testing.T) {
 	}
 }
 
-// A datagram too large for a socket's slots costs that one datagram and moves the socket to larger slots. The socket stays connected, so a jumbo path keeps its connected socket and its full batch.
+// started is one socket a capture Reader was handed.
+type started struct {
+	read                ConnectedReadFunc
+	slabSize, batchSize int
+}
+
+// capture is a ConnectedConfig.Reader that hands each ConnectedReadFunc to the test.
+func capture(ch chan<- started) func(ConnectedReadFunc, int, int) bool {
+	return func(read ConnectedReadFunc, slabSize, batchSize int) bool {
+		ch <- started{read, slabSize, batchSize}
+		return true
+	}
+}
+
+// An oversized datagram is dropped and the socket moves to larger slots, staying connected.
 func TestConnectedGrowsForLargerDatagrams(t *testing.T) {
 	peer, peerAP := listenPeer(t, "udp4")
 	shared, port := listenShared(t, "udp4")
@@ -337,8 +411,8 @@ func TestConnectedGrowsForLargerDatagrams(t *testing.T) {
 	if _, _, err := shared.ReadFromUDP(make([]byte, 65535)); err == nil {
 		t.Fatal("traffic moved to the caller's socket; it should stay on the connected one")
 	}
-	if n := len(s.pools[1].Get().(*rxBatch).bufs); n != IdealBatchSize {
-		t.Fatalf("a jumbo socket reads %d datagrams per call, want a full batch of %d", n, IdealBatchSize)
+	if n := connectedSlabSize / connectedJumboSlot; n < IdealBatchSize {
+		t.Fatalf("a jumbo socket's slab holds %d datagrams, want a full batch of %d", n, IdealBatchSize)
 	}
 }
 
@@ -452,15 +526,20 @@ func TestConnectedControl(t *testing.T) {
 	}
 }
 
-// Close unblocks a waiting ReadBatch and waits for the readers, and a nil set is safe to use.
+// Close makes a ConnectedReadFunc that is waiting return net.ErrClosed, and a nil set is safe to use.
 func TestConnectedClose(t *testing.T) {
 	_, peerAP := listenPeer(t, "udp4")
 	_, port := listenShared(t, "udp4")
-	s := NewConnectedSockets(ConnectedConfig{Port: port, OpenAfter: 1})
+	got := make(chan started, 1)
+	s := NewConnectedSockets(ConnectedConfig{Port: port, OpenAfter: 1, Reader: capture(got)})
+	if s == nil {
+		t.Skip("connected sockets unavailable on this platform")
+	}
 	s.Send(peerAP, [][]byte{[]byte("x")}, 0)
+	st := <-got
 	errc := make(chan error, 1)
 	go func() {
-		_, err := s.ReadBatch(make([]byte, 1<<16), make([]ConnectedPacket, 8))
+		_, err := st.read(make([]byte, st.slabSize), make([]ConnectedPacket, st.batchSize))
 		errc <- err
 	}()
 	time.Sleep(50 * time.Millisecond)
@@ -468,10 +547,10 @@ func TestConnectedClose(t *testing.T) {
 	select {
 	case err := <-errc:
 		if !errors.Is(err, net.ErrClosed) {
-			t.Fatalf("ReadBatch after Close: %v, want net.ErrClosed", err)
+			t.Fatalf("read after Close: %v, want net.ErrClosed", err)
 		}
 	case <-time.After(3 * time.Second):
-		t.Fatal("Close did not unblock ReadBatch")
+		t.Fatal("Close did not unblock the read")
 	}
 
 	var nilSet *ConnectedSockets
@@ -535,8 +614,19 @@ func TestStdNetBindConnected(t *testing.T) {
 		t.Fatalf("BatchSize with connected sockets = %d, want %d", on.BatchSize(), IdealBatchSize)
 	}
 
+	// Without a ReceiveFuncStarter no connected sockets are opened.
+	bare := NewStdNetBind(WithConnectedSockets(true)).(*StdNetBind)
+	if _, _, err := bare.Open(0); err != nil {
+		t.Fatal(err)
+	}
+	if bare.cs != nil {
+		t.Fatal("connected sockets without a ReceiveFuncStarter")
+	}
+	bare.Close()
+
 	peer, peerAP := listenPeer(t, "udp4")
-	fns, port, err := on.Open(0)
+	starts := startRecorder(on)
+	_, port, err := on.Open(0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -553,9 +643,10 @@ func TestStdNetBindConnected(t *testing.T) {
 		t.Fatalf("source port %d, want the bind's %d", from.Port(), port)
 	}
 	peer.WriteToUDPAddrPort([]byte("pong"), from)
-	recv := fns[len(fns)-1] // the connected ReceiveFunc is last
-	slab := make([]byte, 1<<16)
-	packets := make([]ReceivedPacket, IdealBatchSize)
+	st := waitStarted(t, starts)
+	recv := st.fn
+	slab := make([]byte, st.slabSize)
+	packets := make([]ReceivedPacket, st.batchSize)
 	done := make(chan int, 1)
 	go func() { n, _ := recv(slab, packets); done <- n }()
 	select {
@@ -566,5 +657,121 @@ func TestStdNetBindConnected(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("reply never reached the connected ReceiveFunc")
+	}
+}
+
+// Each connected socket gets its own ReceiveFunc through the starter, which Close stops with net.ErrClosed.
+// A refusing starter leaves the pair on the shared socket.
+func TestStdNetBindConnectedStarter(t *testing.T) {
+	if !connectedSupported {
+		t.Skip("no connected sockets on this platform")
+	}
+	type started struct {
+		fn              ReceiveFunc
+		slabSize, nPkts int
+	}
+	for _, refuse := range []bool{false, true} {
+		t.Run(map[bool]string{false: "accepted", true: "refused"}[refuse], func(t *testing.T) {
+			b := NewStdNetBind(WithConnectedSockets(true)).(*StdNetBind)
+			got := make(chan started, 4)
+			b.SetReceiveFuncStarter(func(fn ReceiveFunc, slabSize, batchSize int) bool {
+				if refuse {
+					return false
+				}
+				got <- started{fn, slabSize, batchSize}
+				return true
+			})
+			fns, _, err := b.Open(0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer b.Close()
+			for _, fn := range fns {
+				if strings.Contains(fn.PrettyName(), "receiveFrom") {
+					t.Fatalf("Open returned the connected ReceiveFunc %s; with a starter it should be started per socket", fn.PrettyName())
+				}
+			}
+			peer, peerAP := listenPeer(t, "udp4")
+			ep := &StdNetEndpoint{AddrPort: peerAP}
+			from := openPairThroughBind(t, b, ep, peer)
+			if refuse {
+				select {
+				case <-got:
+					t.Fatal("a refused starter was recorded")
+				default:
+				}
+				if socketTo(b.cs, peerAP) != nil {
+					t.Fatal("a socket the starter refused was kept")
+				}
+				return
+			}
+			var st started
+			select {
+			case st = <-got:
+			case <-time.After(3 * time.Second):
+				t.Fatal("no ReceiveFunc was started for the connected socket")
+			}
+			if socketTo(b.cs, peerAP) == nil {
+				t.Fatal("no connected socket after sending the threshold's worth")
+			}
+			peer.WriteToUDPAddrPort([]byte("pong"), from)
+			slab := make([]byte, st.slabSize)
+			packets := make([]ReceivedPacket, st.nPkts)
+			type res struct {
+				n   int
+				err error
+			}
+			done := make(chan res, 1)
+			go func() { n, err := st.fn(slab, packets); done <- res{n, err} }()
+			select {
+			case r := <-done:
+				p := packets[0]
+				if r.err != nil || r.n != 1 || string(slab[p.Offset:p.Offset+p.Size]) != "pong" || p.Endpoint.DstToString() != peerAP.String() {
+					t.Fatalf("started ReceiveFunc returned %d, %v: %q from %v", r.n, r.err, slab[p.Offset:p.Offset+p.Size], p.Endpoint.DstToString())
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("the reply never reached the started ReceiveFunc")
+			}
+			go func() { n, err := st.fn(slab, packets); done <- res{n, err} }()
+			b.Close()
+			select {
+			case r := <-done:
+				if !errors.Is(r.err, net.ErrClosed) {
+					t.Fatalf("after Close the started ReceiveFunc returned %d, %v; want net.ErrClosed", r.n, r.err)
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("Close did not unblock the started ReceiveFunc")
+			}
+		})
+	}
+}
+
+// startedFn is a ReceiveFunc a Bind asked its ReceiveFuncStarter to run.
+type startedFn struct {
+	fn                  ReceiveFunc
+	slabSize, batchSize int
+}
+
+// startRecorder records each ReceiveFunc b starts, for the test to call.
+func startRecorder(b *StdNetBind) chan startedFn {
+	ch := make(chan startedFn, 16)
+	b.SetReceiveFuncStarter(func(fn ReceiveFunc, slabSize, batchSize int) bool {
+		select {
+		case ch <- startedFn{fn, slabSize, batchSize}:
+		default: // never block: the set holds its lock
+		}
+		return true
+	})
+	return ch
+}
+
+func waitStarted(t *testing.T, ch chan startedFn) startedFn {
+	t.Helper()
+	select {
+	case st := <-ch:
+		return st
+	case <-time.After(3 * time.Second):
+		t.Fatal("no ReceiveFunc was started for the connected socket")
+		return startedFn{}
 	}
 }

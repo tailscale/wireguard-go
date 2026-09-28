@@ -18,6 +18,7 @@ import (
 // SetMark applies to connected sockets, so their packets do not route back into the tunnel.
 func TestConnectedSocketsCarryTheMark(t *testing.T) {
 	b := NewStdNetBind(WithConnectedSockets(true)).(*StdNetBind)
+	startRecorder(b) // connected sockets need a starter
 	if _, _, err := b.Open(0); err != nil {
 		t.Fatal(err)
 	}
@@ -167,8 +168,8 @@ func TestStdNetBindConnectedFollowsStickySource(t *testing.T) {
 	other := otherIPv4(t)
 	loopback := netip.AddrFrom4([4]byte{127, 0, 0, 1})
 	b := NewStdNetBind(WithConnectedSockets(true)).(*StdNetBind)
-	fns, _, err := b.Open(0)
-	if err != nil {
+	starts := startRecorder(b)
+	if _, _, err := b.Open(0); err != nil {
 		t.Fatal(err)
 	}
 	defer b.Close()
@@ -185,9 +186,10 @@ func TestStdNetBindConnectedFollowsStickySource(t *testing.T) {
 	}
 
 	peer.WriteToUDPAddrPort([]byte("pong"), from)
-	recv := fns[len(fns)-1] // the connected ReceiveFunc is last
-	slab := make([]byte, 1<<16)
-	packets := make([]ReceivedPacket, IdealBatchSize)
+	st := waitStarted(t, starts)
+	recv := st.fn
+	slab := make([]byte, st.slabSize)
+	packets := make([]ReceivedPacket, st.batchSize)
 	done := make(chan int, 1)
 	go func() { n, _ := recv(slab, packets); done <- n }()
 	select {

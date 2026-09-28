@@ -50,9 +50,10 @@ type StdNetBind struct {
 	blackhole4 bool
 	blackhole6 bool
 
-	connected bool              // use ConnectedSockets; fixed at construction, see WithConnectedSockets
-	cs        *ConnectedSockets // nil unless connected and open
-	mark      atomic.Uint32     // last SetMark, which connected sockets dialled later must also carry
+	connected bool                                               // use ConnectedSockets; fixed at construction, see WithConnectedSockets
+	cs        *ConnectedSockets                                  // nil unless connected and open
+	starter   func(fn ReceiveFunc, slabSize, batchSize int) bool // from the device, see SetReceiveFuncStarter
+	mark      atomic.Uint32                                      // last SetMark, which connected sockets dialled later must also carry
 }
 
 func NewStdNetBind(opts ...Option) Bind {
@@ -224,11 +225,8 @@ again:
 		return nil, 0, syscall.EAFNOSUPPORT
 	}
 
-	if s.connected {
-		s.cs = NewConnectedSockets(ConnectedConfig{Port: port, Control: s.connectedControl})
-		if s.cs != nil {
-			fns = append(fns, s.receiveConnected(s.cs))
-		}
+	if s.connected && s.starter != nil {
+		s.cs = NewConnectedSockets(ConnectedConfig{Port: port, Control: s.connectedControl, Reader: s.connectedReader(s.starter)})
 	}
 	return fns, uint16(port), nil
 }
@@ -338,7 +336,7 @@ func (s *StdNetBind) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// First, so that the ReceiveFunc blocked in its ReadBatch returns and BindUpdate can reopen.
+	// Close connected sockets first so their ReceiveFuncs return and BindUpdate can reopen.
 	s.cs.Close()
 	s.cs = nil
 
