@@ -5,9 +5,16 @@
 
 package tun
 
-import "strconv"
+import (
+	"simd"
+	"strconv"
+)
 
 func Checksum(data []byte, initial uint16) uint16 {
+	if !simd.Emulated() {
+		return checksumGenericSIMD(data, initial)
+	}
+
 	if strconv.IntSize < 64 {
 		return checksumGeneric32(data, initial)
 	}

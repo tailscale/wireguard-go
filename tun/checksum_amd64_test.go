@@ -3,6 +3,8 @@
 package tun
 
 import (
+	"simd/archsimd"
+
 	"golang.org/x/sys/cpu"
 )
 
@@ -43,13 +45,33 @@ var archChecksumFuncs = []archChecksumDetails{
 		f:         checksumAVX2,
 	},
 	{
-		name:      "genericSIMD",
+		name:      "SIMDExtend",
 		available: true,
-		f:         checksumGenericSIMD,
+		f:         checksumSIMDExtend,
 	},
 	{
-		name:      "genericSIMDAlternate",
+		name:      "SIMDSaturate",
 		available: true,
-		f:         checksumGenericSIMDAlternate,
+		f:         checksumSIMDSaturate,
+	},
+	{
+		name:      "AVX2Extend",
+		available: archsimd.X86.AVX2(),
+		f:         checksumAVX2Extend,
+	},
+	{
+		name:      "AVX2ExtendSplit",
+		available: archsimd.X86.AVX2(),
+		f:         checksumAVX2ExtendSplit,
+	},
+	{
+		name:      "AVX2Saturate",
+		available: archsimd.X86.AVX2(),
+		f:         checksumAVX2Saturate,
+	},
+	{
+		name:      "AVX512Intrinsics",
+		available: archsimd.X86.AVX512(),
+		f:         checksumAVX512Intrinsics,
 	},
 }
