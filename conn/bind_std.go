@@ -53,6 +53,7 @@ type StdNetBind struct {
 
 	connected    bool                                               // use ConnectedSockets; fixed at construction, see WithConnectedSockets
 	dontFragment bool                                               // set DF on every socket; fixed at construction, see WithDontFragment
+	batchedIO    bool                                               // batch unconnected socket I/O on darwin; fixed at construction, see WithBatchedIO
 	cs           *ConnectedSockets                                  // nil unless connected and open
 	starter      func(fn ReceiveFunc, slabSize, batchSize int) bool // see SetReceiveFuncStarter
 	mark         atomic.Uint32                                      // last SetMark, applied to connected sockets dialled later
@@ -115,6 +116,7 @@ func NewStdNetBind(opts ...Option) Bind {
 	}
 	b.connected = connected && connectedSupported
 	b.dontFragment = b.config.dontFragment && dontFragmentSupported
+	b.batchedIO = b.config.batchedIO && runtime.GOOS == "darwin"
 	return b
 }
 
@@ -294,6 +296,10 @@ again:
 		sock := s.newSocket(c)
 		if runtime.GOOS == "linux" {
 			sock.pc = ipv4.NewPacketConn(c)
+		} else if s.batchedIO {
+			if b, err := NewUnconnectedBatch(c); err == nil && b != nil {
+				sock.pc = b
+			}
 		}
 		fns = append(fns, sock.receiveIP)
 		s.v4 = append(s.v4, sock)
@@ -302,6 +308,10 @@ again:
 		sock := s.newSocket(c)
 		if runtime.GOOS == "linux" {
 			sock.pc = ipv6.NewPacketConn(c)
+		} else if s.batchedIO {
+			if b, err := NewUnconnectedBatch(c); err == nil && b != nil {
+				sock.pc = b
+			}
 		}
 		fns = append(fns, sock.receiveIP)
 		s.v6 = append(s.v6, sock)
@@ -362,7 +372,7 @@ func (s *stdNetSocket) receiveIP(
 ) (n int, err error) {
 	msgs := s.messagePool.getMessages()
 	usedMsgs := 1
-	if runtime.GOOS == "linux" {
+	if s.pc != nil {
 		// set a floor of 1 in case len(slab) < maxDatagramSize
 		usedMsgs = max(1, len(slab)/maxDatagramSize)
 		// we can't read more datagrams than what we can describe in packets
@@ -370,7 +380,7 @@ func (s *stdNetSocket) receiveIP(
 	}
 	defer s.messagePool.putMessages(msgs, usedMsgs)
 	var numMsgs int
-	if runtime.GOOS == "linux" {
+	if s.pc != nil {
 		rem := slab
 		for i := range usedMsgs {
 			end := maxDatagramSize
@@ -424,8 +434,8 @@ func (s *StdNetBind) ReceiveNames() []string {
 // TODO: When all Binds handle IdealBatchSize, remove this dynamic function and
 // rename the IdealBatchSize constant to BatchSize.
 func (s *StdNetBind) BatchSize() int {
-	// Connected sockets batch their reads on every platform that has them, not only Linux.
-	if runtime.GOOS == "linux" || s.connected {
+	// Connected sockets batch on every platform that has them, and batched I/O does on darwin.
+	if runtime.GOOS == "linux" || s.connected || s.batchedIO {
 		return IdealBatchSize
 	}
 	return 1
@@ -557,7 +567,7 @@ func (s *StdNetBind) send(conn *net.UDPConn, pc batchWriter, msgs []ipv6.Message
 		err   error
 		start int
 	)
-	if runtime.GOOS == "linux" {
+	if pc != nil {
 		for {
 			n, err = pc.WriteBatch(msgs[start:], 0)
 			if err != nil || n == len(msgs[start:]) {
