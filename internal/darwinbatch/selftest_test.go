@@ -18,3 +18,12 @@ func TestSelfTest(t *testing.T) {
 		t.Fatalf("Supported() = false after a passing self-test: %v", SelfTestErr())
 	}
 }
+
+func TestUnconnectedSelfTest(t *testing.T) {
+	if !Supported() {
+		t.Skip("batched calls unavailable:", SelfTestErr())
+	}
+	if err := UnconnectedSelfTestErr(); err != nil {
+		t.Fatalf("unconnected self-test failed on this kernel: %v", err)
+	}
+}
