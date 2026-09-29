@@ -50,8 +50,12 @@ type StdNetBind struct {
 	blackhole4 bool
 	blackhole6 bool
 
-	connected    bool                                               // use ConnectedSockets; fixed at construction, see WithConnectedSockets
-	dontFragment bool                                               // set DF on every socket; fixed at construction, see WithDontFragment
+	// connected, dontFragment and batchedIO are fixed at construction.
+	connected    bool
+	dontFragment bool
+	batchedIO    bool
+	batch4       *UnconnectedBatch                                  // nil unless batchedIO and open
+	batch6       *UnconnectedBatch                                  // nil unless batchedIO and open
 	cs           *ConnectedSockets                                  // nil unless connected and open
 	starter      func(fn ReceiveFunc, slabSize, batchSize int) bool // see SetReceiveFuncStarter
 	mark         atomic.Uint32                                      // last SetMark, applied to connected sockets dialled later
@@ -69,6 +73,7 @@ func NewStdNetBind(opts ...Option) Bind {
 	return &StdNetBind{
 		connected:    connected && connectedSupported,
 		dontFragment: cfg.dontFragment && dontFragmentSupported,
+		batchedIO:    cfg.batchedIO && runtime.GOOS == "darwin",
 		udpAddrPool: sync.Pool{
 			New: func() any {
 				return &net.UDPAddr{
@@ -217,6 +222,9 @@ again:
 			v4pc = ipv4.NewPacketConn(v4conn)
 			s.ipv4PC = v4pc
 		}
+		if s.batchedIO {
+			s.batch4, _ = NewUnconnectedBatch(v4conn) // nil if unsupported
+		}
 		fns = append(fns, s.makeReceiveIPv4(v4pc, v4conn, s.ipv4RxOffload))
 		s.ipv4 = v4conn
 	}
@@ -225,6 +233,9 @@ again:
 		if runtime.GOOS == "linux" {
 			v6pc = ipv6.NewPacketConn(v6conn)
 			s.ipv6PC = v6pc
+		}
+		if s.batchedIO {
+			s.batch6, _ = NewUnconnectedBatch(v6conn)
 		}
 		fns = append(fns, s.makeReceiveIPv6(v6pc, v6conn, s.ipv6RxOffload))
 		s.ipv6 = v6conn
@@ -275,6 +286,7 @@ const maxDatagramSize = 1<<16 - 1
 
 func (s *StdNetBind) receiveIP(
 	br batchReader,
+	batched bool, // br reads more than one datagram per call
 	conn *net.UDPConn,
 	rxOffload bool,
 	slab []byte,
@@ -282,7 +294,7 @@ func (s *StdNetBind) receiveIP(
 ) (n int, err error) {
 	msgs := s.getMessages()
 	usedMsgs := 1
-	if runtime.GOOS == "linux" {
+	if batched {
 		// set a floor of 1 in case len(slab) < maxDatagramSize
 		usedMsgs = max(1, len(slab)/maxDatagramSize)
 		// we can't read more datagrams than what we can describe in packets
@@ -290,7 +302,7 @@ func (s *StdNetBind) receiveIP(
 	}
 	defer s.putMessages(msgs, usedMsgs)
 	var numMsgs int
-	if runtime.GOOS == "linux" {
+	if batched {
 		rem := slab
 		for i := range usedMsgs {
 			end := maxDatagramSize
@@ -319,22 +331,32 @@ func (s *StdNetBind) receiveIP(
 }
 
 func (s *StdNetBind) makeReceiveIPv4(pc *ipv4.PacketConn, conn *net.UDPConn, rxOffload bool) ReceiveFunc {
+	var br batchReader = pc
+	if s.batch4 != nil {
+		br = s.batch4
+	}
+	batched := runtime.GOOS == "linux" || s.batch4 != nil
 	return func(slab []byte, packets []ReceivedPacket) (n int, err error) {
-		return s.receiveIP(pc, conn, rxOffload, slab, packets)
+		return s.receiveIP(br, batched, conn, rxOffload, slab, packets)
 	}
 }
 
 func (s *StdNetBind) makeReceiveIPv6(pc *ipv6.PacketConn, conn *net.UDPConn, rxOffload bool) ReceiveFunc {
+	var br batchReader = pc
+	if s.batch6 != nil {
+		br = s.batch6
+	}
+	batched := runtime.GOOS == "linux" || s.batch6 != nil
 	return func(slab []byte, packets []ReceivedPacket) (n int, err error) {
-		return s.receiveIP(pc, conn, rxOffload, slab, packets)
+		return s.receiveIP(br, batched, conn, rxOffload, slab, packets)
 	}
 }
 
 // TODO: When all Binds handle IdealBatchSize, remove this dynamic function and
 // rename the IdealBatchSize constant to BatchSize.
 func (s *StdNetBind) BatchSize() int {
-	// Connected sockets batch their reads on every platform that has them, not only Linux.
-	if runtime.GOOS == "linux" || s.connected {
+	// Connected sockets batch on every platform that has them.
+	if runtime.GOOS == "linux" || s.connected || s.batchedIO {
 		return IdealBatchSize
 	}
 	return 1
@@ -352,11 +374,13 @@ func (s *StdNetBind) Close() error {
 	if s.ipv4 != nil {
 		err1 = s.ipv4.Close()
 		s.ipv4 = nil
+		s.batch4 = nil
 		s.ipv4PC = nil
 	}
 	if s.ipv6 != nil {
 		err2 = s.ipv6.Close()
 		s.ipv6 = nil
+		s.batch6 = nil
 		s.ipv6PC = nil
 	}
 	s.blackhole4 = false
@@ -390,11 +414,19 @@ func (s *StdNetBind) Send(bufs [][]byte, endpoint Endpoint, offset int) error {
 	conn := s.ipv4
 	offload := s.ipv4TxOffload
 	br := batchWriter(s.ipv4PC)
+	batched := runtime.GOOS == "linux"
+	if s.batch4 != nil {
+		br, batched = s.batch4, true
+	}
 	is6 := false
 	if endpoint.DstIP().Is6() {
 		blackhole = s.blackhole6
 		conn = s.ipv6
 		br = s.ipv6PC
+		batched = runtime.GOOS == "linux"
+		if s.batch6 != nil {
+			br, batched = s.batch6, true
+		}
 		is6 = true
 		offload = s.ipv6TxOffload
 	}
@@ -438,7 +470,7 @@ func (s *StdNetBind) Send(bufs [][]byte, endpoint Endpoint, offset int) error {
 retry:
 	if offload {
 		n := coalesceMessages(ua, endpoint.(*StdNetEndpoint), bufs, offset, *msgs, setGSOSize)
-		err = s.send(conn, br, (*msgs)[:n])
+		err = s.send(conn, br, batched, (*msgs)[:n])
 		if err != nil && offload && errShouldDisableUDPGSO(err) {
 			offload = false
 			s.mu.Lock()
@@ -457,7 +489,7 @@ retry:
 			(*msgs)[i].Buffers[0] = bufs[i][offset:]
 			setSrcControl(&(*msgs)[i].OOB, endpoint.(*StdNetEndpoint))
 		}
-		err = s.send(conn, br, (*msgs)[:len(bufs)])
+		err = s.send(conn, br, batched, (*msgs)[:len(bufs)])
 	}
 	if retried {
 		return ErrUDPGSODisabled{onLaddr: conn.LocalAddr().String(), RetryErr: err}
@@ -465,13 +497,13 @@ retry:
 	return err
 }
 
-func (s *StdNetBind) send(conn *net.UDPConn, pc batchWriter, msgs []ipv6.Message) error {
+func (s *StdNetBind) send(conn *net.UDPConn, pc batchWriter, batched bool, msgs []ipv6.Message) error {
 	var (
 		n     int
 		err   error
 		start int
 	)
-	if runtime.GOOS == "linux" {
+	if batched {
 		for {
 			n, err = pc.WriteBatch(msgs[start:], 0)
 			if err != nil || n == len(msgs[start:]) {

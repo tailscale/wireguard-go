@@ -8,6 +8,7 @@ The calls are reached through libSystem's wrappers without cgo, as x/sys/unix do
 package darwinbatch
 
 import (
+	"net/netip"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
@@ -37,7 +38,8 @@ type State struct {
 	iovs []unix.Iovec
 	lens []int // capacity staged by StageRecv, restored before each Recv
 
-	names []unix.RawSockaddrAny // each datagram's source, once RecvNames is called
+	names []unix.RawSockaddrAny   // each datagram's source, once RecvNames is called
+	dsts  []unix.RawSockaddrInet6 // each datagram's destination, once StageTo is called
 }
 
 // New returns a State for batches of up to n datagrams.
@@ -87,8 +89,11 @@ func SelfTestErr() error {
 	return selfTestErr
 }
 
-// Stage points datagram i of the next Send at pkt.
+// Stage points datagram i of the next Send at pkt, for a connected socket or a utun.
 func (s *State) Stage(i int, pkt []byte) {
+	if s.dsts != nil {
+		s.msgs[i].name, s.msgs[i].namelen = nil, 0
+	}
 	s.iovs[i].Base = nil
 	if len(pkt) > 0 {
 		s.iovs[i].Base = &pkt[0]
@@ -97,7 +102,46 @@ func (s *State) Stage(i int, pkt []byte) {
 	s.msgs[i].datalen = uint64(len(pkt))
 }
 
-// StageRecv points slot i of the next Recv at dst, so the kernel writes the datagram straight into it.
+// StageTo points datagram i of the next Send at pkt, addressed to dst, for an unconnected socket. See [UnconnectedSelfTestErr].
+func (s *State) StageTo(i int, pkt []byte, dst netip.AddrPort) {
+	s.Stage(i, pkt)
+	if s.dsts == nil {
+		s.dsts = make([]unix.RawSockaddrInet6, len(s.msgs))
+	}
+	s.msgs[i].name = (*byte)(unsafe.Pointer(&s.dsts[i]))
+	s.msgs[i].namelen = putSockaddr(&s.dsts[i], dst)
+}
+
+// putSockaddr writes ap into sa as a sockaddr_in or sockaddr_in6 and returns its length.
+func putSockaddr(sa *unix.RawSockaddrInet6, ap netip.AddrPort) uint32 {
+	port := ap.Port()<<8 | ap.Port()>>8
+	if ap.Addr().Is4() {
+		sa4 := (*unix.RawSockaddrInet4)(unsafe.Pointer(sa))
+		*sa4 = unix.RawSockaddrInet4{Len: unix.SizeofSockaddrInet4, Family: unix.AF_INET, Port: port, Addr: ap.Addr().As4()}
+		return unix.SizeofSockaddrInet4
+	}
+	*sa = unix.RawSockaddrInet6{Len: unix.SizeofSockaddrInet6, Family: unix.AF_INET6, Port: port, Addr: ap.Addr().As16()}
+	return unix.SizeofSockaddrInet6
+}
+
+// AddrPort is the source of the datagram Recv placed in slot i, or the zero AddrPort if there is none; see [State.RecvNames].
+func (s *State) AddrPort(i int) netip.AddrPort {
+	sa := s.Name(i)
+	if sa == nil {
+		return netip.AddrPort{}
+	}
+	switch sa.Addr.Family {
+	case unix.AF_INET:
+		sa4 := (*unix.RawSockaddrInet4)(unsafe.Pointer(sa))
+		return netip.AddrPortFrom(netip.AddrFrom4(sa4.Addr), sa4.Port<<8|sa4.Port>>8)
+	case unix.AF_INET6:
+		sa6 := (*unix.RawSockaddrInet6)(unsafe.Pointer(sa))
+		return netip.AddrPortFrom(netip.AddrFrom16(sa6.Addr).Unmap(), sa6.Port<<8|sa6.Port>>8)
+	}
+	return netip.AddrPort{}
+}
+
+// StageRecv points slot i of the next Recv at dst.
 func (s *State) StageRecv(i int, dst []byte) {
 	s.lens[i] = len(dst)
 	s.iovs[i].Base = nil
