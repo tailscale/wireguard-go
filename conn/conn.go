@@ -39,6 +39,13 @@ func (r *ReceivedPacket) Bytes(slab []byte) []byte {
 // to the associated [Bind.BatchSize].
 type ReceiveFunc func(slab []byte, packets []ReceivedPacket) (n int, err error)
 
+// ReceiveFuncStarter is implemented by a Bind that creates ReceiveFuncs after [Bind.Open], such as [StdNetBind] with connected sockets.
+//
+// The device calls SetReceiveFuncStarter before every Open. The Bind calls start for each later ReceiveFunc, and the device runs it with slabs of slabSize bytes and batches of batchSize. start returns false once the Bind is closing, and the ReceiveFunc is then never called. A started ReceiveFunc returns [net.ErrClosed] when its source closes, which ends only its own routine; Close must make all of them return.
+type ReceiveFuncStarter interface {
+	SetReceiveFuncStarter(start func(fn ReceiveFunc, slabSize, batchSize int) bool)
+}
+
 // A Bind listens on a port for both IPv6 and IPv4 UDP traffic.
 //
 // A Bind interface may also be a PeekLookAtSocketFd or BindSocketToInterface,
@@ -69,6 +76,38 @@ type Bind interface {
 	// BatchSize is the number of buffers expected to be passed to
 	// the ReceiveFuncs, and the maximum expected to be passed to SendBatch.
 	BatchSize() int
+}
+
+// An Option configures a Bind at construction.
+type Option interface {
+	apply(*config)
+}
+
+type optionFunc func(*config)
+
+func (f optionFunc) apply(c *config) { f(c) }
+
+type config struct {
+	connected    *bool // nil means connectedByDefault
+	dontFragment bool
+	batchedIO    bool
+}
+
+// WithConnectedSockets turns [ConnectedSockets] on or off for a [StdNetBind]. It is off by default and has no effect on Windows, AIX, Solaris and illumos.
+//
+// On Linux the Bind's sockets then use SO_REUSEPORT, so another process of the same user can bind the port and receive some of its traffic.
+func WithConnectedSockets(on bool) Option {
+	return optionFunc(func(c *config) { c.connected = &on })
+}
+
+// WithDontFragment sets the don't-fragment bit on every datagram a [StdNetBind] sends. It is off by default and only has an effect on darwin, where IPv4 datagrams without DF get a random IP ID, which is slow to generate and defeats GRO on a Linux receiver. With DF, datagrams larger than the path MTU are dropped rather than fragmented.
+func WithDontFragment(on bool) Option {
+	return optionFunc(func(c *config) { c.dontFragment = on })
+}
+
+// WithBatchedIO makes a [StdNetBind] batch I/O on its unconnected sockets with recvmsg_x and sendmsg_x (see [UnconnectedBatch]). It is off by default, only has an effect on darwin, and falls back to one datagram per syscall if [BatchIOSupported] fails.
+func WithBatchedIO(on bool) Option {
+	return optionFunc(func(c *config) { c.batchedIO = on })
 }
 
 // BindSocketToInterface is implemented by Bind objects that support being

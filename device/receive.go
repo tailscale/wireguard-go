@@ -77,6 +77,11 @@ func (peer *Peer) keepKeyFreshReceiving() {
  * IPv4 and IPv6 (separately)
  */
 func (device *Device) RoutineReceiveIncoming(maxBatchSize int, recv conn.ReceiveFunc) {
+	device.receiveIncoming(maxBatchSize, recv, device.getPacketBuf)
+}
+
+// receiveIncoming is RoutineReceiveIncoming reading into slabs from getBuf.
+func (device *Device) receiveIncoming(maxBatchSize int, recv conn.ReceiveFunc, getBuf func() *packetBuf) {
 	recvName := recv.PrettyName()
 	defer func() {
 		device.log.Verbosef("Routine: receive incoming %s - stopped", recvName)
@@ -91,7 +96,7 @@ func (device *Device) RoutineReceiveIncoming(maxBatchSize int, recv conn.Receive
 
 	var (
 		packets = make([]conn.ReceivedPacket, maxBatchSize)
-		buf     = device.getPacketBuf()
+		buf     = getBuf()
 		// bufDirty tracks whether the current buf has been pushed downstream to
 		// crypto and per-peer/handshake functions, or can be re-used across the
 		// next read cycle
@@ -99,7 +104,8 @@ func (device *Device) RoutineReceiveIncoming(maxBatchSize int, recv conn.Receive
 		err         error
 		count       int
 		deathSpiral int
-		elemsByPeer = make(map[*Peer]*QueueInboundElementsContainer, maxBatchSize)
+		// Capped because a started routine may read many more packets per call, and ranging over a map costs O(capacity).
+		elemsByPeer = make(map[*Peer]*QueueInboundElementsContainer, min(maxBatchSize, device.BatchSize()))
 	)
 
 	defer func() {
@@ -109,7 +115,7 @@ func (device *Device) RoutineReceiveIncoming(maxBatchSize int, recv conn.Receive
 	for {
 		if bufDirty {
 			buf.decRef()
-			buf = device.getPacketBuf()
+			buf = getBuf()
 			bufDirty = false
 		}
 		count, err = recv(buf.slab, packets)
@@ -187,6 +193,11 @@ func (device *Device) RoutineReceiveIncoming(maxBatchSize int, recv conn.Receive
 					elemsByPeer[peer] = elemsForPeer
 				}
 				elemsForPeer.elems = append(elemsForPeer.elems, elem)
+				if len(elemsForPeer.elems) >= device.BatchSize() {
+					// Downstream, a container holds at most BatchSize elements; a started routine can read more per call.
+					peer.queueInboundIfRunning(elemsForPeer)
+					delete(elemsByPeer, peer)
+				}
 				continue
 
 			// otherwise it is a fixed size & handshake related packet
