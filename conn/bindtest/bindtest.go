@@ -26,8 +26,9 @@ type ChannelBind struct {
 type ChannelEndpoint uint16
 
 var (
-	_ conn.Bind     = (*ChannelBind)(nil)
-	_ conn.Endpoint = (*ChannelEndpoint)(nil)
+	_ conn.Bind      = (*ChannelBind)(nil)
+	_ conn.NamedBind = (*ChannelBind)(nil)
+	_ conn.Endpoint  = (*ChannelEndpoint)(nil)
 )
 
 func NewChannelBinds() [2]conn.Bind {
@@ -76,6 +77,10 @@ func (c *ChannelBind) Open(port uint16) (fns []conn.ReceiveFunc, actualPort uint
 	} else {
 		return fns, uint16(c.source6), nil
 	}
+}
+
+func (c *ChannelBind) ReceiveNames() []string {
+	return []string{"v4", "v6"}
 }
 
 func (c *ChannelBind) Close() error {

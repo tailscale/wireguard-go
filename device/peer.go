@@ -100,8 +100,9 @@ type Peer struct {
 	persistentKeepaliveInterval atomic.Uint32
 
 	// flowID pins this peer's decrypted packets to a single TUN write queue
-	// when the device is a [tun.MultiQueueDevice].
-	// See [Peer.writeTUN].
+	// when the device is a [tun.MultiQueueDevice], and its encrypted packets
+	// to a single bind socket when the bind is a [conn.MultiSocketBind].
+	// See [Peer.writeTUN] and [Peer.SendBuffers].
 	//
 	// The kernel picks a TUN queue by 5-tuple for new (or quiescent,
 	// TUN_FLOW_EXPIRE=3s) flows. A pin learned from our writes overrides
@@ -226,7 +227,7 @@ func (peer *Peer) SendBuffers(buffers [][]byte) error {
 	}
 	peer.endpoint.Unlock()
 
-	err := peer.device.net.bind.Send(buffers, endpoint, MessageEncapsulatingTransportSize)
+	err := peer.device.net.sendTo(int(peer.flowID), buffers, endpoint, MessageEncapsulatingTransportSize)
 	if err == nil {
 		var totalLen uint64
 		for _, b := range buffers {
