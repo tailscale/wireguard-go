@@ -126,6 +126,10 @@ func (a *analyzer) walkStmtForHeld(stmt ast.Stmt, held map[LockID]HeldLock, fi *
 		for _, expr := range s.Rhs {
 			a.processExprForHeld(expr, held, fi, inDefer)
 		}
+	case *ast.ReturnStmt:
+		for _, expr := range s.Results {
+			a.processExprForHeld(expr, held, fi, inDefer)
+		}
 	case *ast.DeferStmt:
 		a.processExprForHeld(s.Call, held, fi, true)
 	case *ast.GoStmt:

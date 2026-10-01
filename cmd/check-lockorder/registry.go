@@ -117,6 +117,7 @@ var alternateResolutions = map[string]LockID{
 	"Keypairs.":        "Peer.keypairs",        // keypairs.Lock() inside *Keypairs methods
 	"CookieChecker.":   "Device.cookieChecker", // st.Lock() inside *CookieChecker methods
 	"CookieGenerator.": "Peer.cookieGenerator", // st.Lock() inside *CookieGenerator methods
+	"AllowedIPs.mu":    "Device.allowedips.mu", // table.mu.Lock() inside *AllowedIPs methods
 }
 
 // buildRegistry creates a lookup map from (ownerType.fieldPath) → LockID.
