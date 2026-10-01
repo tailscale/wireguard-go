@@ -639,36 +639,93 @@ func (peer *Peer) RoutineSequentialSender(maxBatchSize int) {
 	device.log.Verbosef("%v - Routine: sequential sender - started", peer)
 
 	bufs := make([][]byte, 0, maxBatchSize)
+	elemsContainers := make([]*QueueOutboundElementsContainer, 0, maxBatchSize)
+	var pending *QueueOutboundElementsContainer
 
-	for elemsContainer := range peer.queue.outbound {
-		peer.processOutboundContainer(elemsContainer, bufs[:0])
+	for {
+		elemsContainers = elemsContainers[:0]
+		elemCount := 0
+
+		if pending != nil {
+			elemsContainers = append(elemsContainers, pending)
+			elemCount = len(pending.elems)
+			pending = nil
+		} else {
+			elemsContainer, ok := <-peer.queue.outbound
+			if !ok {
+				return
+			}
+			elemsContainers = append(elemsContainers, elemsContainer)
+			elemCount = len(elemsContainer.elems)
+		}
+
+		queueClosed := false
+	readAhead:
+		for elemCount < maxBatchSize && len(elemsContainers) < maxBatchSize {
+			select {
+			case elemsContainer, ok := <-peer.queue.outbound:
+				if !ok {
+					queueClosed = true
+					break readAhead
+				}
+				if len(elemsContainer.elems) > maxBatchSize-elemCount {
+					// Go channels cannot be front-loaded. Retain the container
+					// locally so it remains first in the next send batch.
+					pending = elemsContainer
+					break readAhead
+				}
+				elemsContainers = append(elemsContainers, elemsContainer)
+				elemCount += len(elemsContainer.elems)
+			default:
+				break readAhead
+			}
+		}
+
+		peer.processOutboundContainers(elemsContainers, bufs[:0])
+		if queueClosed {
+			return
+		}
 	}
 }
 
-// processOutboundContainer waits for the encryption routine to finish
-// filling elemsContainer, then sends the batch (or drops it, if the peer
-// has been stopped) and returns the container to the pool.
+// processOutboundContainers waits for the encryption routines to finish
+// filling elemsContainers, then sends the batch (or drops it, if the peer
+// has been stopped) and returns the containers to the pool.
 //
 // scratch is a length-0 slice used to assemble the per-packet buffers
 // passed to SendBuffers; its backing array is reused across calls.
-func (peer *Peer) processOutboundContainer(elemsContainer *QueueOutboundElementsContainer, scratch [][]byte) {
+func (peer *Peer) processOutboundContainers(elemsContainers []*QueueOutboundElementsContainer, scratch [][]byte) {
 	// Invariants from RoutineSequentialSender; all should be unreachable.
 	if len(scratch) != 0 || cap(scratch) == 0 {
-		panic(fmt.Sprintf("processOutboundContainer: scratch must be empty with non-zero cap; got len=%d cap=%d",
+		panic(fmt.Sprintf("processOutboundContainers: scratch must be empty with non-zero cap; got len=%d cap=%d",
 			len(scratch), cap(scratch)))
 	}
-	if cap(scratch) < len(elemsContainer.elems) {
-		panic(fmt.Sprintf("processOutboundContainer: scratch cap %d < elems %d",
-			cap(scratch), len(elemsContainer.elems)))
+	if len(elemsContainers) == 0 {
+		panic("processOutboundContainers: containers must not be empty")
+	}
+	elemCount := 0
+	for _, elemsContainer := range elemsContainers {
+		elemCount += len(elemsContainer.elems)
+	}
+	if cap(scratch) < elemCount {
+		panic(fmt.Sprintf("processOutboundContainers: scratch cap %d < elems %d",
+			cap(scratch), elemCount))
 	}
 
 	device := peer.device
-	defer device.PutOutboundElementsContainer(elemsContainer)
+	defer func() {
+		for i, elemsContainer := range elemsContainers {
+			device.PutOutboundElementsContainer(elemsContainer)
+			elemsContainers[i] = nil
+		}
+	}()
 
-	// Wait for RoutineEncryption to finish filling the container. After
-	// Wait returns we have happens-before with that goroutine and are the
-	// sole owner of the container until Put hands it back to the pool.
-	elemsContainer.filling.Wait()
+	// Wait for RoutineEncryption to finish filling the containers. After
+	// Wait returns we have happens-before with those goroutines and are the
+	// sole owner of the containers until Put hands them back to the pool.
+	for _, elemsContainer := range elemsContainers {
+		elemsContainer.filling.Wait()
+	}
 
 	if !peer.runningState.isRunning.Load() {
 		// peer has been stopped; return re-usable elems to the shared pool.
@@ -677,18 +734,22 @@ func (peer *Peer) processOutboundContainer(elemsContainer *QueueOutboundElements
 		// The timers and SendBuffers code are resilient to a few stragglers.
 		// TODO: rework peer shutdown order to ensure
 		// that we never accidentally keep timers alive longer than necessary.
-		for _, elem := range elemsContainer.elems {
-			device.PutOutboundElement(elem)
+		for _, elemsContainer := range elemsContainers {
+			for _, elem := range elemsContainer.elems {
+				device.PutOutboundElement(elem)
+			}
 		}
 		return
 	}
 
 	dataSent := false
-	for _, elem := range elemsContainer.elems {
-		if len(elem.packet[MessageEncapsulatingTransportSize:]) != MessageKeepaliveSize {
-			dataSent = true
+	for _, elemsContainer := range elemsContainers {
+		for _, elem := range elemsContainer.elems {
+			if len(elem.packet[MessageEncapsulatingTransportSize:]) != MessageKeepaliveSize {
+				dataSent = true
+			}
+			scratch = append(scratch, elem.packet)
 		}
-		scratch = append(scratch, elem.packet)
 	}
 
 	peer.timersAnyAuthenticatedPacketTraversal()
@@ -698,8 +759,10 @@ func (peer *Peer) processOutboundContainer(elemsContainer *QueueOutboundElements
 	if dataSent {
 		peer.timersDataSent()
 	}
-	for _, elem := range elemsContainer.elems {
-		device.PutOutboundElement(elem)
+	for _, elemsContainer := range elemsContainers {
+		for _, elem := range elemsContainer.elems {
+			device.PutOutboundElement(elem)
+		}
 	}
 	if err != nil {
 		var errGSO conn.ErrUDPGSODisabled
