@@ -53,7 +53,7 @@ type Peer struct {
 	// deleteOnIdle indicates whether the peer should be deleted when idle
 	// because it was auto-created via a Device.PeerLookupFunc.
 	//
-	// This field should only be set once, before the peer is started.
+	// This field should only be set once, before the peer is published.
 	deleteOnIdle bool
 
 	endpoint struct {
@@ -118,7 +118,19 @@ type Peer struct {
 	flowID uint32
 }
 
+// NewPeer creates and publishes an unconfigured peer for pk.
+//
+// Safe to configure post-factum in [Device.IpcSetOperation] because of the
+// global ipc mutex.
 func (device *Device) NewPeer(pk NoisePublicKey) (*Peer, error) {
+	return device.newPeer(pk, nil, false /* deleteOnIdle */)
+}
+
+// newPeer creates a peer for pk, applies conf and deleteOnIdle, and then
+// publishes the peer into device.peers.keyMap.
+//
+// conf may be nil, in which case the peer is left unconfigured.
+func (device *Device) newPeer(pk NoisePublicKey, conf *NewPeerConfig, deleteOnIdle bool) (*Peer, error) {
 	if device.isClosed() {
 		return nil, errors.New("device closed")
 	}
@@ -153,23 +165,37 @@ func (device *Device) NewPeer(pk NoisePublicKey) (*Peer, error) {
 		return nil, errAddExistingPeer
 	}
 
+	// This field is read without locks, safe to write only because the peer
+	// is not yet reachable by any other goroutine.
+	peer.deleteOnIdle = deleteOnIdle
+
 	// pre-compute DH
 	handshake := &peer.handshake
 	handshake.mutex.Lock()
 	handshake.precomputedStaticStatic, _ = device.staticIdentity.privateKey.sharedSecret(pk)
 	handshake.remoteStatic = pk
+	if conf != nil {
+		handshake.presharedKey = conf.PresharedKey
+	}
 	handshake.mutex.Unlock()
 
 	// reset endpoint
 	peer.endpoint.Lock()
 	peer.endpoint.val = nil
 	peer.endpoint.clearSrcOnTx = false
+	if conf != nil && conf.Endpoint != nil {
+		peer.endpoint.val = conf.Endpoint
+	}
 	peer.endpoint.Unlock()
 
 	// init timers
 	peer.timersInit()
 
-	// add
+	if conf != nil {
+		peer.SetAllowedIPs(conf.AllowedIPs)
+	}
+
+	// add, concurrent access after this point
 	device.peers.keyMap[pk] = peer
 
 	return peer, nil
