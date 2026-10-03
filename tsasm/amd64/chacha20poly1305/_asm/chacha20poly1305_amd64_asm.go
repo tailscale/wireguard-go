@@ -148,177 +148,82 @@ func outputPath() string {
 	return "../chacha20poly1305_amd64.s"
 }
 
-// Utility function to emit BYTE instruction
-func BYTE(u8 U8) {
-	Instruction(&ir.Instruction{Opcode: "BYTE", Operands: []Op{u8}})
+/*
+rotLanes rotates the four uint32 lanes of x right by n lanes in place, which is ChaCha20's diagonalisation step.
+
+Upstream emitted PALIGNR $4n, x, x here, hand-encoded as raw BYTE directives because neither Go's assembler nor avo v0.6.0 accepts the mnemonic. PSHUFD performs the same permutation: every rotation in this kernel is a whole number of lanes and both PALIGNR operands were the same register, so it is a rotate rather than a concatenation of two registers. PSHUFD is also baseline SSE2, which leaves no hand-encoded instruction in the kernel.
+*/
+func rotLanes(x VecPhysical, n int) {
+	// Lane i of the result takes lane (i+n) mod 4 of the source.
+	sel, ok := map[int]uint64{1: 0x39, 2: 0x4e, 3: 0x93}[n]
+	if !ok {
+		panic(fmt.Sprintf("rotLanes: no PSHUFD selector for %d lanes, want 1, 2 or 3; $0x00 would broadcast lane 0 rather than rotate", n))
+	}
+	PSHUFD(U8(sel), x, x)
 }
 
-// PALIGNR $4, X3, X3
 func shiftB0Left() {
-	BYTE(U8(0x66))
-	BYTE(U8(0x0f))
-	BYTE(U8(0x3a))
-	BYTE(U8(0x0f))
-	BYTE(U8(0xdb))
-	BYTE(U8(0x04))
+	rotLanes(X3, 1)
 }
 
-// PALIGNR $4, X4, X4
 func shiftB1Left() {
-	BYTE(U8(0x66))
-	BYTE(U8(0x0f))
-	BYTE(U8(0x3a))
-	BYTE(U8(0x0f))
-	BYTE(U8(0xe4))
-	BYTE(U8(0x04))
+	rotLanes(X4, 1)
 }
 
-// PALIGNR $4, X5, X5
 func shiftB2Left() {
-	BYTE(U8(0x66))
-	BYTE(U8(0x0f))
-	BYTE(U8(0x3a))
-	BYTE(U8(0x0f))
-	BYTE(U8(0xed))
-	BYTE(U8(0x04))
+	rotLanes(X5, 1)
 }
 
-// PALIGNR $4, X13, X13
 func shiftB3Left() {
-	BYTE(U8(0x66))
-	BYTE(U8(0x45))
-	BYTE(U8(0x0f))
-	BYTE(U8(0x3a))
-	BYTE(U8(0x0f))
-	BYTE(U8(0xed))
-	BYTE(U8(0x04))
+	rotLanes(X13, 1)
 }
 
-// PALIGNR $8, X6, X6
 func shiftC0Left() {
-	BYTE(U8(0x66))
-	BYTE(U8(0x0f))
-	BYTE(U8(0x3a))
-	BYTE(U8(0x0f))
-	BYTE(U8(0xf6))
-	BYTE(U8(0x08))
+	rotLanes(X6, 2)
 }
 
-// PALIGNR $8, X7, X7
 func shiftC1Left() {
-	BYTE(U8(0x66))
-	BYTE(U8(0x0f))
-	BYTE(U8(0x3a))
-	BYTE(U8(0x0f))
-	BYTE(U8(0xff))
-	BYTE(U8(0x08))
+	rotLanes(X7, 2)
 }
 
-// PALIGNR $8, X8, X8
 func shiftC2Left() {
-	BYTE(U8(0x66))
-	BYTE(U8(0x45))
-	BYTE(U8(0x0f))
-	BYTE(U8(0x3a))
-	BYTE(U8(0x0f))
-	BYTE(U8(0xc0))
-	BYTE(U8(0x08))
+	rotLanes(X8, 2)
 }
 
-// PALIGNR $8, X14, X14
 func shiftC3Left() {
-	BYTE(U8(0x66))
-	BYTE(U8(0x45))
-	BYTE(U8(0x0f))
-	BYTE(U8(0x3a))
-	BYTE(U8(0x0f))
-	BYTE(U8(0xf6))
-	BYTE(U8(0x08))
+	rotLanes(X14, 2)
 }
 
-// PALIGNR $12, X9, X9
 func shiftD0Left() {
-	BYTE(U8(0x66))
-	BYTE(U8(0x45))
-	BYTE(U8(0x0f))
-	BYTE(U8(0x3a))
-	BYTE(U8(0x0f))
-	BYTE(U8(0xc9))
-	BYTE(U8(0x0c))
+	rotLanes(X9, 3)
 }
 
-// PALIGNR $12, X10, X10
 func shiftD1Left() {
-	BYTE(U8(0x66))
-	BYTE(U8(0x45))
-	BYTE(U8(0x0f))
-	BYTE(U8(0x3a))
-	BYTE(U8(0x0f))
-	BYTE(U8(0xd2))
-	BYTE(U8(0x0c))
+	rotLanes(X10, 3)
 }
 
-// PALIGNR $12, X11, X11
 func shiftD2Left() {
-	BYTE(U8(0x66))
-	BYTE(U8(0x45))
-	BYTE(U8(0x0f))
-	BYTE(U8(0x3a))
-	BYTE(U8(0x0f))
-	BYTE(U8(0xdb))
-	BYTE(U8(0x0c))
+	rotLanes(X11, 3)
 }
 
-// PALIGNR $12, X15, X15
 func shiftD3Left() {
-	BYTE(U8(0x66))
-	BYTE(U8(0x45))
-	BYTE(U8(0x0f))
-	BYTE(U8(0x3a))
-	BYTE(U8(0x0f))
-	BYTE(U8(0xff))
-	BYTE(U8(0x0c))
+	rotLanes(X15, 3)
 }
 
-// PALIGNR $12, X3, X3
 func shiftB0Right() {
-	BYTE(U8(0x66))
-	BYTE(U8(0x0f))
-	BYTE(U8(0x3a))
-	BYTE(U8(0x0f))
-	BYTE(U8(0xdb))
-	BYTE(U8(0x0c))
+	rotLanes(X3, 3)
 }
 
-// PALIGNR $12, X4, X4
 func shiftB1Right() {
-	BYTE(U8(0x66))
-	BYTE(U8(0x0f))
-	BYTE(U8(0x3a))
-	BYTE(U8(0x0f))
-	BYTE(U8(0xe4))
-	BYTE(U8(0x0c))
+	rotLanes(X4, 3)
 }
 
-// PALIGNR $12, X5, X5
 func shiftB2Right() {
-	BYTE(U8(0x66))
-	BYTE(U8(0x0f))
-	BYTE(U8(0x3a))
-	BYTE(U8(0x0f))
-	BYTE(U8(0xed))
-	BYTE(U8(0x0c))
+	rotLanes(X5, 3)
 }
 
-// PALIGNR $12, X13, X13
 func shiftB3Right() {
-	BYTE(U8(0x66))
-	BYTE(U8(0x45))
-	BYTE(U8(0x0f))
-	BYTE(U8(0x3a))
-	BYTE(U8(0x0f))
-	BYTE(U8(0xed))
-	BYTE(U8(0x0c))
+	rotLanes(X13, 3)
 }
 
 func shiftC0Right() {
@@ -337,83 +242,31 @@ func shiftC3Right() {
 	shiftC3Left()
 }
 
-// PALIGNR $4, X9, X9
 func shiftD0Right() {
-	BYTE(U8(0x66))
-	BYTE(U8(0x45))
-	BYTE(U8(0x0f))
-	BYTE(U8(0x3a))
-	BYTE(U8(0x0f))
-	BYTE(U8(0xc9))
-	BYTE(U8(0x04))
+	rotLanes(X9, 1)
 }
 
-// PALIGNR $4, X10, X10
 func shiftD1Right() {
-	BYTE(U8(0x66))
-	BYTE(U8(0x45))
-	BYTE(U8(0x0f))
-	BYTE(U8(0x3a))
-	BYTE(U8(0x0f))
-	BYTE(U8(0xd2))
-	BYTE(U8(0x04))
+	rotLanes(X10, 1)
 }
 
-// PALIGNR $4, X11, X11
 func shiftD2Right() {
-	BYTE(U8(0x66))
-	BYTE(U8(0x45))
-	BYTE(U8(0x0f))
-	BYTE(U8(0x3a))
-	BYTE(U8(0x0f))
-	BYTE(U8(0xdb))
-	BYTE(U8(0x04))
+	rotLanes(X11, 1)
 }
 
-// PALIGNR $4, X15, X15
 func shiftD3Right() {
-	BYTE(U8(0x66))
-	BYTE(U8(0x45))
-	BYTE(U8(0x0f))
-	BYTE(U8(0x3a))
-	BYTE(U8(0x0f))
-	BYTE(U8(0xff))
-	BYTE(U8(0x04))
+	rotLanes(X15, 1)
 }
 
 // ##~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~SOME  MACROS~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~##
 
 // Hack: ROL must be a #define macro as it is referenced by other macros
-func defineROL() {
-	definition :=
-		`#define ROL(N, R, T) \
-		MOVO R, T; \
-		PSLLL $(N), T; \
-		PSRLL $(32-(N)), R; \
-		PXOR T, R`
-	Comment("ROL rotates the uint32s in register R left by N bits, using temporary T.")
-	Instruction(&ir.Instruction{Opcode: definition})
-}
-
-// ROL rotates the uint32s in register R left by N bits, using temporary T.
-func ROL(N uint64, R, T VecPhysical) {
-	// Hack: ROL must be a #define macro as it is referenced by other macros
-	Instruction(&ir.Instruction{Opcode: fmt.Sprintf("ROL(%s, %s, %s)", I8(N).Asm(), R.Asm(), T.Asm())})
-}
-
-// Hack to get Avo to generate an #ifdef
-//
-// ROL16(R, T) definition depends on a compiler flag that specifies amd64 architectural level.
+// ROL16(R, T) rotates the uint32s in R left by 16. PSHUFB does it in one instruction.
 func defineROL16() {
-	definition :=
-		`#ifdef GOAMD64_v2
-		#define ROL16(R, T) PSHUFB ·rol16<>(SB), R
-	#else
-		#define ROL16(R, T) ROL(16, R, T)
-	#endif`
+	definition := `#define ROL16(R, T) PSHUFB ·rol16<>(SB), R`
 
-	// The GOAMD64_v2 branch of the macro below names ·rol16<>(SB) textually, which avo cannot
-	// see, so emit the constant explicitly or it is absent at GOAMD64=v2.
+	// The macro names ·rol16<>(SB) textually, which avo cannot see, so emit the constant
+	// explicitly or nothing does.
 	_ = rol16_DATA()
 
 	Comment("ROL16 rotates the uint32s in register R left by 16, using temporary T if needed.")
@@ -427,19 +280,12 @@ func ROL16(R, T VecPhysical) {
 	Instruction(&ir.Instruction{Opcode: fmt.Sprintf("ROL16(%s, %s)", R.Asm(), T.Asm())})
 }
 
-// Hack to get Avo to generate an #ifdef
-//
-// ROL8(R, T) definition depends on a compiler flag that specifies amd64 architectural level.
+// ROL8(R, T) rotates the uint32s in R left by 8. PSHUFB does it in one instruction.
 func defineROL8() {
-	definition :=
-		`#ifdef GOAMD64_v2
-		#define ROL8(R, T) PSHUFB ·rol8<>(SB), R
-	#else
-		#define ROL8(R, T) ROL(8, R, T)
-	#endif`
+	definition := `#define ROL8(R, T) PSHUFB ·rol8<>(SB), R`
 
-	// The GOAMD64_v2 branch of the macro below names ·rol8<>(SB) textually, which avo cannot
-	// see, so emit the constant explicitly or it is absent at GOAMD64=v2.
+	// The macro names ·rol8<>(SB) textually, which avo cannot see, so emit the constant
+	// explicitly or nothing does.
 	_ = rol8_DATA()
 
 	Comment("ROL8 rotates the uint32s in register R left by 8, using temporary T if needed.")
@@ -546,7 +392,6 @@ func polyHashADInternal() {
 	AllocLocal(0)
 
 	Comment("Hack: Must declare #define macros inside of a function due to Avo constraints")
-	defineROL()
 	defineROL8()
 	defineROL16()
 
