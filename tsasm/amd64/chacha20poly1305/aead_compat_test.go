@@ -15,6 +15,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"os"
 	"sync"
 	"testing"
 
@@ -29,6 +30,52 @@ type aeadCtorEntry struct {
 var aeadCtors = []aeadCtorEntry{
 	{"go-chacha20poly1305", xchacha20poly1305.New},
 	{"asm-chacha20poly1305", New},
+}
+
+/*
+New covers whichever kernel this CPU picks. On an AVX-512 machine that is the fused kernel at every length, so the SSSE3 kernel is pinned as a second arm there; without it nothing would test the SSSE3 kernel on such a machine.
+*/
+func init() {
+	if AvailableAVX512() {
+		aeadCtors = append(aeadCtors, aeadCtorEntry{"asm-ssse3", newAEADSSSE3})
+	}
+}
+
+// newAEADAVX512 and newAEADSSSE3 pin a kernel regardless of what New would choose.
+func newAEADAVX512(key []byte) (cipher.AEAD, error) { return pinned(key, true) }
+func newAEADSSSE3(key []byte) (cipher.AEAD, error)  { return pinned(key, false) }
+
+func pinned(key []byte, avx512 bool) (cipher.AEAD, error) {
+	a, err := newAEAD(key, avx512)
+	if err != nil {
+		return nil, err
+	}
+	return a, nil
+}
+
+/*
+avx512Sizes are lengths chosen for the AVX-512 kernel rather than the SSE one.
+
+Up to 704 bytes the kernel takes its short path: the counter-0 group alone up to 192, plus one more group up to 448 and two up to 704, with every block under a byte mask. Those lengths cover empty, sub-block, block and group boundaries on both sides of 192, 448 and 704.
+
+Above that the kernel works in 256-byte groups and batches two of them, so what matters is L mod 512. When sealing, the final batch is then a masked partial group alone when the remainder is in (0, 256), and a whole group paired with a masked partial one when it is in (256, 512). Opening stops its loop a batch early, so its final batch always carries one or two whole groups with the partial one, which covers those same remainders from the other side.
+
+sealSizes was chosen for the SSE kernel's branch points and only reaches these by chance, so the list below targets them on purpose. A mask error writes past the caller's buffer rather than producing wrong bytes inside it, which is why the sweep that uses these lengths checks guard bytes.
+*/
+var avx512Sizes = []int{
+	// short path: the key group alone up to 192, plus one group up to 448 and two up to 704
+	0, 1, 15, 16, 17, 63, 64, 65, 127, 128, 129, 191, 192, 193, 255, 256, 257, 320, 383, 384, 447, 448,
+	449, 511, 512, 513, 575, 576, 577, 639, 640, 703, 704,
+	// the general path from its shortest lengths
+	705, 767,
+	// exact group and batch multiples: no partial group at all
+	768, 1024, 1280, 1536, 2048,
+	// L mod 512 in (0, 256): a partial group alone, including remainders under 64 and under 16
+	1025, 1028, 1040, 1088, 1279, 1537, 1540, 1552, 1586,
+	// L mod 512 in (256, 512): a whole group paired with a partial one, including partials under 64 and under 16
+	1281, 1284, 1296, 1330, 1420, 1500, 1535, 2047,
+	// larger, to cover several batch iterations before the tail
+	4096, 4097, 4111, 8920, 16384, 16385,
 }
 
 // requireAsm skips a test when the CPU cannot run the kernel at all, so a
@@ -165,29 +212,30 @@ func TestAEAD_InPlace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	aead, err := New(key[:])
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	for _, plen := range sealSizes {
-		plaintext := make([]byte, plen)
-		rand.Read(plaintext)
-		want := ref.Seal(nil, nonce[:], plaintext, nil)
-
-		buf := make([]byte, 0, plen+Overhead)
-		buf = append(buf, plaintext...)
-		got := aead.Seal(buf[:0], nonce[:], buf[:plen], nil)
-		if !bytes.Equal(got, want) {
-			t.Fatalf("in-place Seal mismatch at pt=%d", plen)
-		}
-
-		opened, err := aead.Open(got[:0], nonce[:], got, nil)
+	for _, c := range aeadCtors {
+		aead, err := c.new(key[:])
 		if err != nil {
-			t.Fatalf("in-place Open at pt=%d: %v", plen, err)
+			t.Fatal(err)
 		}
-		if !bytes.Equal(opened, plaintext) {
-			t.Fatalf("in-place Open mismatch at pt=%d", plen)
+		for _, plen := range append(append([]int{}, sealSizes...), avx512Sizes...) {
+			plaintext := make([]byte, plen)
+			rand.Read(plaintext)
+			want := ref.Seal(nil, nonce[:], plaintext, nil)
+
+			buf := make([]byte, 0, plen+Overhead)
+			buf = append(buf, plaintext...)
+			got := aead.Seal(buf[:0], nonce[:], buf[:plen], nil)
+			if !bytes.Equal(got, want) {
+				t.Fatalf("%s: in-place Seal mismatch at pt=%d", c.name, plen)
+			}
+
+			opened, err := aead.Open(got[:0], nonce[:], got, nil)
+			if err != nil {
+				t.Fatalf("%s: in-place Open at pt=%d: %v", c.name, plen, err)
+			}
+			if !bytes.Equal(opened, plaintext) {
+				t.Fatalf("%s: in-place Open mismatch at pt=%d", c.name, plen)
+			}
 		}
 	}
 }
@@ -276,23 +324,30 @@ func FuzzAEAD_AgreesWithReference(f *testing.F) {
 	if err != nil {
 		f.Fatal(err)
 	}
-	aead, err := New(key[:])
-	if err != nil {
-		f.Fatal(err)
+	var aeads []aeadCtorEntry
+	var impls []cipher.AEAD
+	for _, c := range aeadCtors {
+		a, err := c.new(key[:])
+		if err != nil {
+			f.Fatal(err)
+		}
+		aeads, impls = append(aeads, c), append(impls, a)
 	}
 
 	f.Fuzz(func(t *testing.T, plaintext, aad []byte) {
 		want := ref.Seal(nil, nonce[:], plaintext, aad)
-		got := aead.Seal(nil, nonce[:], plaintext, aad)
-		if !bytes.Equal(got, want) {
-			t.Fatalf("Seal mismatch (pt=%d aad=%d)\n got: %x\nwant: %x", len(plaintext), len(aad), got, want)
-		}
-		back, err := aead.Open(nil, nonce[:], want, aad)
-		if err != nil {
-			t.Fatalf("Open (pt=%d aad=%d): %v", len(plaintext), len(aad), err)
-		}
-		if !bytes.Equal(back, plaintext) {
-			t.Fatalf("Open mismatch (pt=%d aad=%d)", len(plaintext), len(aad))
+		for i, aead := range impls {
+			got := aead.Seal(nil, nonce[:], plaintext, aad)
+			if !bytes.Equal(got, want) {
+				t.Fatalf("%s: Seal mismatch (pt=%d aad=%d)\n got: %x\nwant: %x", aeads[i].name, len(plaintext), len(aad), got, want)
+			}
+			back, err := aead.Open(nil, nonce[:], want, aad)
+			if err != nil {
+				t.Fatalf("%s: Open (pt=%d aad=%d): %v", aeads[i].name, len(plaintext), len(aad), err)
+			}
+			if !bytes.Equal(back, plaintext) {
+				t.Fatalf("%s: Open mismatch (pt=%d aad=%d)", aeads[i].name, len(plaintext), len(aad))
+			}
 		}
 	})
 }
@@ -385,5 +440,196 @@ func benchmarkAEAD(b *testing.B, open bool) {
 				}
 			}
 		})
+	}
+}
+
+/*
+TestNewPicksAVX512 checks that New actually selects the fused kernel where the CPU allows it.
+
+The device-level dispatch test cannot see this: both tiers are the same concrete type, so from outside the package an AVX-512 machine running the SSSE3 kernel is indistinguishable from one running the AVX-512 kernel, and the whole tier would be dead code without anything failing.
+*/
+func TestNewPicksAVX512(t *testing.T) {
+	a, err := New(make([]byte, KeySize))
+	if err != nil {
+		t.Fatal(err)
+	}
+	impl, ok := a.(*aead)
+	if !ok {
+		t.Fatalf("New returned %T, want *aead", a)
+	}
+	if got, want := impl.avx512, AvailableAVX512(); got != want {
+		t.Errorf("New returned an AEAD with avx512=%t on a CPU where AvailableAVX512()=%t", got, want)
+	}
+}
+
+/*
+TestAVX512OpenRejectsTamper covers the AVX-512 kernel's authentication-failure path, which nothing else here reaches.
+
+TestAEAD_OpenRejectsTamper only tries one 43-byte plaintext, which reaches the short path and nothing else. A kernel that stored 1 into its return slot unconditionally on some other path would pass it while accepting forgeries there.
+
+Both halves of the ciphertext are tampered with, separately: a byte of the payload, which must fail because the tag covers it, and a byte of the tag itself, which must fail because it no longer matches. The lengths cover all three short-path variants and the general path's batch loop and both forms of its final batch.
+*/
+func TestAVX512OpenRejectsTamper(t *testing.T) {
+	if !AvailableAVX512() {
+		t.Skip("CPU cannot run the AVX-512 kernel")
+	}
+	var key [KeySize]byte
+	rand.Read(key[:])
+	nonce := make([]byte, NonceSize)
+	rand.Read(nonce)
+	aead, err := newAEADAVX512(key[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	aad := []byte("metadata")
+
+	for _, n := range []int{1, 64, 192, 193, 448, 449, 704, 705, 768, 1024, 1280, 1420, 1537, 4096} {
+		plaintext := make([]byte, n)
+		rand.Read(plaintext)
+		ct := aead.Seal(nil, nonce, plaintext, aad)
+
+		for _, tc := range []struct {
+			what string
+			at   int
+		}{
+			{"payload byte", 0},
+			{"last payload byte", n - 1},
+			{"tag byte", n},
+			{"last tag byte", len(ct) - 1},
+		} {
+			bad := append([]byte{}, ct...)
+			bad[tc.at] ^= 1
+			out, err := aead.Open(nil, nonce, bad, aad)
+			if err == nil {
+				t.Fatalf("len %d: Open accepted a flipped %s", n, tc.what)
+			}
+			if out != nil {
+				t.Fatalf("len %d: Open returned %d bytes alongside an error", n, len(out))
+			}
+		}
+
+		// A wrong nonce and wrong additional data must fail too, and for the same reason.
+		badNonce := append([]byte{}, nonce...)
+		badNonce[0] ^= 1
+		if _, err := aead.Open(nil, badNonce, ct, aad); err == nil {
+			t.Fatalf("len %d: Open accepted a wrong nonce", n)
+		}
+		if _, err := aead.Open(nil, nonce, ct, append(aad, 0)); err == nil {
+			t.Fatalf("len %d: Open accepted wrong additional data", n)
+		}
+
+		/*
+			On failure the caller must be left with a zeroed buffer rather than the plaintext the kernel had already written: the kernel decrypts before the tag is known. Open into a destination whose backing array is visible afterwards to check that it was.
+		*/
+		bad := append([]byte{}, ct...)
+		bad[len(bad)-1] ^= 1
+		dst := make([]byte, 0, n)
+		if _, err := aead.Open(dst, nonce, bad, aad); err == nil {
+			t.Fatalf("len %d: Open accepted a flipped tag", n)
+		}
+		for i, b := range dst[:n] {
+			if b != 0 {
+				t.Fatalf("len %d: byte %d of the output was left as %#x after a failed Open", n, i, b)
+			}
+		}
+	}
+}
+
+/*
+TestAVX512SizeSweep runs the AVX-512-specific lengths through Seal and Open against x/crypto, with guard bytes past the output so a mask or length error that writes beyond the caller's buffer is caught rather than merely producing wrong bytes inside it.
+*/
+func TestAVX512SizeSweep(t *testing.T) {
+	if !AvailableAVX512() {
+		t.Skip("CPU cannot run the AVX-512 kernel")
+	}
+	var key [KeySize]byte
+	rand.Read(key[:])
+	nonce := make([]byte, NonceSize)
+	rand.Read(nonce)
+	ours, err := newAEADAVX512(key[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, err := xchacha20poly1305.New(key[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const guard = 0xA5
+	for _, n := range avx512Sizes {
+		for _, adLen := range []int{0, 1, 16, 17, 63, 64} {
+			plaintext := make([]byte, n)
+			rand.Read(plaintext)
+			ad := make([]byte, adLen)
+			rand.Read(ad)
+			want := ref.Seal(nil, nonce, plaintext, ad)
+
+			sealDst := make([]byte, n+Overhead+96)
+			for i := range sealDst {
+				sealDst[i] = guard
+			}
+			got := ours.Seal(sealDst[:0], nonce, plaintext, ad)
+			if !bytes.Equal(got, want) {
+				t.Fatalf("len %d adlen %d: Seal differs from x/crypto", n, adLen)
+			}
+			for i := len(got); i < len(sealDst); i++ {
+				if sealDst[i] != guard {
+					t.Fatalf("len %d adlen %d: Seal wrote %d bytes past its output", n, adLen, i-len(got)+1)
+				}
+			}
+
+			openDst := make([]byte, n+96)
+			for i := range openDst {
+				openDst[i] = guard
+			}
+			back, err := ours.Open(openDst[:0], nonce, want, ad)
+			if err != nil {
+				t.Fatalf("len %d adlen %d: Open rejected a valid tag: %v", n, adLen, err)
+			}
+			if !bytes.Equal(back, plaintext) {
+				t.Fatalf("len %d adlen %d: Open produced wrong plaintext", n, adLen)
+			}
+			for i := len(back); i < len(openDst); i++ {
+				if openDst[i] != guard {
+					t.Fatalf("len %d adlen %d: Open wrote %d bytes past its output", n, adLen, i-len(back)+1)
+				}
+			}
+		}
+	}
+}
+
+/*
+TestAVX512TierWasExercised makes a CI run that never touched the AVX-512 kernel say so.
+
+Every AVX-512 test here skips on a CPU without the features, which is correct, but it means a green run proves nothing about the tier. GitHub's ubuntu runners are a mix of Intel Ice Lake, which has AVX-512, and AMD EPYC Milan, which does not, so roughly half of them exercise none of this package's newer half and report success.
+
+Failing on every AVX-512-less runner would be wrong: it would break unrelated pull requests on hardware nobody chose. Instead this fails only when asked to, so a maintainer can pin one job to a runner with AVX-512 and set TS_WG_REQUIRE_AVX512=1 there, and it logs the tier's status unconditionally so the reason a run proved nothing is visible in the output rather than absent from it.
+*/
+func TestAVX512TierWasExercised(t *testing.T) {
+	if AvailableAVX512() {
+		t.Log("AVX-512 kernel is present and was exercised by this run")
+		return
+	}
+	t.Log("AVX-512 kernel is ABSENT on this CPU: every AVX-512 test in this package skipped")
+	if os.Getenv("TS_WG_REQUIRE_AVX512") == "1" {
+		t.Fatal("TS_WG_REQUIRE_AVX512=1 but this CPU has no AVX512F+AVX512BW+BMI2, so the tier went untested")
+	}
+}
+
+/*
+TestAVX512NeedsBW guards the one combination that would fault rather than merely be slow. A part with AVX512F but not AVX512BW, such as Knights Landing or Knights Mill, must not be offered this kernel: every payload up to 704 bytes and every partial group after that is loaded and stored under KMOVQ masks with VMOVDQU8, both of which need BW, so it would SIGILL on the first handshake-sized packet.
+*/
+func TestAVX512NeedsBW(t *testing.T) {
+	if avx512Usable(true, true, false, true) {
+		t.Error("AVX512F without AVX512BW was accepted; the kernel would SIGILL")
+	}
+	if avx512Usable(true, true, true, false) {
+		t.Error("AVX-512 without BMI2 was accepted; the Poly1305 multiply needs MULXQ")
+	}
+	if avx512Usable(false, true, true, true) {
+		t.Error("AVX-512 without AVX was accepted; the kernel ends with VZEROUPPER")
+	}
+	if !avx512Usable(true, true, true, true) {
+		t.Error("AVX, F, BW and BMI2 together were refused")
 	}
 }
