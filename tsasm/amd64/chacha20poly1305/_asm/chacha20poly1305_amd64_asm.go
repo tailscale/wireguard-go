@@ -7,6 +7,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"os"
 	"strings"
@@ -18,7 +19,9 @@ import (
 	_ "github.com/tailscale/wireguard-go/tsasm/amd64/chacha20poly1305"
 )
 
+// Both lines need GOARCH=amd64 when generating from a non-amd64 host: Package() below resolves the target package, whose files are behind an amd64 build constraint, so go generate fails there with "build constraints exclude all Go files" rather than anything about avo.
 //go:generate go run . -out ../chacha20poly1305_amd64.s -pkg chacha20poly1305
+//go:generate go run . -avx512 -out ../chacha20poly1305_avx512_amd64.s -pkg chacha20poly1305
 
 var (
 	// General register allocation
@@ -102,11 +105,19 @@ var (
 const ThatPeskyUnicodeDot = "\u00b7"
 
 func main() {
+	// avo registers its own flags into flag.CommandLine at package init and Generate() calls flag.Parse() only when it has not been parsed already, so parsing here picks up both flag sets and Generate() then sees them as parsed.
+	flag.Parse()
+
 	Package("github.com/tailscale/wireguard-go/tsasm/amd64/chacha20poly1305")
 	ConstraintExpr("gc,!purego")
 	polyHashADInternal()
-	chacha20Poly1305Open()
-	chacha20Poly1305Seal()
+	if *avx512 {
+		chacha20Poly1305SealAVX512()
+		chacha20Poly1305OpenAVX512()
+	} else {
+		chacha20Poly1305Open()
+		chacha20Poly1305Seal()
+	}
 	Generate()
 
 	var internalFunctions []string = []string{"·polyHashADInternal"}
@@ -116,6 +127,12 @@ func main() {
 
 // annotateRequires corrects the "Requires:" comment avo emits above each TEXT block. avo derives that line from the instructions it knows it generated, but the two rotate macros are emitted as raw #define text, so avo cannot see the PSHUFB inside them and reports an SSE2 floor for a kernel that will execute an SSSE3 instruction. Left alone the kernel claims "Requires: CMOV, SSE2", which is exactly what a maintainer would read before concluding the HasSSSE3 gate in chacha20poly1305.go is unnecessary. Dropping that gate would fault on every pre-SSSE3 amd64 part: NetBurst, K8, K10 and Llano.
 func annotateRequires(target string) {
+	if *avx512 {
+		/*
+			Nothing to correct: the AVX-512 kernel emits no #define macro, so avo sees every instruction and its Requires lines are accurate. Both entry points list AVX512BW, for the VMOVDQU8 and KMOVQ of their masked partial blocks.
+		*/
+		return
+	}
 	b, err := os.ReadFile(target)
 	if err != nil {
 		panic(err)
@@ -145,8 +162,18 @@ func outputPath() string {
 			}
 		}
 	}
+	if *avx512 {
+		return "../chacha20poly1305_avx512_amd64.s"
+	}
 	return "../chacha20poly1305_amd64.s"
 }
+
+/*
+avx512 selects the fused AVX-512 kernel instead of the SSSE3 one. The two share only this file's scaffolding: the additional-data hashing helper, the output path, and the post-processing of avo's output. Everything else lives in avx512.go.
+
+A flag rather than a second main package because avo's Package() and Generate() are process-global, so one binary can emit exactly one object per run.
+*/
+var avx512 = flag.Bool("avx512", false, "emit the fused AVX-512 kernel instead of the SSSE3 one")
 
 // Utility function to emit BYTE instruction
 func BYTE(u8 U8) {
@@ -537,6 +564,45 @@ func polyMul() {
 	polyMulReduceStage()
 }
 
+/*
+The BMI2 form of the same multiply, used by the AVX-512 kernel.
+
+MULXQ takes an explicit destination pair and writes no flags, which removes the RAX/RDX shuffling MULQ forces and leaves the flags free for the surrounding adds. x/crypto carried these as polyMulStage*_AVX2 because its AVX2 kernel was their only caller, but what they require is BMI2 rather than AVX2 and there is no AVX2 kernel here, so they are named for what they need.
+
+Safe because the AVX-512 dispatch requires BMI2 and nothing outside the AVX-512 kernel calls them.
+*/
+func polyMulStage1BMI2() {
+	MOVQ(Mem{Base: BP}.Offset(0*8), RDX)
+	MOVQ(RDX, t2)
+	MULXQ(acc0, t0, t1)
+	IMULQ(acc2, t2)
+	MULXQ(acc1, RAX, RDX)
+	ADDQ(RAX, t1)
+	ADCQ(RDX, t2)
+}
+
+func polyMulStage2BMI2() {
+	MOVQ(Mem{Base: BP}.Offset(1*8), RDX)
+	MULXQ(acc0, acc0, RAX)
+	ADDQ(acc0, t1)
+	MULXQ(acc1, acc1, t3)
+	ADCQ(acc1, t2)
+	ADCQ(Imm(0), t3)
+}
+
+func polyMulStage3BMI2() {
+	IMULQ(acc2, RDX)
+	ADDQ(RAX, t2)
+	ADCQ(RDX, t3)
+}
+
+func polyMulBMI2() {
+	polyMulStage1BMI2()
+	polyMulStage2BMI2()
+	polyMulStage3BMI2()
+	polyMulReduceStage()
+}
+
 // ----------------------------------------------------------------------------
 // ----------------------------------------------------------------------------
 
@@ -545,10 +611,17 @@ func polyHashADInternal() {
 	Attributes(NOSPLIT)
 	AllocLocal(0)
 
-	Comment("Hack: Must declare #define macros inside of a function due to Avo constraints")
-	defineROL()
-	defineROL8()
-	defineROL16()
+	/*
+		Hack: Must declare #define macros inside of a function due to Avo constraints.
+
+		Skipped for the AVX-512 kernel, which rotates with VPROLD and invokes none of these. Emitting them there put three SSE macro definitions, and the ·rol8<> and ·rol16<> tables they name, into the first thirty lines of a file whose whole point is that it uses no SSE. Harmless, but a reviewer opening an AVX-512 kernel and finding PSHUFB at the top stops to work out why.
+	*/
+	if !*avx512 {
+		Comment("Hack: Must declare #define macros inside of a function due to Avo constraints")
+		defineROL()
+		defineROL8()
+		defineROL16()
+	}
 
 	// adp points to beginning of additional data
 	// itr2 holds ad length
