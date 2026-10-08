@@ -661,6 +661,16 @@ type NewPeerConfig struct {
 	// value disables the optional WireGuard pre-shared-key layer.
 	PresharedKey NoisePresharedKey
 
+	// Hybrid is whether to use a hybrid post-quantum handshake with this peer.
+	//
+	// The hybrid handshake grants forward secrecy to session traffic in the face of a
+	// quantum attacker. That is, an attacker who records traffic today and acquires a quantum
+	// computer in the future will not be able to decrypt the recorded traffic.
+	//
+	// Both peers must agree on this setting to communicate, there is no fallback between
+	// handshake types.
+	Hybrid bool
+
 	// Endpoint, if non-nil, sets the endpoint for newly created peers.
 	// The endpoint is pinned for the lifetime of the peer.
 	Endpoint conn.Endpoint
