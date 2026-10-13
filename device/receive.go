@@ -137,7 +137,7 @@ func (device *Device) RoutineReceiveIncoming(recvName string, maxBatchSize int, 
 			// check size of packet
 
 			packet := meta.Bytes(buf.slab)
-			msgType := binary.LittleEndian.Uint32(packet[:4])
+			msgType, _ := parseTypeField(packet)
 
 			switch msgType {
 
@@ -367,7 +367,7 @@ func (device *Device) RoutineHandshake(id int) {
 			device.log.Verbosef("%v - Received handshake initiation", peer)
 			peer.rxBytes.Add(uint64(len(elem.packet)))
 
-			peer.SendHandshakeResponse()
+			peer.SendHandshakeResponse(msg.IsRetry)
 
 		case MessageResponseType:
 

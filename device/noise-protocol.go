@@ -81,6 +81,39 @@ const (
 	MessageTransportOffsetContent  = 16
 )
 
+const (
+	handshakeRetryMask = uint32(1 << 31)
+	messageTypeMask    = ^handshakeRetryMask
+)
+
+// PacketIsRetry reports whether the given packet appears to be a retried handshake.
+//
+// Clients can use this to route retried handshake packets over more reliable but
+// costlier data paths, to improve handshake success rates on problematic networks.
+//
+// The returned indication is a hint with no cryptographic assurance. The caller
+// must not make any security critical decisions based on this indication.
+//
+// Retries are a Tailscale specific feature of handshake packets. PacketIsRetry
+// always returns false for standard WireGuard handshake packets.
+func PacketIsRetry(b []byte) bool {
+	_, isRetry := parseTypeField(b)
+	return isRetry
+}
+
+func parseTypeField(b []byte) (uint32, bool) {
+	v := binary.LittleEndian.Uint32(b)
+	return v & messageTypeMask, (v & handshakeRetryMask) != 0
+}
+
+func putTypeField(b []byte, typ uint32, isRetry bool) {
+	m := uint32(0)
+	if isRetry {
+		m = handshakeRetryMask
+	}
+	binary.LittleEndian.PutUint32(b, typ|m)
+}
+
 /* Type is an 8-bit field, followed by 3 nul bytes,
  * by marshalling the messages in little-endian byteorder
  * we can treat these as a 32-bit unsigned int (for now)
@@ -89,6 +122,7 @@ const (
 
 type MessageInitiation struct {
 	Type         uint32
+	IsRetry      bool
 	Sender       uint32
 	Ephemeral    NoisePublicKey
 	HasKEM       bool
@@ -101,6 +135,7 @@ type MessageInitiation struct {
 
 type MessageResponse struct {
 	Type         uint32
+	IsRetry      bool
 	Sender       uint32
 	Receiver     uint32
 	Ephemeral    NoisePublicKey
@@ -132,7 +167,7 @@ func (msg *MessageInitiation) unmarshal(b []byte) error {
 		return errMessageLengthMismatch
 	}
 
-	msg.Type = binary.LittleEndian.Uint32(b)
+	msg.Type, msg.IsRetry = parseTypeField(b)
 	msg.Sender = binary.LittleEndian.Uint32(b[4:])
 	copy(msg.Ephemeral[:], b[8:])
 	off := 8 + len(msg.Ephemeral)
@@ -154,7 +189,7 @@ func (msg *MessageInitiation) marshal(b []byte) error {
 		return errMessageLengthMismatch
 	}
 
-	binary.LittleEndian.PutUint32(b, msg.Type)
+	putTypeField(b, msg.Type, msg.IsRetry)
 	binary.LittleEndian.PutUint32(b[4:], msg.Sender)
 	copy(b[8:], msg.Ephemeral[:])
 	off := 8 + len(msg.Ephemeral)
@@ -175,7 +210,7 @@ func (msg *MessageResponse) unmarshal(b []byte) error {
 		return errMessageLengthMismatch
 	}
 
-	msg.Type = binary.LittleEndian.Uint32(b)
+	msg.Type, msg.IsRetry = parseTypeField(b)
 	msg.Sender = binary.LittleEndian.Uint32(b[4:])
 	msg.Receiver = binary.LittleEndian.Uint32(b[8:])
 	copy(msg.Ephemeral[:], b[12:])
@@ -197,7 +232,7 @@ func (msg *MessageResponse) marshal(b []byte) error {
 		return errMessageLengthMismatch
 	}
 
-	binary.LittleEndian.PutUint32(b, msg.Type)
+	putTypeField(b, msg.Type, msg.IsRetry)
 	binary.LittleEndian.PutUint32(b[4:], msg.Sender)
 	binary.LittleEndian.PutUint32(b[8:], msg.Receiver)
 	copy(b[12:], msg.Ephemeral[:])

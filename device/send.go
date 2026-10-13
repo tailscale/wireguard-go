@@ -194,6 +194,9 @@ func (peer *Peer) SendHandshakeInitiation(isRetry bool) error {
 		peer.device.log.Errorf("%v - Failed to create initiation message: %v", peer, err)
 		return err
 	}
+	if msg.HasKEM {
+		msg.IsRetry = isRetry
+	}
 
 	sz := MessageInitiationSize
 	if msg.HasKEM {
@@ -229,7 +232,7 @@ func (peer *Peer) SendHandshakeInitiation(isRetry bool) error {
 	return err
 }
 
-func (peer *Peer) SendHandshakeResponse() error {
+func (peer *Peer) SendHandshakeResponse(isRetry bool) error {
 	peer.handshake.mutex.Lock()
 	peer.handshake.lastSentHandshake = time.Now()
 	peer.handshake.mutex.Unlock()
@@ -240,6 +243,9 @@ func (peer *Peer) SendHandshakeResponse() error {
 	if err != nil {
 		peer.device.log.Errorf("%v - Failed to create response message: %v", peer, err)
 		return err
+	}
+	if response.HasKEM {
+		response.IsRetry = isRetry
 	}
 
 	sz := MessageResponseSize
