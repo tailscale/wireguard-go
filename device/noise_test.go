@@ -397,3 +397,59 @@ func TestHybridResponderOnly(t *testing.T) {
 		t.Fatal("responder accepted classical handshake when configured for hybrid handshake")
 	}
 }
+
+func TestRetryEncoding(t *testing.T) {
+	init := MessageInitiation{Type: MessageInitiationType}
+	bs := make([]byte, MessageInitiationSize)
+	init.marshal(bs)
+	if got, want := binary.LittleEndian.Uint32(bs), uint32(MessageInitiationType); got != want {
+		t.Fatalf("wrong message type for classical initiation: got %v, want %v ", got, want)
+	}
+
+	resp := MessageResponse{Type: MessageResponseType}
+	bs = make([]byte, MessageResponseSize)
+	resp.marshal(bs)
+	if got, want := binary.LittleEndian.Uint32(bs), uint32(MessageResponseType); got != want {
+		t.Fatalf("wrong message type for classical response: got %v, want %v ", got, want)
+	}
+
+	init = MessageInitiation{Type: MessageInitiationType, HasKEM: true}
+	bs = make([]byte, MessageHybridInitiationSize)
+	init.marshal(bs)
+	if got, want := binary.LittleEndian.Uint32(bs), uint32(MessageInitiationType); got != want {
+		t.Fatalf("wrong message type for hybrid initiation: got %v, want %v ", got, want)
+	}
+	if PacketIsRetry(bs) {
+		t.Fatal("packet is retry, want non-retry")
+	}
+
+	resp = MessageResponse{Type: MessageResponseType, HasKEM: true}
+	bs = make([]byte, MessageHybridResponseSize)
+	resp.marshal(bs)
+	if got, want := binary.LittleEndian.Uint32(bs), uint32(MessageResponseType); got != want {
+		t.Fatalf("wrong message type for hybrid response: got %v, want %v ", got, want)
+	}
+	if PacketIsRetry(bs) {
+		t.Fatal("packet is retry, want non-retry")
+	}
+
+	init = MessageInitiation{Type: MessageInitiationType, HasKEM: true, IsRetry: true}
+	bs = make([]byte, MessageHybridInitiationSize)
+	init.marshal(bs)
+	if got, want := binary.LittleEndian.Uint32(bs), uint32(MessageInitiationType)|handshakeRetryMask; got != want {
+		t.Fatalf("wrong message type for hybrid initiation with retry: got %v, want %v ", got, want)
+	}
+	if !PacketIsRetry(bs) {
+		t.Fatal("packet is non-retry, want retry")
+	}
+
+	resp = MessageResponse{Type: MessageResponseType, HasKEM: true, IsRetry: true}
+	bs = make([]byte, MessageHybridResponseSize)
+	resp.marshal(bs)
+	if got, want := binary.LittleEndian.Uint32(bs), uint32(MessageResponseType)|handshakeRetryMask; got != want {
+		t.Fatalf("wrong message type for hybrid response with retry: got %v, want %v ", got, want)
+	}
+	if !PacketIsRetry(bs) {
+		t.Fatal("packet is non-retry, want retry")
+	}
+}
