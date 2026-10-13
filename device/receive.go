@@ -405,7 +405,11 @@ func (device *Device) RoutineHandshake(id int) {
 				goto skip
 			}
 
-			device.config.metrics.HandshakeInitiatorCompleted.Add(1)
+			if msg.HasKEM {
+				device.config.metrics.HandshakeHybridInitiatorCompleted.Add(1)
+			} else {
+				device.config.metrics.HandshakeInitiatorCompleted.Add(1)
+			}
 			peer.timersSessionDerived()
 			peer.timersHandshakeComplete()
 			peer.SendPriorityMessage()
@@ -473,7 +477,11 @@ func (peer *Peer) processInboundContainer(elemsContainer *QueueInboundElementsCo
 
 		validTailPacket = i
 		if peer.ReceivedWithKeypair(elem.keypair) {
-			peer.device.config.metrics.HandshakeResponderCompleted.Add(1)
+			if elem.keypair.isHybrid {
+				peer.device.config.metrics.HandshakeHybridResponderCompleted.Add(1)
+			} else {
+				peer.device.config.metrics.HandshakeResponderCompleted.Add(1)
+			}
 			peer.timersHandshakeComplete()
 			peer.SendPriorityMessage()
 			peer.SendStagedPackets()

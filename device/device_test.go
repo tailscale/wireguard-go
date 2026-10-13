@@ -16,6 +16,7 @@ import (
 	"os"
 	"runtime"
 	"runtime/pprof"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -52,7 +53,7 @@ func uapiCfg(cfg ...string) string {
 
 // genConfigs generates a pair of configs that connect to each other.
 // The configs use distinct, probably-usable ports.
-func genConfigs(tb testing.TB) (cfgs, endpointCfgs [2]string) {
+func genConfigs(tb testing.TB, hybrid bool) (cfgs, endpointCfgs [2]string) {
 	var key1, key2 NoisePrivateKey
 	_, err := rand.Read(key1[:])
 	if err != nil {
@@ -72,6 +73,7 @@ func genConfigs(tb testing.TB) (cfgs, endpointCfgs [2]string) {
 		"protocol_version", "1",
 		"replace_allowed_ips", "true",
 		"allowed_ip", "1.0.0.2/32",
+		"hybrid", strconv.FormatBool(hybrid),
 	)
 	endpointCfgs[0] = uapiCfg(
 		"public_key", hex.EncodeToString(pub2[:]),
@@ -85,6 +87,7 @@ func genConfigs(tb testing.TB) (cfgs, endpointCfgs [2]string) {
 		"protocol_version", "1",
 		"replace_allowed_ips", "true",
 		"allowed_ip", "1.0.0.1/32",
+		"hybrid", strconv.FormatBool(hybrid),
 	)
 	endpointCfgs[1] = uapiCfg(
 		"public_key", hex.EncodeToString(pub1[:]),
@@ -151,12 +154,12 @@ func (pair *testPair) Send(tb testing.TB, ping SendDirection, done chan struct{}
 }
 
 // genTestPair creates a testPair.
-func genTestPair(tb testing.TB, realSocket bool, opts ...Option) (pair testPair) {
-	return genTestPairQueues(tb, realSocket, 1, opts...)
+func genTestPair(tb testing.TB, realSocket bool, hybrid bool, opts ...Option) (pair testPair) {
+	return genTestPairQueues(tb, realSocket, hybrid, 1, opts...)
 }
 
-func genTestPairQueues(tb testing.TB, realSocket bool, queues int, opts ...Option) (pair testPair) {
-	cfg, endpointCfg := genConfigs(tb)
+func genTestPairQueues(tb testing.TB, realSocket bool, hybrid bool, queues int, opts ...Option) (pair testPair) {
+	cfg, endpointCfg := genConfigs(tb, hybrid)
 	var binds [2]conn.Bind
 	if realSocket {
 		binds[0], binds[1] = conn.NewDefaultBind(), conn.NewDefaultBind()
@@ -215,7 +218,7 @@ func TestPriorityMessageOnEstablishment(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			goroutineLeakCheck(t)
-			pair := genTestPair(t, true)
+			pair := genTestPair(t, true, false)
 			prioritySender, priorityReceiver := pair[0], pair[1]
 			if tc.prioritySenderIsHandshakeInitiator {
 				prioritySender, priorityReceiver = pair[1], pair[0]
@@ -292,7 +295,7 @@ func TestTwoDevicePing(t *testing.T) { forEachQueueCount(t, testTwoDevicePing) }
 
 func testTwoDevicePing(t *testing.T, queues int) {
 	goroutineLeakCheck(t)
-	pair := genTestPairQueues(t, true, queues)
+	pair := genTestPairQueues(t, true, false, queues)
 	t.Run("ping 1.0.0.1", func(t *testing.T) {
 		pair.Send(t, Ping, nil)
 	})
@@ -309,7 +312,7 @@ func testUpDown(t *testing.T, queues int) {
 	const otrials = 10
 
 	for n := 0; n < otrials; n++ {
-		pair := genTestPairQueues(t, false, queues)
+		pair := genTestPairQueues(t, false, false, queues)
 		for i := range pair {
 			for k := range pair[i].dev.peers.keyMap {
 				pair[i].dev.IpcSet(fmt.Sprintf("public_key=%s\npersistent_keepalive_interval=1\n", hex.EncodeToString(k[:])))
@@ -345,7 +348,7 @@ func testUpDown(t *testing.T, queues int) {
 func TestConcurrencySafety(t *testing.T) { forEachQueueCount(t, testConcurrencySafety) }
 
 func testConcurrencySafety(t *testing.T, queues int) {
-	pair := genTestPairQueues(t, true, queues)
+	pair := genTestPairQueues(t, true, false, queues)
 	done := make(chan struct{})
 
 	const warmupIters = 10
@@ -426,7 +429,7 @@ func testConcurrencySafety(t *testing.T, queues int) {
 }
 
 func BenchmarkLatency(b *testing.B) {
-	pair := genTestPair(b, true)
+	pair := genTestPair(b, true, false)
 
 	// Establish a connection.
 	pair.Send(b, Ping, nil)
@@ -440,7 +443,7 @@ func BenchmarkLatency(b *testing.B) {
 }
 
 func BenchmarkThroughput(b *testing.B) {
-	pair := genTestPair(b, true)
+	pair := genTestPair(b, true, false)
 
 	// Establish a connection.
 	pair.Send(b, Ping, nil)
@@ -484,7 +487,7 @@ func BenchmarkThroughput(b *testing.B) {
 }
 
 func BenchmarkUAPIGet(b *testing.B) {
-	pair := genTestPair(b, true)
+	pair := genTestPair(b, true, false)
 	pair.Send(b, Ping, nil)
 	pair.Send(b, Pong, nil)
 	b.ReportAllocs()
@@ -883,12 +886,47 @@ func TestMessageInitiationMetrics(t *testing.T) {
 func TestHandshakeMetrics(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		var initial, retry, response, initiatorCompleted, responderCompleted expvar.Int
-		pair := genTestPair(t, false, WithMetrics(Metrics{
+		pair := genTestPair(t, false, false, WithMetrics(Metrics{
 			MessageInitiationTXAttemptInitial: &initial,
 			MessageInitiationTXAttemptRetry:   &retry,
 			MessageResponseTXAttempt:          &response,
 			HandshakeInitiatorCompleted:       &initiatorCompleted,
 			HandshakeResponderCompleted:       &responderCompleted,
+		}))
+
+		pair.Send(t, Ping, nil)
+		// pair.Send returns only after the encrypted packet crosses the tunnel,
+		// so the handshake must have completed. Within the synctest bubble, the
+		// handshake runs without advancing fake time, so no initiation retry
+		// can race with the assertions below.
+		metricAssertions := []struct {
+			name    string
+			counter *expvar.Int
+			want    int64
+		}{
+			{"initial attempts", &initial, 1},
+			{"retry attempts", &retry, 0},
+			{"response attempts", &response, 1},
+			{"initiator completions", &initiatorCompleted, 1},
+			{"responder completions", &responderCompleted, 1},
+		}
+		for _, tt := range metricAssertions {
+			if got := tt.counter.Value(); got != tt.want {
+				t.Errorf("%s = %d, want %d", tt.name, got, tt.want)
+			}
+		}
+	})
+}
+
+func TestHybridHandshakeMetrics(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var initial, retry, response, initiatorCompleted, responderCompleted expvar.Int
+		pair := genTestPair(t, false, true, WithMetrics(Metrics{
+			MessageHybridInitiationTXAttemptInitial: &initial,
+			MessageHybridInitiationTXAttemptRetry:   &retry,
+			MessageHybridResponseTXAttempt:          &response,
+			HandshakeHybridInitiatorCompleted:       &initiatorCompleted,
+			HandshakeHybridResponderCompleted:       &responderCompleted,
 		}))
 
 		pair.Send(t, Ping, nil)
