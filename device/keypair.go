@@ -27,9 +27,11 @@ type Keypair struct {
 	receive      cipher.AEAD
 	replayFilter replay.Filter
 	isInitiator  bool
-	created      time.Time
-	localIndex   uint32
-	remoteIndex  uint32
+	// isHybrid is whether the keypair was derived from a hybrid IKhfs+psk2 handshake.
+	isHybrid    bool
+	created     time.Time
+	localIndex  uint32
+	remoteIndex uint32
 }
 
 type Keypairs struct {
