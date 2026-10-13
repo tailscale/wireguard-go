@@ -817,6 +817,7 @@ func (peer *Peer) BeginSymmetricSession() error {
 	setZero(handshake.chainKey[:])
 	setZero(handshake.hash[:]) // Doesn't necessarily need to be zeroed. Could be used for something interesting down the line.
 	setZero(handshake.localEphemeral[:])
+	isHybrid := handshake.localKEM != nil || handshake.remoteKEM != nil
 	handshake.localKEM = nil
 	handshake.remoteKEM = nil
 	peer.handshake.state = handshakeZeroed
@@ -833,6 +834,7 @@ func (peer *Peer) BeginSymmetricSession() error {
 	keypair.created = time.Now()
 	keypair.replayFilter.Reset()
 	keypair.isInitiator = isInitiator
+	keypair.isHybrid = isHybrid
 	keypair.localIndex = peer.handshake.localIndex
 	keypair.remoteIndex = peer.handshake.remoteIndex
 
