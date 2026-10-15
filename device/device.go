@@ -226,21 +226,37 @@ type Metrics struct {
 	// MessageInitiationTXAttemptInitial counts non-retry handshake
 	// initiation messages passed to the network send path.
 	MessageInitiationTXAttemptInitial Counter
+	// MessageHybridInitiationTXAttemptInitial counts non-retry hybrid
+	// handshake initiation messages passed to the network send path.
+	MessageHybridInitiationTXAttemptInitial Counter
 	// MessageInitiationTXAttemptRetry counts retry handshake initiation
 	// messages passed to the network send path.
 	MessageInitiationTXAttemptRetry Counter
+	// MessageHybridInitiationTXAttemptRetry counts retry hybrid handshake
+	// initiation messages passed to the network send path.
+	MessageHybridInitiationTXAttemptRetry Counter
 	// MessageResponseTXAttempt counts handshake response messages passed to the
 	// network send path.
 	MessageResponseTXAttempt Counter
+	// MessageHybridResponseTXAttempt counts hybrid handshake response messages passed
+	// to the network send path.
+	MessageHybridResponseTXAttempt Counter
 	// MessageCookieReplyTXAttempt counts cookie reply messages passed to the
 	// network send path.
 	MessageCookieReplyTXAttempt Counter
 	// HandshakeInitiatorCompleted counts symmetric session establishment on the
 	// initiator side.
 	HandshakeInitiatorCompleted Counter
+	// HandshakeHybridInitiatorCompleted counts hybrid symmetric session establishment
+	// on the initiator side.
+	HandshakeHybridInitiatorCompleted Counter
 	// HandshakeResponderCompleted counts responder-side handshake completions,
 	// observed when an authenticated transport packet confirms the new keypair.
 	HandshakeResponderCompleted Counter
+	// HandshakeHybridResponderCompleted counts responder-side hybrid handshake
+	// completions, observed when an authenticated transport packet confirms the
+	// new keypair.
+	HandshakeHybridResponderCompleted Counter
 	// MessageTransportRXDroppedReplay counts inbound transport packets rejected by the
 	// replay filter.
 	MessageTransportRXDroppedReplay Counter
@@ -256,11 +272,20 @@ func (m *Metrics) fillNils() {
 	if m.MessageInitiationTXAttemptInitial == nil {
 		m.MessageInitiationTXAttemptInitial = noopCounter{}
 	}
+	if m.MessageHybridInitiationTXAttemptInitial == nil {
+		m.MessageHybridInitiationTXAttemptInitial = noopCounter{}
+	}
 	if m.MessageInitiationTXAttemptRetry == nil {
 		m.MessageInitiationTXAttemptRetry = noopCounter{}
 	}
+	if m.MessageHybridInitiationTXAttemptRetry == nil {
+		m.MessageHybridInitiationTXAttemptRetry = noopCounter{}
+	}
 	if m.MessageResponseTXAttempt == nil {
 		m.MessageResponseTXAttempt = noopCounter{}
+	}
+	if m.MessageHybridResponseTXAttempt == nil {
+		m.MessageHybridResponseTXAttempt = noopCounter{}
 	}
 	if m.MessageCookieReplyTXAttempt == nil {
 		m.MessageCookieReplyTXAttempt = noopCounter{}
@@ -268,8 +293,14 @@ func (m *Metrics) fillNils() {
 	if m.HandshakeInitiatorCompleted == nil {
 		m.HandshakeInitiatorCompleted = noopCounter{}
 	}
+	if m.HandshakeHybridInitiatorCompleted == nil {
+		m.HandshakeHybridInitiatorCompleted = noopCounter{}
+	}
 	if m.HandshakeResponderCompleted == nil {
 		m.HandshakeResponderCompleted = noopCounter{}
+	}
+	if m.HandshakeHybridResponderCompleted == nil {
+		m.HandshakeHybridResponderCompleted = noopCounter{}
 	}
 	if m.MessageTransportRXDroppedReplay == nil {
 		m.MessageTransportRXDroppedReplay = noopCounter{}

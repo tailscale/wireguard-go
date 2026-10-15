@@ -27,6 +27,7 @@ type Keypair struct {
 	receive      cipher.AEAD
 	replayFilter replay.Filter
 	isInitiator  bool
+	isHybrid     bool
 	created      time.Time
 	localIndex   uint32
 	remoteIndex  uint32
