@@ -4,6 +4,8 @@
 
 /*
 Package chacha20poly1305 provides a ChaCha20-Poly1305 AEAD backed by the SSE assembly kernel golang.org/x/crypto deleted in commit 7ee5970 ("chacha20poly1305: drop pre-AVX assembly impl", v0.52.0). It is used on amd64 CPUs with SSSE3 that cannot use x/crypto's AVX2 kernel.
+
+It also carries a fused AVX-512 kernel, which New picks on CPUs that can run it (see AvailableAVX512). Whether a given CPU should use this package at all is decided by the caller, in wireguard-go's device package.
 */
 package chacha20poly1305
 
@@ -24,8 +26,20 @@ const (
 	Overhead  = 16
 )
 
-// Available reports whether this CPU can run the kernel, which requires SSSE3.
+// Available reports whether this CPU can run the SSSE3 kernel.
 func Available() bool { return cpu.X86.HasSSSE3 }
+
+/*
+AvailableAVX512 reports whether this CPU can run the fused AVX-512 kernel.
+
+The features are read off the generated assembly rather than off the tier's name. AVX for the VZEROUPPER on the way out, which every AVX-512 part has but GODEBUG can mask separately. AVX512BW because partial blocks, every one in the short path and the last group in the long one, are loaded and stored under byte masks with VMOVDQU8 and KMOVQ, and BMI2 because the Poly1305 chain multiplies with MULXQ. AVX512VL is not required, since the kernel issues no 128-bit or 256-bit EVEX operation, and ADX is not required, since the carry chain uses ADCQ rather than ADCXQ and ADOXQ. Gating on AVX512F alone would fault on a part with F but not BW.
+*/
+func AvailableAVX512() bool {
+	return avx512Usable(cpu.X86.HasAVX, cpu.X86.HasAVX512F, cpu.X86.HasAVX512BW, cpu.X86.HasBMI2)
+}
+
+// avx512Usable is AvailableAVX512's rule as a pure function, so a test can cover combinations no real CPU in the lab has.
+func avx512Usable(avx, f, bw, bmi2 bool) bool { return avx && f && bw && bmi2 }
 
 //go:noescape
 func chacha20Poly1305Open(dst []byte, key []uint32, src []byte, ad []byte) bool
@@ -33,22 +47,34 @@ func chacha20Poly1305Open(dst []byte, key []uint32, src []byte, ad []byte) bool
 //go:noescape
 func chacha20Poly1305Seal(dst []byte, key []uint32, src []byte, ad []byte)
 
+//go:noescape
+func chacha20Poly1305OpenAVX512(dst []byte, key []uint32, src []byte, ad []byte) bool
+
+//go:noescape
+func chacha20Poly1305SealAVX512(dst []byte, key []uint32, src []byte, ad []byte)
+
 type aead struct {
-	key [KeySize]byte
+	key    [KeySize]byte
+	avx512 bool // use the fused AVX-512 kernel, at every length
 }
 
-// New returns a ChaCha20-Poly1305 AEAD using the assembly kernel.
+// New returns a ChaCha20-Poly1305 AEAD using the best assembly kernel this CPU can run: the fused AVX-512 one where it is available, otherwise the SSSE3 one.
 func New(key []byte) (cipher.AEAD, error) {
-	// Delegate to x/crypto rather than checking the key length here: its New also
-	// refuses ChaCha20-Poly1305 under fips140=only, and this package is reached
-	// instead of x/crypto on the CPUs it covers.
+	avx512 := AvailableAVX512()
+	if !avx512 && !Available() {
+		return nil, errors.New("chacha20poly1305: CPU lacks SSSE3")
+	}
+	return newAEAD(key, avx512)
+}
+
+/*
+newAEAD builds an AEAD on the named kernel. The key check is delegated to x/crypto rather than done here: its New also refuses ChaCha20-Poly1305 under fips140=only, and this package is reached instead of x/crypto on the CPUs it covers. The instance itself is not needed.
+*/
+func newAEAD(key []byte, avx512 bool) (*aead, error) {
 	if _, err := xchacha20poly1305.New(key); err != nil {
 		return nil, err
 	}
-	if !Available() {
-		return nil, errors.New("chacha20poly1305: CPU lacks SSSE3")
-	}
-	a := &aead{}
+	a := &aead{avx512: avx512}
 	copy(a.key[:], key)
 	return a, nil
 }
@@ -97,7 +123,11 @@ func (a *aead) Seal(dst, nonce, plaintext, additionalData []byte) []byte {
 	if anyOverlap(out, additionalData) {
 		panic("chacha20poly1305: invalid buffer overlap of output and additional data")
 	}
-	chacha20Poly1305Seal(out[:], state[:], plaintext, additionalData)
+	if a.avx512 {
+		chacha20Poly1305SealAVX512(out[:], state[:], plaintext, additionalData)
+	} else {
+		chacha20Poly1305Seal(out[:], state[:], plaintext, additionalData)
+	}
 	return ret
 }
 
@@ -126,7 +156,13 @@ func (a *aead) Open(dst, nonce, ciphertext, additionalData []byte) ([]byte, erro
 	if anyOverlap(out, additionalData) {
 		panic("chacha20poly1305: invalid buffer overlap of output and additional data")
 	}
-	if !chacha20Poly1305Open(out, state[:], ciphertext, additionalData) {
+	var ok bool
+	if a.avx512 {
+		ok = chacha20Poly1305OpenAVX512(out, state[:], ciphertext, additionalData)
+	} else {
+		ok = chacha20Poly1305Open(out, state[:], ciphertext, additionalData)
+	}
+	if !ok {
 		for i := range out {
 			out[i] = 0
 		}

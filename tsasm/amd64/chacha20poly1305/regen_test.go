@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -37,14 +38,30 @@ func TestRegenReproducible(t *testing.T) {
 		t.Skip("regen test is gated: pass --run-regen-tests or set CI=true")
 	}
 
-	const generated = "chacha20poly1305_amd64.s"
+	for _, tc := range []struct {
+		name      string
+		avx512    bool
+		generated string
+	}{
+		{"ssse3", false, "chacha20poly1305_amd64.s"},
+		{"avx512", true, "chacha20poly1305_avx512_amd64.s"},
+	} {
+		t.Run(tc.name, func(t *testing.T) { checkRegen(t, tc.avx512, tc.generated) })
+	}
+}
+
+func checkRegen(t *testing.T, avx512 bool, generated string) {
 	want, err := os.ReadFile(generated)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	out := filepath.Join(t.TempDir(), generated)
-	cmd := exec.Command("go", "run", ".", "-out", out, "-pkg", "chacha20poly1305")
+	args := []string{"run", ".", "-out", out, "-pkg", "chacha20poly1305"}
+	if avx512 {
+		args = append(args, "-avx512")
+	}
+	cmd := exec.Command("go", args...)
 	cmd.Dir = "_asm"
 	/*
 		The generator loads the target package through go/packages to read the signatures of the //go:noescape declarations, so it needs GOARCH=amd64. This test only builds on amd64, so the ambient value is already correct; pin it anyway so a GOARCH override in the environment cannot confuse it.
@@ -126,5 +143,54 @@ func TestUpstreamProvenance(t *testing.T) {
 
 	if n := strings.Count(s, "\n"); n < 4500 || n > 5500 {
 		t.Errorf("generated asm has %d lines, expected ~5021 for the SSE-only kernel", n)
+	}
+}
+
+/*
+TestAVX512KernelIsContained asserts two things about the AVX-512 kernel, both of which a generator slip could break silently.
+
+That it is really AVX-512: the entry points exist and the 512-bit register file and VPROLD are present. VPROLD is the reason this kernel is worth having, because it rotates in one instruction where the SSSE3 kernel needs shift-shift-or, so its absence would mean the rotate had quietly fallen back.
+
+And that AVX-512 stays contained to this file. The SSSE3 kernel runs on CPUs with no AVX-512 at all, so a 512-bit instruction leaking into it is a SIGILL on exactly the hardware this package exists to serve. The tier machinery makes that a one-line mistake in the generator, and nothing else would catch it: every machine that can run the AVX-512 kernel can also run any instruction that leaked.
+*/
+func TestAVX512KernelIsContained(t *testing.T) {
+	b, err := os.ReadFile("chacha20poly1305_avx512_amd64.s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(b)
+
+	for _, want := range []string{
+		"TEXT ·chacha20Poly1305SealAVX512(SB)",
+		"TEXT ·chacha20Poly1305OpenAVX512(SB)",
+		"VPROLD",
+		// Each entry point's own Requires line, which avo writes directly above its TEXT. Both name AVX512BW because both use VMOVDQU8 and KMOVQ under byte masks, and that is what AvailableAVX512 requires BW for.
+		"// Requires: AVX, AVX512BW, AVX512F, BMI2, CMOV\nTEXT ·chacha20Poly1305SealAVX512(SB)",
+		"// Requires: AVX, AVX512BW, AVX512F, BMI2, CMOV\nTEXT ·chacha20Poly1305OpenAVX512(SB)",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("AVX-512 kernel is missing %q", want)
+		}
+	}
+	if n := len(regexp.MustCompile(`\bZ[0-9]+\b`).FindAllString(s, -1)); n < 500 {
+		t.Errorf("AVX-512 kernel names 512-bit registers only %d times, expected ~2000; the vector half may have fallen back to 256-bit", n)
+	}
+
+	// The containment half. MULXQ is allowed to appear here and nowhere else for the same reason: it needs BMI2, which the SSSE3 kernel does not require.
+	zmm := regexp.MustCompile(`\bZ[0-9]+\b`)
+	for _, f := range []string{"chacha20poly1305_amd64.s"} {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := string(b)
+		if zmm.MatchString(s) {
+			t.Errorf("%s names a 512-bit register; it must run on CPUs without AVX-512", f)
+		}
+		for _, absent := range []string{"AVX512", "VPROLD", "MULXQ", "VPADDD"} {
+			if strings.Contains(s, absent) {
+				t.Errorf("%s contains %q, which is above its instruction-set floor", f, absent)
+			}
+		}
 	}
 }
