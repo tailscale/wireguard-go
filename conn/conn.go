@@ -44,6 +44,13 @@ func (r *ReceivedPacket) Bytes(slab []byte) []byte {
 // can return an error without blocking must rate-limit itself.
 type ReceiveFunc func(slab []byte, packets []ReceivedPacket) (n int, err error)
 
+// ReceiveFuncStarter is implemented by a Bind that creates ReceiveFuncs after [Bind.Open], such as one with connected sockets.
+//
+// The device calls SetReceiveFuncStarter before every Open. The Bind calls start for each later ReceiveFunc, and the device runs it with slabs of slabSize bytes and batches of batchSize. start returns false once the Bind is closing, and the ReceiveFunc is then never called. A started ReceiveFunc returns [net.ErrClosed] when its source closes, which ends only its own routine; Close must make all of them return.
+type ReceiveFuncStarter interface {
+	SetReceiveFuncStarter(start func(fn ReceiveFunc, slabSize, batchSize int) bool)
+}
+
 // A Bind listens on a port for both IPv6 and IPv4 UDP traffic.
 //
 // A Bind interface may also be a PeekLookAtSocketFd or BindSocketToInterface,

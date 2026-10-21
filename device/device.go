@@ -49,6 +49,12 @@ type Device struct {
 		netlinkCancel *rwcancel.RWCancel
 		port          uint16 // listening port
 		fwmark        uint32 // mark value (0 = disabled)
+		// started orders startReceiveFunc against closeBindLocked, so no routine joins stopping after the close waits on it.
+		started struct {
+			sync.Mutex
+			open  bool
+			count int // routines started since the device was created, for tests
+		}
 	}
 
 	staticIdentity struct {
@@ -84,6 +90,9 @@ type Device struct {
 		// smallPacketBufs aliases packetBufs when no distinct small packet pool
 		// is used. See [Device.PopulatePools].
 		smallPacketBufs *sync.Pool
+		// Per slab size pools for receive routines started after Open; see [Device.slabGetter].
+		slabsMu   sync.Mutex
+		slabPools map[int]*slabPool
 	}
 
 	queue struct {
@@ -927,12 +936,102 @@ func closeBindLocked(device *Device) error {
 	if netc.netlinkCancel != nil {
 		netc.netlinkCancel.Cancel()
 	}
+	device.setStartsOpen(false)
 	if netc.bind != nil {
 		err = netc.bind.Close()
 	}
 	netc.stopping.Wait()
 	return err
 }
+
+// setStartsOpen sets whether a Bind may start receive routines after Open.
+func (device *Device) setStartsOpen(open bool) {
+	device.net.started.Lock()
+	device.net.started.open = open
+	device.net.started.Unlock()
+}
+
+// startReceiveFunc is the start function given to a [conn.ReceiveFuncStarter].
+func (device *Device) startReceiveFunc(fn conn.ReceiveFunc, slabSize, batchSize int) bool {
+	st := &device.net.started
+	st.Lock()
+	defer st.Unlock()
+	if !st.open {
+		return false
+	}
+	device.net.stopping.Add(1)
+	device.queue.decryption.wg.Add(1)
+	device.queue.handshake.wg.Add(1)
+	st.count++
+	go device.receiveIncoming(fn.PrettyName(), batchSize, fn, device.slabGetter(slabSize))
+	return true
+}
+
+// slabGetter returns a getter for slabs of size bytes from a slabPool shared by every routine reading that size.
+func (device *Device) slabGetter(size int) func() *packetBuf {
+	device.pool.slabsMu.Lock()
+	defer device.pool.slabsMu.Unlock()
+	free := device.pool.slabPools[size]
+	if free == nil {
+		free = newSlabPool(size, max(1, slabMaxBytes/size))
+		if device.pool.slabPools == nil {
+			device.pool.slabPools = make(map[int]*slabPool)
+		}
+		device.pool.slabPools[size] = free
+	}
+	return free.get
+}
+
+/*
+slabPool hands out at most limit slabs of one size and keeps every slab it makes, so the big slabs stay bounded however many sockets share them.
+
+When all of them are in flight, get returns a small slab of one slot instead of waiting. A slab only comes back once every packet in it is written or dropped, so one peer whose packets don't drain can pin every slab, and waiting would stop every other routine sharing the pool. Reading into small slabs keeps those routines going at a small cost in batching until big slabs come back.
+*/
+type slabPool struct {
+	size  int
+	free  chan *packetBuf
+	mu    sync.Mutex
+	made  int
+	limit int
+	small sync.Pool // slabs of smallSize, for when every big one is in flight
+}
+
+func newSlabPool(size, limit int) *slabPool {
+	return &slabPool{size: size, free: make(chan *packetBuf, limit), limit: limit}
+}
+
+// smallSize is the size of the slabs get falls back to: one slot of the largest datagram, or the whole slab size if that's smaller.
+func (p *slabPool) smallSize() int { return min(p.size, slabSmallMax) }
+
+func (p *slabPool) get() *packetBuf {
+	var b *packetBuf
+	select {
+	case b = <-p.free:
+	default:
+		p.mu.Lock()
+		if p.made < p.limit {
+			p.made++
+			p.mu.Unlock()
+			b = newPacketBuf(p.size, p.put)
+		} else {
+			p.mu.Unlock()
+			b, _ = p.small.Get().(*packetBuf)
+			if b == nil {
+				b = newPacketBuf(p.smallSize(), func(b *packetBuf) { p.small.Put(b) })
+			}
+		}
+	}
+	b.incRef()
+	return b
+}
+
+func (p *slabPool) put(b *packetBuf) { p.free <- b }
+
+// slabMaxBytes bounds big slab memory per size. A connected socket with GRO reads into 64 KiB slots that may each hold only a few packets, so an unbounded pool grows large behind a slow TUN writer.
+const slabMaxBytes = 32 << 20
+
+// slabSmallMax is the most a small fallback slab holds: one slot for the largest UDP datagram.
+const slabSmallMax = 1 << 16
 
 func (device *Device) Bind() conn.Bind {
 	device.net.Lock()
@@ -986,15 +1085,22 @@ func (device *Device) BindUpdate() error {
 	var recvFns []conn.ReceiveFunc
 	netc := &device.net
 
+	if st, ok := netc.bind.(conn.ReceiveFuncStarter); ok {
+		st.SetReceiveFuncStarter(device.startReceiveFunc)
+	}
+	device.setStartsOpen(true)
 	recvFns, netc.port, err = netc.bind.Open(netc.port)
 	if err != nil {
+		device.setStartsOpen(false)
 		netc.port = 0
 		return err
 	}
 
 	netc.netlinkCancel, err = device.startRouteListener(netc.bind)
 	if err != nil {
+		device.setStartsOpen(false)
 		netc.bind.Close()
+		netc.stopping.Wait()
 		netc.port = 0
 		return err
 	}

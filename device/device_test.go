@@ -159,13 +159,18 @@ func genTestPair(tb testing.TB, realSocket bool, hybrid bool, opts ...Option) (p
 }
 
 func genTestPairQueues(tb testing.TB, realSocket bool, hybrid bool, queues int, opts ...Option) (pair testPair) {
-	cfg, endpointCfg := genConfigs(tb, hybrid)
 	var binds [2]conn.Bind
 	if realSocket {
 		binds[0], binds[1] = conn.NewDefaultBind(), conn.NewDefaultBind()
 	} else {
 		binds = bindtest.NewChannelBinds()
 	}
+	return genTestPairBinds(tb, binds, hybrid, queues, opts...)
+}
+
+// genTestPairBinds creates a testPair on the given binds.
+func genTestPairBinds(tb testing.TB, binds [2]conn.Bind, hybrid bool, queues int, opts ...Option) (pair testPair) {
+	cfg, endpointCfg := genConfigs(tb, hybrid)
 	// Bring up a ChannelTun for each config.
 	for i := range pair {
 		p := &pair[i]
