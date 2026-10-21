@@ -92,6 +92,13 @@ type Device struct {
 		handshake  *handshakeQueue
 	}
 
+	// staged accounts for packets waiting in peer staged queues while the
+	// packet pools are bounded. See [Device.trimStagedPackets].
+	staged struct {
+		limit int64        // zero if the pools are unbounded; read-only after NewDevice
+		count atomic.Int64 // packets in all peer staged queues, if limit is set
+	}
+
 	tun struct {
 		// Fields in this block are read-only after instantiation.
 		device  tun.Device
@@ -207,6 +214,10 @@ func WithQueueHandshakeSize(size int) Option {
 // not set a size that is too small, which can lead to immediate deadlock, or
 // increase the probability of deadlock once packets start flowing.
 // See tailscale/corp#46396. [DefaultPreallocatedBuffersPerPool] is the default.
+//
+// A nonzero size also limits the packets waiting in staged queues for a
+// handshake to half of size across all peers, dropping the oldest packets of
+// the peers with the most staged first.
 func WithPreallocatedBuffersPerPool(size uint32) Option {
 	return optionFunc(func(config *config) {
 		config.preallocatedBuffersPerPool = size
@@ -518,6 +529,11 @@ func NewDevice(tunDevice tun.Device, bind conn.Bind, logger *Logger, opts ...Opt
 	}
 
 	device.PopulatePools()
+	if n := device.config.preallocatedBuffersPerPool; n > 0 {
+		// Leave at least half of each pool to the TUN readers, the receive
+		// path and packets in flight.
+		device.staged.limit = max(1, int64(n/2))
+	}
 
 	// create queues
 	device.queue.handshake = newHandshakeQueue(device.config.queueHandshakeSize)
