@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net"
 	"net/netip"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -601,10 +602,167 @@ func TestConnectedPortZeroTakesNothing(t *testing.T) {
 	}
 }
 
+// WithConnectedSockets is honoured per Bind, and a send and its reply use the connected socket.
+func TestStdNetBindConnected(t *testing.T) {
+	on := NewStdNetBind(WithConnectedSockets(true)).(*StdNetBind)
+	off := NewStdNetBind(WithConnectedSockets(false)).(*StdNetBind)
+	def := NewStdNetBind().(*StdNetBind)
+	if !on.connected || off.connected || def.connected != connectedByDefault {
+		t.Fatalf("connected: on %v off %v default %v (platform default %v)", on.connected, off.connected, def.connected, connectedByDefault)
+	}
+	if on.BatchSize() != IdealBatchSize {
+		t.Fatalf("BatchSize with connected sockets = %d, want %d", on.BatchSize(), IdealBatchSize)
+	}
+
+	// Without a ReceiveFuncStarter no connected sockets are opened.
+	bare := NewStdNetBind(WithConnectedSockets(true)).(*StdNetBind)
+	if _, _, err := bare.Open(0); err != nil {
+		t.Fatal(err)
+	}
+	if bare.cs != nil {
+		t.Fatal("connected sockets without a ReceiveFuncStarter")
+	}
+	bare.Close()
+
+	peer, peerAP := listenPeer(t, "udp4")
+	starts := startRecorder(on)
+	_, port, err := on.Open(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer on.Close()
+	if on.cs == nil {
+		t.Fatal("no connected sockets after Open")
+	}
+	ep := &StdNetEndpoint{AddrPort: peerAP}
+	from := openPairThroughBind(t, on, ep, peer)
+	if socketTo(on.cs, peerAP) == nil {
+		t.Fatal("no connected socket after sending the threshold's worth")
+	}
+	if from.Port() != port {
+		t.Fatalf("source port %d, want the bind's %d", from.Port(), port)
+	}
+	peer.WriteToUDPAddrPort([]byte("pong"), from)
+	st := waitStarted(t, starts)
+	recv := st.fn
+	slab := make([]byte, st.slabSize)
+	packets := make([]ReceivedPacket, st.batchSize)
+	done := make(chan int, 1)
+	go func() { n, _ := recv(slab, packets); done <- n }()
+	select {
+	case n := <-done:
+		p := packets[0]
+		if n != 1 || string(slab[p.Offset:p.Offset+p.Size]) != "pong" || p.Endpoint.DstToString() != peerAP.String() {
+			t.Fatalf("got %d packets, %q from %v", n, slab[p.Offset:p.Offset+p.Size], p.Endpoint.DstToString())
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("reply never reached the connected ReceiveFunc")
+	}
+}
+
+// Each connected socket gets its own ReceiveFunc through the starter, which Close stops with net.ErrClosed.
+// A refusing starter leaves the pair on the shared socket.
+func TestStdNetBindConnectedStarter(t *testing.T) {
+	if !connectedSupported {
+		t.Skip("no connected sockets on this platform")
+	}
+	type started struct {
+		fn              ReceiveFunc
+		slabSize, nPkts int
+	}
+	for _, refuse := range []bool{false, true} {
+		t.Run(map[bool]string{false: "accepted", true: "refused"}[refuse], func(t *testing.T) {
+			b := NewStdNetBind(WithConnectedSockets(true)).(*StdNetBind)
+			got := make(chan started, 4)
+			b.SetReceiveFuncStarter(func(fn ReceiveFunc, slabSize, batchSize int) bool {
+				if refuse {
+					return false
+				}
+				got <- started{fn, slabSize, batchSize}
+				return true
+			})
+			fns, _, err := b.Open(0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer b.Close()
+			for _, fn := range fns {
+				if strings.Contains(fn.PrettyName(), "receiveFrom") {
+					t.Fatalf("Open returned the connected ReceiveFunc %s; with a starter it should be started per socket", fn.PrettyName())
+				}
+			}
+			peer, peerAP := listenPeer(t, "udp4")
+			ep := &StdNetEndpoint{AddrPort: peerAP}
+			from := openPairThroughBind(t, b, ep, peer)
+			if refuse {
+				select {
+				case <-got:
+					t.Fatal("a refused starter was recorded")
+				default:
+				}
+				if socketTo(b.cs, peerAP) != nil {
+					t.Fatal("a socket the starter refused was kept")
+				}
+				return
+			}
+			var st started
+			select {
+			case st = <-got:
+			case <-time.After(3 * time.Second):
+				t.Fatal("no ReceiveFunc was started for the connected socket")
+			}
+			if socketTo(b.cs, peerAP) == nil {
+				t.Fatal("no connected socket after sending the threshold's worth")
+			}
+			peer.WriteToUDPAddrPort([]byte("pong"), from)
+			slab := make([]byte, st.slabSize)
+			packets := make([]ReceivedPacket, st.nPkts)
+			type res struct {
+				n   int
+				err error
+			}
+			done := make(chan res, 1)
+			go func() { n, err := st.fn(slab, packets); done <- res{n, err} }()
+			select {
+			case r := <-done:
+				p := packets[0]
+				if r.err != nil || r.n != 1 || string(slab[p.Offset:p.Offset+p.Size]) != "pong" || p.Endpoint.DstToString() != peerAP.String() {
+					t.Fatalf("started ReceiveFunc returned %d, %v: %q from %v", r.n, r.err, slab[p.Offset:p.Offset+p.Size], p.Endpoint.DstToString())
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("the reply never reached the started ReceiveFunc")
+			}
+			go func() { n, err := st.fn(slab, packets); done <- res{n, err} }()
+			b.Close()
+			select {
+			case r := <-done:
+				if !errors.Is(r.err, net.ErrClosed) {
+					t.Fatalf("after Close the started ReceiveFunc returned %d, %v; want net.ErrClosed", r.n, r.err)
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("Close did not unblock the started ReceiveFunc")
+			}
+		})
+	}
+}
+
 // startedFn is a ReceiveFunc a Bind asked its ReceiveFuncStarter to run.
 type startedFn struct {
 	fn                  ReceiveFunc
 	slabSize, batchSize int
+}
+
+// startRecorder records each ReceiveFunc b starts, for the test to call.
+func startRecorder(b *StdNetBind) chan startedFn {
+	ch := make(chan startedFn, 16)
+	b.SetReceiveFuncStarter(func(fn ReceiveFunc, slabSize, batchSize int) bool {
+		select {
+		case ch <- startedFn{fn, slabSize, batchSize}:
+		default: // never block: the set holds its lock
+		}
+		return true
+	})
+	return ch
 }
 
 func waitStarted(t *testing.T, ch chan startedFn) startedFn {
