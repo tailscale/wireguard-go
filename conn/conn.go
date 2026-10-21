@@ -91,7 +91,8 @@ func (f optionFunc) apply(config *config) {
 }
 
 type config struct {
-	sockets int
+	sockets   int
+	connected *bool // nil means the default, off
 }
 
 func defaultConfig() config {
@@ -117,6 +118,13 @@ func WithSockets(n int) Option {
 	return optionFunc(func(config *config) {
 		config.sockets = n
 	})
+}
+
+// WithConnectedSockets turns [ConnectedSockets] on or off for a [StdNetBind]. It is off by default and has no effect on Windows, AIX, Solaris and illumos.
+//
+// On Linux the Bind's sockets then use SO_REUSEPORT, so another process of the same user can bind the port and receive some of its traffic.
+func WithConnectedSockets(on bool) Option {
+	return optionFunc(func(c *config) { c.connected = &on })
 }
 
 // MultiSocketBind is a Bind that operates on more than one socket per address

@@ -18,41 +18,6 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func setSrc(ep *StdNetEndpoint, addr netip.Addr, ifidx int32) {
-	var buf []byte
-	if addr.Is4() {
-		buf = make([]byte, unix.CmsgSpace(unix.SizeofInet4Pktinfo))
-		hdr := unix.Cmsghdr{
-			Level: unix.IPPROTO_IP,
-			Type:  unix.IP_PKTINFO,
-		}
-		hdr.SetLen(unix.CmsgLen(unix.SizeofInet4Pktinfo))
-		copy(buf, unsafe.Slice((*byte)(unsafe.Pointer(&hdr)), int(unsafe.Sizeof(hdr))))
-
-		info := unix.Inet4Pktinfo{
-			Ifindex:  ifidx,
-			Spec_dst: addr.As4(),
-		}
-		copy(buf[unix.CmsgLen(0):], unsafe.Slice((*byte)(unsafe.Pointer(&info)), unix.SizeofInet4Pktinfo))
-	} else {
-		buf = make([]byte, unix.CmsgSpace(unix.SizeofInet6Pktinfo))
-		hdr := unix.Cmsghdr{
-			Level: unix.IPPROTO_IPV6,
-			Type:  unix.IPV6_PKTINFO,
-		}
-		hdr.SetLen(unix.CmsgLen(unix.SizeofInet6Pktinfo))
-		copy(buf, unsafe.Slice((*byte)(unsafe.Pointer(&hdr)), int(unsafe.Sizeof(hdr))))
-
-		info := unix.Inet6Pktinfo{
-			Ifindex: uint32(ifidx),
-			Addr:    addr.As16(),
-		}
-		copy(buf[unix.CmsgLen(0):], unsafe.Slice((*byte)(unsafe.Pointer(&info)), unix.SizeofInet6Pktinfo))
-	}
-
-	ep.src = buf
-}
-
 func Test_setSrcControl(t *testing.T) {
 	t.Run("IPv4", func(t *testing.T) {
 		ep := &StdNetEndpoint{

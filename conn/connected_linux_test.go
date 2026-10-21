@@ -5,6 +5,7 @@ package conn
 import (
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"strconv"
 	"strings"
@@ -13,6 +14,40 @@ import (
 
 	"golang.org/x/sys/unix"
 )
+
+// SetMark applies to connected sockets, so their packets do not route back into the tunnel.
+func TestConnectedSocketsCarryTheMark(t *testing.T) {
+	b := NewStdNetBind(WithConnectedSockets(true)).(*StdNetBind)
+	startRecorder(b) // connected sockets need a starter
+	if _, _, err := b.Open(0); err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	if err := b.SetMark(0x1234); err != nil {
+		t.Skipf("SetMark needs CAP_NET_ADMIN: %v", err)
+	}
+	peer, peerAP := listenPeer(t, "udp4")
+	openPairThroughBind(t, b, &StdNetEndpoint{AddrPort: peerAP}, peer)
+	markOf := func() int {
+		cs := socketTo(b.cs, peerAP)
+		if cs == nil {
+			t.Fatal("no connected socket for the peer")
+		}
+		rc, _ := cs.c.SyscallConn()
+		var mark int
+		rc.Control(func(fd uintptr) { mark, _ = unix.GetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_MARK) })
+		return mark
+	}
+	if got := markOf(); got != 0x1234 {
+		t.Fatalf("socket dialled after SetMark has mark %#x, want 0x1234", got)
+	}
+	// Changing the mark closes the sockets so they redial with it.
+	b.SetMark(0x5678)
+	openPairThroughBind(t, b, &StdNetEndpoint{AddrPort: peerAP}, peer)
+	if got := markOf(); got != 0x5678 {
+		t.Fatalf("after changing the mark, socket has %#x, want 0x5678", got)
+	}
+}
 
 // Connected sockets use UDP GRO where available and split a coalesced read back into datagrams.
 // The coalesced counter proves GRO was in effect, since without it the datagrams would arrive intact anyway.
@@ -126,4 +161,48 @@ func canForceBuffers() bool {
 	var ferr error
 	rc.Control(func(fd uintptr) { ferr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_RCVBUFFORCE, 1<<20) })
 	return ferr == nil
+}
+
+// StdNetBind's connected socket uses the endpoint's sticky source, and received packets carry it back. Once it is cleared, sends return to the route's pick.
+func TestStdNetBindConnectedFollowsStickySource(t *testing.T) {
+	other := otherIPv4(t)
+	loopback := netip.AddrFrom4([4]byte{127, 0, 0, 1})
+	b := NewStdNetBind(WithConnectedSockets(true)).(*StdNetBind)
+	starts := startRecorder(b)
+	if _, _, err := b.Open(0); err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+	peer, peerAP := listenPeer(t, "udp4")
+
+	ep := &StdNetEndpoint{AddrPort: peerAP}
+	setSrc(ep, other, 0)
+	from := openPairThroughBind(t, b, ep, peer)
+	if from.Addr() != other {
+		t.Fatalf("with sticky source %v, the connected socket sent from %v", other, from.Addr())
+	}
+	if cs := socketTo(b.cs, peerAP); cs == nil || cs.key.local != other {
+		t.Fatalf("no connected socket on the pair from %v", other)
+	}
+
+	peer.WriteToUDPAddrPort([]byte("pong"), from)
+	st := waitStarted(t, starts)
+	recv := st.fn
+	slab := make([]byte, st.slabSize)
+	packets := make([]ReceivedPacket, st.batchSize)
+	done := make(chan int, 1)
+	go func() { n, _ := recv(slab, packets); done <- n }()
+	select {
+	case n := <-done:
+		if n != 1 || packets[0].Endpoint.SrcIP() != other {
+			t.Fatalf("got %d packets, sticky source %v; want 1 with %v", n, packets[0].Endpoint.SrcIP(), other)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("reply never reached the connected ReceiveFunc")
+	}
+
+	ep.ClearSrc()
+	if from := openPairThroughBind(t, b, ep, peer); from.Addr() != loopback {
+		t.Fatalf("with no sticky source, sent from %v; want the route's pick, %v", from.Addr(), loopback)
+	}
 }

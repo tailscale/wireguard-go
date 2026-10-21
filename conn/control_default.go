@@ -25,6 +25,9 @@ func (e *StdNetEndpoint) SrcToString() string {
 // ({get,set}srcControl feature set, but use alternatively named flags and need
 // ports and require testing.
 
+func setSrc(ep *StdNetEndpoint, addr netip.Addr, ifidx int32) {
+}
+
 // getSrcFromControl parses the control for PKTINFO and if found updates ep with
 // the source information found.
 func getSrcFromControl(control []byte, ep *StdNetEndpoint) {
