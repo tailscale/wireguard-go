@@ -76,6 +76,8 @@ var trackedLocks = []TrackedLock{
 	{ID: "Device.state", OwnerType: "Device", FieldPath: "state", Kind: PlainMutex, DefType: "Device", DefPath: "state"},
 	{ID: "Device.ipcMutex", OwnerType: "Device", FieldPath: "ipcMutex", Kind: ReadWriteMutex, DefType: "Device", DefPath: "ipcMutex"},
 	{ID: "Device.net", OwnerType: "Device", FieldPath: "net", Kind: ReadWriteMutex, DefType: "Device", DefPath: "net"},
+	{ID: "Device.net.started", OwnerType: "Device", FieldPath: "net.started", Kind: PlainMutex, DefType: "Device", DefPath: "net.started"},
+	{ID: "Device.pool.slabsMu", OwnerType: "Device", FieldPath: "pool.slabsMu", Kind: PlainMutex, DefType: "Device", DefPath: "pool.slabsMu"},
 	{ID: "Device.staticIdentity", OwnerType: "Device", FieldPath: "staticIdentity", Kind: ReadWriteMutex, DefType: "Device", DefPath: "staticIdentity"},
 	{ID: "Device.peers", OwnerType: "Device", FieldPath: "peers", Kind: ReadWriteMutex, DefType: "Device", DefPath: "peers"},
 	{ID: "Device.allowedips.mu", OwnerType: "Device", FieldPath: "allowedips.mu", Kind: ReadWriteMutex, DefType: "AllowedIPs", DefPath: "mu"},
@@ -91,6 +93,7 @@ var trackedLocks = []TrackedLock{
 	{ID: "Timer.modifyingLock", OwnerType: "Timer", FieldPath: "modifyingLock", Kind: ReadWriteMutex, DefType: "Timer", DefPath: "modifyingLock"},
 	{ID: "Timer.runningLock", OwnerType: "Timer", FieldPath: "runningLock", Kind: PlainMutex, DefType: "Timer", DefPath: "runningLock"},
 	{ID: "WaitPool.lock", OwnerType: "WaitPool", FieldPath: "lock", Kind: PlainMutex, DefType: "WaitPool", DefPath: "lock"},
+	{ID: "slabPool.mu", OwnerType: "slabPool", FieldPath: "mu", Kind: PlainMutex, DefType: "slabPool", DefPath: "mu"},
 }
 
 // instanceLocalLocks is the set of LockIDs marked InstanceLocal in

@@ -76,6 +76,11 @@ func (peer *Peer) keepKeyFreshReceiving() {
 // is updated.
 // recvName identifies the queue in logs; see [conn.NamesOf].
 func (device *Device) RoutineReceiveIncoming(recvName string, maxBatchSize int, recv conn.ReceiveFunc) {
+	device.receiveIncoming(recvName, maxBatchSize, recv, device.getPacketBuf)
+}
+
+// receiveIncoming is RoutineReceiveIncoming reading into slabs from getBuf.
+func (device *Device) receiveIncoming(recvName string, maxBatchSize int, recv conn.ReceiveFunc, getBuf func() *packetBuf) {
 	defer func() {
 		device.log.Verbosef("Routine: receive incoming %s - stopped", recvName)
 		device.queue.decryption.wg.Done()
@@ -89,7 +94,7 @@ func (device *Device) RoutineReceiveIncoming(recvName string, maxBatchSize int, 
 
 	var (
 		packets = make([]conn.ReceivedPacket, maxBatchSize)
-		buf     = device.getPacketBuf()
+		buf     = getBuf()
 		// bufDirty tracks whether the current buf has been pushed downstream to
 		// crypto and per-peer/handshake functions, or can be re-used across the
 		// next read cycle
@@ -97,7 +102,8 @@ func (device *Device) RoutineReceiveIncoming(recvName string, maxBatchSize int, 
 		err         error
 		count       int
 		deathSpiral int
-		elemsByPeer = make(map[*Peer]*QueueInboundElementsContainer, maxBatchSize)
+		// Capped because a started routine may read many more packets per call, and ranging over a map costs O(capacity).
+		elemsByPeer = make(map[*Peer]*QueueInboundElementsContainer, min(maxBatchSize, device.BatchSize()))
 	)
 
 	defer func() {
@@ -107,7 +113,7 @@ func (device *Device) RoutineReceiveIncoming(recvName string, maxBatchSize int, 
 	for {
 		if bufDirty {
 			buf.decRef()
-			buf = device.getPacketBuf()
+			buf = getBuf()
 			bufDirty = false
 		}
 		count, err = recv(buf.slab, packets)
@@ -185,6 +191,11 @@ func (device *Device) RoutineReceiveIncoming(recvName string, maxBatchSize int, 
 					elemsByPeer[peer] = elemsForPeer
 				}
 				elemsForPeer.elems = append(elemsForPeer.elems, elem)
+				if len(elemsForPeer.elems) >= device.BatchSize() {
+					// Downstream, a container holds at most BatchSize elements; a started routine can read more per call.
+					peer.queueInboundIfRunning(elemsForPeer)
+					delete(elemsByPeer, peer)
+				}
 				continue
 
 			// otherwise it is a fixed size & handshake related packet

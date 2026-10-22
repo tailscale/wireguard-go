@@ -50,6 +50,13 @@ type StdNetBind struct {
 
 	blackhole4 bool
 	blackhole6 bool
+
+	connected    bool                                               // use ConnectedSockets; fixed at construction, see WithConnectedSockets
+	dontFragment bool                                               // set DF on every socket; fixed at construction, see WithDontFragment
+	batchedIO    bool                                               // batch unconnected socket I/O on darwin; fixed at construction, see WithBatchedIO
+	cs           *ConnectedSockets                                  // nil unless connected and open
+	starter      func(fn ReceiveFunc, slabSize, batchSize int) bool // see SetReceiveFuncStarter
+	mark         atomic.Uint32                                      // last SetMark, applied to connected sockets dialled later
 }
 
 // stdNetSocket is one UDP socket. See [WithSockets].
@@ -103,6 +110,13 @@ func NewStdNetBind(opts ...Option) Bind {
 	for _, opt := range opts {
 		opt.apply(&b.config)
 	}
+	connected := connectedByDefault
+	if b.config.connected != nil {
+		connected = *b.config.connected
+	}
+	b.connected = connected && connectedSupported
+	b.dontFragment = b.config.dontFragment && dontFragmentSupported
+	b.batchedIO = b.config.batchedIO && runtime.GOOS == "darwin"
 	return b
 }
 
@@ -170,10 +184,11 @@ func listenNet(network string, port int, ctrl ...controlFn) (*net.UDPConn, int, 
 // it's at least non-nil.
 var errEADDRINUSE error = errors.New("")
 
-// bindGroup opens n [net.UDPConn]s sharing one local port, via SO_REUSEPORT
-// when n is more than one. If port is 0, all sockets join the same ephemeral
+// bindGroup opens n [net.UDPConn]s sharing one local port, via reuse
+// when it is non-nil. If port is 0, all sockets join the same ephemeral
 // port. The returned group is either empty or the full n.
-func bindGroup(network string, port, n int) ([]*net.UDPConn, int, error) {
+// The first socket gets reuse only after its bind succeeds, and every socket gets extra; [StdNetBind.Open] passes reusePortFn as reuse for more than one socket, and [ReusePortControl] when connected sockets must share the port.
+func bindGroup(network string, port, n int, reuse controlFn, extra ...controlFn) ([]*net.UDPConn, int, error) {
 	var conns []*net.UDPConn
 	for i := range n {
 		// UDP on Linux guards against the ephemeral port reuse across different
@@ -187,17 +202,17 @@ func bindGroup(network string, port, n int) ([]*net.UDPConn, int, error) {
 		//
 		// For now, bind first socket without SO_REUSEPORT, then apply
 		// the option if successful.
-		var ctrl []controlFn
-		if i > 0 {
-			ctrl = []controlFn{reusePortFn}
+		ctrl := append([]controlFn(nil), extra...)
+		if i > 0 && reuse != nil {
+			ctrl = append(ctrl, reuse)
 		}
 		c, p, err := listenNet(network, port, ctrl...)
 		if err != nil {
 			closeConns(conns)
 			return nil, 0, err
 		}
-		if n > 1 && i == 0 {
-			if err := reusePortAfterBind(network, c); err != nil {
+		if reuse != nil && i == 0 {
+			if err := reusePortAfterBind(network, c, reuse); err != nil {
 				c.Close()
 				return nil, 0, err
 			}
@@ -207,12 +222,12 @@ func bindGroup(network string, port, n int) ([]*net.UDPConn, int, error) {
 	return conns, port, nil
 }
 
-func reusePortAfterBind(network string, c *net.UDPConn) error {
+func reusePortAfterBind(network string, c *net.UDPConn, reuse controlFn) error {
 	rc, err := c.SyscallConn()
 	if err != nil {
 		return err
 	}
-	return reusePortFn(network, "", rc)
+	return reuse(network, "", rc)
 }
 
 func closeConns(conns []*net.UDPConn) {
@@ -240,6 +255,18 @@ func (s *StdNetBind) Open(uport uint16) ([]ReceiveFunc, uint16, error) {
 	if reusePortFn != nil {
 		ns = s.config.sockets
 	}
+	var reuse controlFn
+	if ns > 1 {
+		reuse = reusePortFn
+	}
+	if s.connected {
+		// Connected sockets share the port on every platform that has them, not only where reusePortFn is set.
+		reuse = ReusePortControl
+	}
+	var extra []controlFn
+	if s.dontFragment {
+		extra = append(extra, func(network, _ string, c syscall.RawConn) error { return setDontFragment(network, c) })
+	}
 
 	// Attempt to open ipv4 and ipv6 listeners on the same port.
 	// If uport is 0, we can retry on failure.
@@ -247,13 +274,13 @@ again:
 	port := int(uport)
 	var v4conns, v6conns []*net.UDPConn
 
-	v4conns, port, err = bindGroup("udp4", port, ns)
+	v4conns, port, err = bindGroup("udp4", port, ns, reuse, extra...)
 	if err != nil && !errors.Is(err, syscall.EAFNOSUPPORT) {
 		return nil, 0, err
 	}
 
 	// Listen on the same port as we're using for ipv4.
-	v6conns, port, err = bindGroup("udp6", port, ns)
+	v6conns, port, err = bindGroup("udp6", port, ns, reuse, extra...)
 	if uport == 0 && errors.Is(err, errEADDRINUSE) && tries < 100 {
 		closeConns(v4conns)
 		tries++
@@ -269,6 +296,10 @@ again:
 		sock := s.newSocket(c)
 		if runtime.GOOS == "linux" {
 			sock.pc = ipv4.NewPacketConn(c)
+		} else if s.batchedIO {
+			if b, err := NewUnconnectedBatch(c); err == nil && b != nil {
+				sock.pc = b
+			}
 		}
 		fns = append(fns, sock.receiveIP)
 		s.v4 = append(s.v4, sock)
@@ -277,6 +308,10 @@ again:
 		sock := s.newSocket(c)
 		if runtime.GOOS == "linux" {
 			sock.pc = ipv6.NewPacketConn(c)
+		} else if s.batchedIO {
+			if b, err := NewUnconnectedBatch(c); err == nil && b != nil {
+				sock.pc = b
+			}
 		}
 		fns = append(fns, sock.receiveIP)
 		s.v6 = append(s.v6, sock)
@@ -285,6 +320,9 @@ again:
 		return nil, 0, syscall.EAFNOSUPPORT
 	}
 
+	if s.connected && s.starter != nil {
+		s.cs = NewConnectedSockets(ConnectedConfig{Port: port, Control: s.connectedControl, Reader: s.connectedReader(s.starter)})
+	}
 	return fns, uint16(port), nil
 }
 
@@ -334,7 +372,7 @@ func (s *stdNetSocket) receiveIP(
 ) (n int, err error) {
 	msgs := s.messagePool.getMessages()
 	usedMsgs := 1
-	if runtime.GOOS == "linux" {
+	if s.pc != nil {
 		// set a floor of 1 in case len(slab) < maxDatagramSize
 		usedMsgs = max(1, len(slab)/maxDatagramSize)
 		// we can't read more datagrams than what we can describe in packets
@@ -342,7 +380,7 @@ func (s *stdNetSocket) receiveIP(
 	}
 	defer s.messagePool.putMessages(msgs, usedMsgs)
 	var numMsgs int
-	if runtime.GOOS == "linux" {
+	if s.pc != nil {
 		rem := slab
 		for i := range usedMsgs {
 			end := maxDatagramSize
@@ -396,7 +434,8 @@ func (s *StdNetBind) ReceiveNames() []string {
 // TODO: When all Binds handle IdealBatchSize, remove this dynamic function and
 // rename the IdealBatchSize constant to BatchSize.
 func (s *StdNetBind) BatchSize() int {
-	if runtime.GOOS == "linux" {
+	// Connected sockets batch on every platform that has them, and batched I/O does on darwin.
+	if runtime.GOOS == "linux" || s.connected || s.batchedIO {
 		return IdealBatchSize
 	}
 	return 1
@@ -405,6 +444,10 @@ func (s *StdNetBind) BatchSize() int {
 func (s *StdNetBind) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// Close connected sockets first so their ReceiveFuncs return and BindUpdate can reopen.
+	s.cs.Close()
+	s.cs = nil
 
 	var errs error
 	for _, sock := range s.v4 {
@@ -448,7 +491,16 @@ func (s *StdNetBind) SendTo(flow int, bufs [][]byte, endpoint Endpoint, offset i
 		socks = s.v6
 		is6 = true
 	}
+	cs := s.cs
 	s.mu.Unlock()
+
+	if cs != nil {
+		// Send from the sticky source, if any, so replies leave from the address the peer sent to.
+		ep := endpoint.(*StdNetEndpoint)
+		if handled, err := cs.SendFrom(ep.AddrPort, ep.SrcIP(), bufs, offset); handled {
+			return err
+		}
+	}
 
 	if blackhole {
 		return nil
@@ -515,7 +567,7 @@ func (s *StdNetBind) send(conn *net.UDPConn, pc batchWriter, msgs []ipv6.Message
 		err   error
 		start int
 	)
-	if runtime.GOOS == "linux" {
+	if pc != nil {
 		for {
 			n, err = pc.WriteBatch(msgs[start:], 0)
 			if err != nil || n == len(msgs[start:]) {
