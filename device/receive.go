@@ -513,7 +513,7 @@ func (peer *Peer) processInboundContainer(elemsContainer *QueueInboundElementsCo
 				continue
 			}
 			field := elem.packet[IPv6offsetPayloadLength : IPv6offsetPayloadLength+2]
-			length := binary.BigEndian.Uint16(field)
+			length := uint32(binary.BigEndian.Uint16(field))
 			length += ipv6.HeaderLen
 			if int(length) > len(elem.packet) {
 				continue
