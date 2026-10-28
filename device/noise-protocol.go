@@ -102,6 +102,9 @@ func PacketIsRetry(b []byte) bool {
 }
 
 func parseTypeField(b []byte) (uint32, bool) {
+	if len(b) < 4 {
+		return 0, false
+	}
 	v := binary.LittleEndian.Uint32(b)
 	return v & messageTypeMask, (v & handshakeRetryMask) != 0
 }
