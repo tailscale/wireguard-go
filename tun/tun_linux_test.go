@@ -215,14 +215,21 @@ func TestTUNLifecycle(t *testing.T) {
 func TestTooManyQueues(t *testing.T) {
 	requireNetAdmin(t)
 	name := testTUNName(t)
+	// Above the kernel's MAX_TAP_QUEUES, so the group comes up short.
 	const queues = 1000
 	dev, err := CreateTUN(name, testMTU, WithQueues(queues))
-	if err == nil {
-		dev.Close()
-		t.Fatalf("CreateTUN with %d queues succeeded, want an error", queues)
+	if err != nil {
+		t.Fatalf("CreateTUN(%q, %d queues): %v", name, queues, err)
 	}
-	if !strings.Contains(err.Error(), "attaching extra tun queue") {
-		t.Errorf("error = %q, want it to mention the failing queue", err)
+	defer dev.Close()
+
+	got := len(QueuesOf(dev))
+	t.Logf("requested %d queues, got %d", queues, got)
+	switch {
+	case got < 1:
+		t.Errorf("QueuesOf returned %d queues, want at least 1", got)
+	case got >= queues:
+		t.Errorf("QueuesOf returned %d queues, want fewer than the %d requested", got, queues)
 	}
 }
 

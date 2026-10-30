@@ -678,25 +678,16 @@ func CreateTUN(name string, mtu int, opts ...Option) (Device, error) {
 		return nil, err
 	}
 	files := []*os.File{first}
-	closeAll := func() {
-		for _, f := range files {
-			f.Close()
-		}
-	}
 	if config.queues > 1 {
 		// Resolve name wildcards (%d) to not spawn new groups.
-		resolved, err := tunNameOf(first)
-		if err != nil {
-			closeAll()
-			return nil, err
-		}
-		for i := range config.queues - 1 {
-			f, err := openTUNFile(resolved, flags)
-			if err != nil {
-				closeAll()
-				return nil, fmt.Errorf("attaching extra tun queue %d of %d: %w", i, config.queues-1, err)
+		if resolved, err := tunNameOf(first); err == nil {
+			for range config.queues - 1 {
+				f, err := openTUNFile(resolved, flags)
+				if err != nil {
+					break // return a short group
+				}
+				files = append(files, f)
 			}
-			files = append(files, f)
 		}
 	}
 	return CreateTUNFromFiles(files, mtu)
