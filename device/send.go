@@ -92,6 +92,7 @@ func (peer *Peer) SendKeepalive() {
 		if queued := peer.doIfRunning(func() {
 			select {
 			case peer.queue.staged <- elemsContainer:
+				peer.device.addStaged(1)
 				peer.device.log.Verbosef("%v - Sending keepalive packet", peer)
 			default:
 				peer.device.PutOutboundElement(elem)
@@ -461,6 +462,9 @@ func (device *Device) RoutineReadFromTUN(id int, queue tun.Reader) {
 			peer.SendStagedPackets()
 			delete(elemsByPeer, peer)
 		}
+		if device.staged.limit != 0 && device.staged.count.Load() > device.staged.limit {
+			device.trimStagedPackets()
+		}
 
 		if readErr != nil {
 			if errors.Is(readErr, tun.ErrTooManySegments) {
@@ -488,14 +492,19 @@ func (device *Device) RoutineReadFromTUN(id int, queue tun.Reader) {
 // [Peer.nonceMu] relies on this function being non-blocking.
 func (peer *Peer) StagePackets(elems *QueueOutboundElementsContainer) {
 	if running := peer.doIfRunning(func() {
+		// Count before handing elems off, as a concurrent SendStagedPackets
+		// may shrink elems.elems as soon as it is in the queue.
+		n := len(elems.elems)
 		for {
 			select {
 			case peer.queue.staged <- elems:
+				peer.device.addStaged(n)
 				return
 			default:
 			}
 			select {
 			case tooOld := <-peer.queue.staged:
+				peer.device.addStaged(-len(tooOld.elems))
 				for _, elem := range tooOld.elems {
 					peer.device.PutOutboundElement(elem)
 				}
@@ -537,6 +546,7 @@ top:
 		var elemsContainerOOO *QueueOutboundElementsContainer
 		select {
 		case elemsContainer := <-peer.queue.staged:
+			peer.device.addStaged(-len(elemsContainer.elems))
 			i := 0
 			for _, elem := range elemsContainer.elems {
 				elem.peer = peer
@@ -582,11 +592,58 @@ func (peer *Peer) FlushStagedPackets() {
 	for {
 		select {
 		case elemsContainer := <-peer.queue.staged:
+			peer.device.addStaged(-len(elemsContainer.elems))
 			for _, elem := range elemsContainer.elems {
 				peer.device.PutOutboundElement(elem)
 			}
 			peer.device.PutOutboundElementsContainer(elemsContainer)
 		default:
+			return
+		}
+	}
+}
+
+// addStaged accounts for n packets entering (n > 0) or leaving (n < 0) a
+// peer's staged queue. It does nothing if staged packets are not limited.
+func (device *Device) addStaged(n int) {
+	if device.staged.limit != 0 {
+		device.staged.count.Add(int64(n))
+	}
+}
+
+// trimStagedPackets drops staged packets, oldest first from the peer with the
+// most staged, until no more than device.staged.limit remain.
+//
+// Staged packets wait for a handshake, and they hold items from the device's
+// packet pools until it completes or gives up. When the pools are bounded
+// ([WithPreallocatedBuffersPerPool]), the staged queues of peers that keep
+// getting traffic but cannot complete a handshake can otherwise take every
+// item in a pool. That blocks the TUN readers and the receive path for all
+// peers, including the receive of a handshake message that would let the
+// staged packets go.
+func (device *Device) trimStagedPackets() {
+	device.peers.RLock()
+	defer device.peers.RUnlock()
+	for device.staged.count.Load() > device.staged.limit {
+		var victim *Peer
+		most := 0
+		for _, peer := range device.peers.keyMap {
+			if n := len(peer.queue.staged); n > most {
+				victim, most = peer, n
+			}
+		}
+		if victim == nil {
+			return
+		}
+		select {
+		case elemsContainer := <-victim.queue.staged:
+			device.addStaged(-len(elemsContainer.elems))
+			for _, elem := range elemsContainer.elems {
+				device.PutOutboundElement(elem)
+			}
+			device.PutOutboundElementsContainer(elemsContainer)
+		default:
+			// Another goroutine drained the queue first.
 			return
 		}
 	}
