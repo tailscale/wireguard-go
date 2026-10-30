@@ -39,7 +39,7 @@ func (r *ReceivedPacket) Bytes(slab []byte) []byte {
 // packets that should be evaluated. Callers must pass a length of packets equal
 // to the associated [Bind.BatchSize].
 //
-// On error the caller retries indefinitely, unless the error is
+// On error the caller retries indefinitely, unless the error is (or wraps)
 // net.ErrClosed. The caller applies no pacing of its own. A ReceiveFunc that
 // can return an error without blocking must rate-limit itself.
 type ReceiveFunc func(slab []byte, packets []ReceivedPacket) (n int, err error)
