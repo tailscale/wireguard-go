@@ -80,29 +80,57 @@ func (elem *QueueOutboundElement) clearPointers() {
 	elem.peer = nil
 }
 
-// SendKeepalive queues a keepalive if no packets are queued for
-// peer.
+// SendKeepalive sends staged packets, or a keepalive if none are queued.
+// Without a usable keypair it initiates a handshake without staging an empty
+// packet. The handshake response will call SendKeepalive again to confirm the
+// new session, so there is no need to retain pooled resources while waiting.
 func (peer *Peer) SendKeepalive() {
-	if len(peer.queue.staged) == 0 {
-		elem := peer.device.GetOutboundElement()
-		elem.buffer = peer.device.getSmallPacketBuf()
-		elem.plaintextOffset = MessageEncapsulatingTransportSize + MessageTransportHeaderSize
-		elemsContainer := peer.device.GetOutboundElementsContainer()
-		elemsContainer.elems = append(elemsContainer.elems, elem)
-		if queued := peer.doIfRunning(func() {
-			select {
-			case peer.queue.staged <- elemsContainer:
-				peer.device.log.Verbosef("%v - Sending keepalive packet", peer)
-			default:
-				peer.device.PutOutboundElement(elem)
-				peer.device.PutOutboundElementsContainer(elemsContainer)
-			}
-		}); !queued {
-			peer.device.PutOutboundElement(elem)
-			peer.device.PutOutboundElementsContainer(elemsContainer)
-		}
+	if len(peer.queue.staged) != 0 {
+		peer.SendStagedPackets()
+		return
 	}
-	peer.SendStagedPackets()
+
+	// Serialize the keypair check, nonce assignment, and outbound enqueue with
+	// data packets. A keepalive must never enter the staging queue, even if the
+	// session expires concurrently with this call.
+	peer.queue.nonceMu.Lock()
+	if !peer.timersActive() {
+		peer.queue.nonceMu.Unlock()
+		return
+	}
+	keypair := peer.keypairs.Current()
+	if keypair == nil || keypair.sendNonce.Load() >= RejectAfterMessages || time.Since(keypair.created) >= RejectAfterTime {
+		peer.queue.nonceMu.Unlock()
+		peer.SendHandshakeInitiation(false)
+		return
+	}
+	c := peer.device.tryGetKeepalive()
+	if c == nil {
+		peer.queue.nonceMu.Unlock()
+		// A keepalive is optional, but a handshake confirmation must eventually
+		// be sent even when there is no application traffic. Retry after pool
+		// pressure subsides; sending data in the meantime cancels this timer.
+		if peer.timersActive() {
+			peer.timers.sendKeepalive.Mod(time.Second)
+		}
+		return
+	}
+	elem := c.elems[0]
+	elem.peer = peer
+	elem.keypair = keypair
+	elem.nonce = keypair.sendNonce.Add(1) - 1
+	if elem.nonce >= RejectAfterMessages {
+		// ExpireCurrentKeypairs can invalidate the keypair without nonceMu.
+		keypair.sendNonce.Store(RejectAfterMessages)
+		peer.device.PutOutboundElement(elem)
+		peer.device.PutOutboundElementsContainer(c)
+		peer.queue.nonceMu.Unlock()
+		peer.SendHandshakeInitiation(false)
+		return
+	}
+	peer.device.log.Verbosef("%v - Sending keepalive packet", peer)
+	peer.queueOutboundIfRunning(c)
+	peer.queue.nonceMu.Unlock()
 }
 
 // SendPriorityMessage invokes the [PeerPriorityMessageFunc] callback if one is
