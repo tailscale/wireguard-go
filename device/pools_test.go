@@ -6,6 +6,7 @@
 package device
 
 import (
+	"fmt"
 	"math/rand"
 	"runtime"
 	"sync"
@@ -67,6 +68,46 @@ func TestWaitPool(t *testing.T) {
 	wg.Wait()
 	if max.Load() != p.max {
 		t.Errorf("Actual maximum count (%d) != ideal maximum count (%d)", max.Load(), p.max)
+	}
+}
+
+func TestWaitPoolTryGet(t *testing.T) {
+	for _, limit := range []uint32{0, 4} {
+		t.Run(fmt.Sprint(limit), func(t *testing.T) {
+			p := NewWaitPool(limit, func() any { return new(int) })
+			var wg sync.WaitGroup
+			for i := range 8 {
+				wg.Go(func() {
+					for range 1000 {
+						var v any
+						if i%2 == 0 {
+							v = p.Get()
+						} else {
+							var ok bool
+							v, ok = p.TryGet()
+							if !ok {
+								if limit == 0 {
+									t.Error("unbounded TryGet failed")
+								}
+								runtime.Gosched()
+								continue
+							}
+						}
+						p.lock.Lock()
+						if limit != 0 && p.count > limit {
+							t.Errorf("%d outstanding items, limit %d", p.count, limit)
+						}
+						p.lock.Unlock()
+						runtime.Gosched()
+						p.Put(v)
+					}
+				})
+			}
+			wg.Wait()
+			if p.count != 0 {
+				t.Errorf("%d outstanding items after all Put calls", p.count)
+			}
+		})
 	}
 }
 
