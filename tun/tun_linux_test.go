@@ -212,6 +212,29 @@ func TestTUNLifecycle(t *testing.T) {
 	}
 }
 
+func TestCreateTUNDoesNotAdopt(t *testing.T) {
+	requireNetAdmin(t)
+	for _, queues := range []int{1, 4} {
+		t.Run(fmt.Sprintf("%dqueues", queues), func(t *testing.T) {
+			name := testTUNName(t)
+			dev, err := CreateTUN(name, testMTU, WithQueues(queues))
+			if err != nil {
+				t.Fatalf("CreateTUN(%q, %d queues): %v", name, queues, err)
+			}
+			defer dev.Close()
+
+			second, err := CreateTUN(name, testMTU, WithQueues(queues))
+			if err == nil {
+				second.Close()
+				t.Fatalf("second CreateTUN(%q) succeeded, want EBUSY", name)
+			}
+			if !errors.Is(err, unix.EBUSY) {
+				t.Errorf("second CreateTUN(%q) = %v, want EBUSY", name, err)
+			}
+		})
+	}
+}
+
 func TestTooManyQueues(t *testing.T) {
 	requireNetAdmin(t)
 	name := testTUNName(t)
