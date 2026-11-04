@@ -495,6 +495,19 @@ func checksumValid(pkt []byte, iphLen, proto uint8, isV6 bool) bool {
 	return ^Checksum(pkt[iphLen:], cSum) == 0
 }
 
+// udpCsumOKForGRO reports whether the UDP datagram may be coalesced. An IPv4 UDP
+// datagram with a zero checksum field carries no checksum per RFC 768 and must
+// not be validated; VXLAN encapsulators (e.g. Cilium) commonly emit these.
+func udpCsumOKForGRO(pkt []byte, iphLen uint8, isV6 bool) bool {
+	udpCsumOff := int(iphLen) + 6
+	if !isV6 && udpCsumOff+2 <= len(pkt) {
+		if pkt[udpCsumOff] == 0 && pkt[udpCsumOff+1] == 0 {
+			return true
+		}
+	}
+	return checksumValid(pkt, iphLen, unix.IPPROTO_UDP, isV6)
+}
+
 // coalesceResult represents the result of attempting to coalesce two packets.
 type coalesceResult int
 
@@ -511,11 +524,11 @@ func coalesceUDPPackets(pkt []byte, item *udpGROItem, wi *groToWrite, isV6 bool)
 	headersLen := int(item.iphLen) + udphLen
 	iov := &wi.iovs[item.outputIdx]
 	if len(*iov) == iovSinglePacketLen {
-		if item.cSumKnownInvalid || !checksumValid((*iov)[iovHeadPacketIdx], item.iphLen, unix.IPPROTO_UDP, isV6) {
+		if item.cSumKnownInvalid || !udpCsumOKForGRO((*iov)[iovHeadPacketIdx], item.iphLen, isV6) {
 			return coalesceItemInvalidCSum
 		}
 	}
-	if !checksumValid(pkt, item.iphLen, unix.IPPROTO_UDP, isV6) {
+	if !udpCsumOKForGRO(pkt, item.iphLen, isV6) {
 		return coalescePktInvalidCSum
 	}
 	*iov = append(*iov, pkt[headersLen:])
