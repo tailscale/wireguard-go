@@ -9,6 +9,7 @@ package tun
  */
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"os"
@@ -281,7 +282,7 @@ func getIFIndex(name string) (int32, error) {
 		return 0, errno
 	}
 
-	return *(*int32)(unsafe.Pointer(&ifr[unix.IFNAMSIZ])), nil
+	return int32(binary.LittleEndian.Uint32(ifr[unix.IFNAMSIZ : unix.IFNAMSIZ+4])), nil
 }
 
 func (tun *NativeTun) setMTU(n int) error {
@@ -346,7 +347,7 @@ func (tun *NativeTun) MTU() (int, error) {
 		return 0, fmt.Errorf("failed to get MTU of TUN device: %w", errno)
 	}
 
-	return int(*(*int32)(unsafe.Pointer(&ifr[unix.IFNAMSIZ]))), nil
+	return int(binary.LittleEndian.Uint32(ifr[unix.IFNAMSIZ : unix.IFNAMSIZ+4])), nil
 }
 
 func (tun *NativeTun) Name() (string, error) {
