@@ -104,6 +104,15 @@ type Device struct {
 	ipcMutex sync.RWMutex
 	closed   chan struct{}
 	log      *Logger
+
+	// testHookResponseVerified is called by [Device.ConsumeMessageResponse]
+	// after it has verified a Response and released its handshake.mutex,
+	// but before it takes the write lock to update the handshake.
+	// Tests use it to run other handshake operations in that window.
+	// If nil, nothing is called.
+	//
+	// No locks are held while calling this function.
+	testHookResponseVerified func()
 }
 
 type config struct {

@@ -798,21 +798,32 @@ func (device *Device) ConsumeMessageResponse(msg *MessageResponse) *Peer {
 		return nil
 	}
 
+	if device.testHookResponseVerified != nil {
+		device.testHookResponseVerified()
+	}
+
 	// update handshake state
 
 	handshake.mutex.Lock()
 
-	handshake.hash = hash
-	handshake.chainKey = chainKey
-	handshake.remoteIndex = msg.Sender
-	handshake.state = handshakeResponseConsumed
+	peer := lookup.peer
+	// Check that another copy of this Response hasn't been consumed,
+	// and that another Initiation hasn't replaced the one it answers.
+	if handshake.state == handshakeInitiationCreated && handshake.localIndex == msg.Receiver {
+		handshake.hash = hash
+		handshake.chainKey = chainKey
+		handshake.remoteIndex = msg.Sender
+		handshake.state = handshakeResponseConsumed
+	} else {
+		peer = nil
+	}
 
 	handshake.mutex.Unlock()
 
 	setZero(hash[:])
 	setZero(chainKey[:])
 
-	return lookup.peer
+	return peer
 }
 
 /* Derives a new keypair from the current handshake state
