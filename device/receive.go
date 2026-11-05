@@ -384,9 +384,12 @@ func (device *Device) RoutineHandshake(id int) {
 
 			// consume response
 
-			peer := device.ConsumeMessageResponse(&msg)
+			peer, duplicate := device.ConsumeMessageResponse(&msg)
 			if peer == nil {
-				device.log.Verbosef("Received invalid response message from %s", elem.packetMeta.Endpoint.DstToString())
+				// TODO(illotum): is there value in a counter here?
+				if !duplicate {
+					device.log.Verbosef("Received invalid response message from %s", elem.packetMeta.Endpoint.DstToString())
+				}
 				goto skip
 			}
 
