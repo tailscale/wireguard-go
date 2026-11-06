@@ -673,7 +673,8 @@ func CreateTUN(name string, mtu int, opts ...Option) (Device, error) {
 		// all members must declare multiqueue
 		flags |= unix.IFF_MULTI_QUEUE
 	}
-	first, err := openTUNFile(name, flags)
+	// Set IFF_TUN_EXCL to fail with EBUSY if name already exists.
+	first, err := openTUNFile(name, flags|unix.IFF_TUN_EXCL)
 	if err != nil {
 		return nil, err
 	}
