@@ -550,6 +550,9 @@ func (peer *Peer) processInboundContainer(elemsContainer *QueueInboundElementsCo
 			device.log.Errorf("Failed to write packets to TUN device: %v", err)
 		}
 	}
+	// Write is synchronous. Drop scratch references before returning slabs
+	// to their pool, so an idle receiver does not pin completed batches.
+	releasePacketReferences(scratch)
 	for _, elem := range elems {
 		device.PutInboundElement(elem)
 	}
