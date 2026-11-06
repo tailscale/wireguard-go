@@ -9,6 +9,7 @@ package device
 
 import (
 	"sync"
+	"sync/atomic"
 	"time"
 	_ "unsafe"
 )
@@ -20,6 +21,8 @@ func fastrandn(n uint32) uint32
 // Timer roughly copies the interface of the Linux kernel's struct timer_list.
 type Timer struct {
 	*time.Timer
+	isActive *atomic.Bool // must be non-nil
+
 	modifyingLock sync.RWMutex
 	runningLock   sync.Mutex
 	isPending     bool
@@ -41,12 +44,17 @@ func (peer *Peer) NewTimer(expirationFunction func(*Peer)) *Timer {
 
 		expirationFunction(peer)
 	})
+	timer.isActive = &peer.runningState.isRunning
 	timer.Stop()
 	return timer
 }
 
 func (timer *Timer) Mod(d time.Duration) {
 	timer.modifyingLock.Lock()
+	if !timer.isActive.Load() {
+		timer.modifyingLock.Unlock()
+		return
+	}
 	timer.isPending = true
 	timer.Reset(d)
 	timer.modifyingLock.Unlock()
