@@ -842,7 +842,8 @@ func TestMessageInitiationMetrics(t *testing.T) {
 		synctest.Wait()
 
 		// We intentionally leave the [Device] down, to suppress timer-triggered
-		// handshakes.
+		// handshakes, but start the [Peer] so it creates the handshakes.
+		peer.Start()
 
 		// We intentionally leave [Peer.endpoint] unconfigured, so that
 		// [Peer.SendBuffers] returns an error. We expect network send attempt
