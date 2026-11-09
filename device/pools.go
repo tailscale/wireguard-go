@@ -37,6 +37,21 @@ func (p *WaitPool) Get() any {
 	return p.pool.Get()
 }
 
+// TryGet is like Get, but returns false instead of waiting when the pool's
+// limit has been reached.
+func (p *WaitPool) TryGet() (any, bool) {
+	if p.max != 0 {
+		p.lock.Lock()
+		if p.count >= p.max {
+			p.lock.Unlock()
+			return nil, false
+		}
+		p.count++
+		p.lock.Unlock()
+	}
+	return p.pool.Get(), true
+}
+
 func (p *WaitPool) Put(x any) {
 	p.pool.Put(x)
 	if p.max == 0 {
@@ -190,4 +205,31 @@ func (device *Device) PutOutboundElement(elem *QueueOutboundElement) {
 	}
 	elem.clearPointers()
 	device.pool.outboundElements.Put(elem)
+}
+
+// tryGetKeepalive obtains all the resources needed for a keepalive without
+// waiting for pool space. In particular, handshake workers and timer callbacks
+// must not wait for buffers that another handshake or timer needs to release.
+func (device *Device) tryGetKeepalive() *QueueOutboundElementsContainer {
+	v, ok := device.pool.outboundElements.TryGet()
+	if !ok {
+		return nil
+	}
+	elem := v.(*QueueOutboundElement)
+	v, ok = device.pool.smallPacketBufs.TryGet()
+	if !ok {
+		device.PutOutboundElement(elem)
+		return nil
+	}
+	elem.buffer = v.(*packetBuf)
+	elem.buffer.incRef()
+	v, ok = device.pool.outboundElementsContainer.TryGet()
+	if !ok {
+		device.PutOutboundElement(elem)
+		return nil
+	}
+	elem.plaintextOffset = MessageEncapsulatingTransportSize + MessageTransportHeaderSize
+	c := v.(*QueueOutboundElementsContainer)
+	c.elems = append(c.elems, elem)
+	return c
 }
