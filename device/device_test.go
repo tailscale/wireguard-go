@@ -952,3 +952,85 @@ func TestHybridHandshakeMetrics(t *testing.T) {
 		}
 	})
 }
+
+func TestWithQueueStagedGlobalLimit(t *testing.T) {
+	tests := []struct {
+		name string
+		opts []Option
+		want int64
+	}{
+		{"default", nil, 0},
+		{"disabled", []Option{WithQueueStagedGlobalLimit(0)}, 0},
+		{"raised", []Option{WithQueueStagedGlobalLimit(1)}, 2},
+		{"preserved", []Option{WithQueueStagedGlobalLimit(3)}, 3},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := append([]Option{WithQueueStagedSize(2)}, tt.opts...)
+			dev := newSynctestCapableDevice(t, opts...)
+			if got := dev.config.queueStagedGlobalLimit; got != tt.want {
+				t.Fatalf("global limit = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestStagedGlobalLimitAccounting(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		dev := newSynctestCapableDevice(t,
+			WithQueueStagedSize(2), WithQueueStagedGlobalLimit(2))
+		if err := dev.Up(); err != nil {
+			t.Fatal(err)
+		}
+		var peers [2]*Peer
+		for i := range peers {
+			sk, err := newPrivateKey()
+			if err != nil {
+				t.Fatal(err)
+			}
+			peers[i], err = dev.NewPeer(sk.publicKey())
+			if err != nil {
+				t.Fatal(err)
+			}
+			peers[i].Start()
+		}
+		stage := func(peer *Peer) {
+			elem := dev.GetOutboundElement()
+			elem.buffer = dev.getSmallPacketBuf()
+			container := dev.GetOutboundElementsContainer()
+			container.elems = append(container.elems, elem)
+			peer.SendStagedPackets(peer.StagePackets(container))
+		}
+		wantStagedLens := func(want0, want1 int) {
+			t.Helper()
+			for i, want := range []int{want0, want1} {
+				if got := len(peers[i].queue.staged); got != want {
+					t.Fatalf("peer %d staged = %d, want %d", i, got, want)
+				}
+			}
+			if got := dev.queue.stagedCount.Load(); got != int64(want0+want1) {
+				t.Fatalf("staged count = %d, want %d", got, want0+want1)
+			}
+		}
+
+		// Neither peer can complete a handshake w/o explicit endpoints, and
+		// we're in a synctest bubble that prevents handshake failure from
+		// flushing, so containers remain staged.
+		stage(peers[0])
+		stage(peers[0])
+		wantStagedLens(2, 0) // At global limit.
+		stage(peers[1])      // The global limit applies across peers, this should be dropped.
+		wantStagedLens(2, 0)
+		stage(peers[0]) // Replacing a full queue's oldest container is net zero.
+		wantStagedLens(2, 0)
+
+		peers[0].FlushStagedPackets(1) // Explicitly flush one container, leaving one outstanding.
+		wantStagedLens(1, 0)
+		stage(peers[1]) // Flushing returns capacity to the device-wide limit.
+		wantStagedLens(1, 1)
+		for _, peer := range peers {
+			peer.FlushStagedPackets(0)
+		}
+		wantStagedLens(0, 0)
+	})
+}

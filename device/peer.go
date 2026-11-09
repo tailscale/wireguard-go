@@ -89,8 +89,11 @@ type Peer struct {
 	queue struct {
 		// nonceMu serializes nonce stamping during the outbound enqueue in
 		// [Peer.SendStagedPackets] and [Peer.SendPriorityMessage].
-		nonceMu  sync.Mutex
-		staged   chan *QueueOutboundElementsContainer // staged packets before a handshake is available
+		nonceMu sync.Mutex
+		// staged holds packets awaiting symmetric session establishment. staged
+		// queue operations must be accounted against [Device.queue.stagedCount]
+		// when a global staged queue limit is in effect.
+		staged   chan *QueueOutboundElementsContainer
 		outbound chan *QueueOutboundElementsContainer // sequential ordering of udp transmission
 		inbound  chan *QueueInboundElementsContainer  // sequential ordering of tun writing
 	}
@@ -381,7 +384,7 @@ func (peer *Peer) ZeroAndFlushAll() {
 	handshake.Clear()
 	handshake.mutex.Unlock()
 
-	peer.FlushStagedPackets()
+	peer.FlushStagedPackets(0)
 
 	peer.sessionState.Lock()
 	peer.sessionState.sessionExpires = time.Time{}
