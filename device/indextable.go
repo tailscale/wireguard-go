@@ -8,6 +8,7 @@ package device
 import (
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"sync"
 )
 
@@ -55,7 +56,17 @@ func (table *IndexTable) SwapIndexForKeypair(index uint32, keypair *Keypair) {
 	}
 }
 
+// errPeerStopped signals that the peer is stopped, not that something went wrong.
+var errPeerStopped = errors.New("peer is stopped")
+
 func (table *IndexTable) NewIndexForHandshake(peer *Peer, handshake *Handshake) (uint32, error) {
+	if !peer.runningState.isRunning.Load() {
+		return 0, errPeerStopped
+	}
+	return table.newIndexForHandshake(peer, handshake)
+}
+
+func (table *IndexTable) newIndexForHandshake(peer *Peer, handshake *Handshake) (uint32, error) {
 	for {
 		// generate random index
 
