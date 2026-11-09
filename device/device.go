@@ -90,6 +90,11 @@ type Device struct {
 		encryption *outboundQueue
 		decryption *inboundQueue
 		handshake  *handshakeQueue
+		// stagedCount is the count of packet containers outstanding across all
+		// [Peer.queue.staged]. Only relevant when [Device.config.queueStagedGlobalLimit]
+		// is nonzero. This count is updated only after enqueuing packets for
+		// staging, so its value is eventually (not immediately) consistent.
+		stagedCount atomic.Int64
 	}
 
 	tun struct {
@@ -114,6 +119,7 @@ type config struct {
 	peerQueueInboundSize       int // zero inherits queueInboundSize
 	queueHandshakeSize         int
 	preallocatedBuffersPerPool uint32
+	queueStagedGlobalLimit     int64
 	metrics                    Metrics
 }
 
@@ -210,6 +216,21 @@ func WithQueueHandshakeSize(size int) Option {
 func WithPreallocatedBuffersPerPool(size uint32) Option {
 	return optionFunc(func(config *config) {
 		config.preallocatedBuffersPerPool = size
+	})
+}
+
+// WithQueueStagedGlobalLimit sets the maximum number of packet container objects
+// outstanding across all staged queues. The limit is disabled by default.
+// Non-positive values disable it. It counts objects which are long-lived, i.e.
+// objects sitting in queues awaiting handshake. It is not an exact limit, it
+// may temporarily over or undercount. It exists to limit the amount of memory
+// consumed by packets. Packets awaiting handshake will be dropped if limit is
+// exceeded. If limit is greater than zero, and less than the size of an
+// individual peer's staged queue ([WithQueueStagedSize]), it will be silently
+// raised to match.
+func WithQueueStagedGlobalLimit(limit int) Option {
+	return optionFunc(func(config *config) {
+		config.queueStagedGlobalLimit = int64(limit)
 	})
 }
 
@@ -554,6 +575,9 @@ func NewDevice(tunDevice tun.Device, bind conn.Bind, logger *Logger, opts ...Opt
 	device.queue.handshake = newHandshakeQueue(device.config.queueHandshakeSize)
 	device.queue.encryption = newOutboundQueue(device.config.queueOutboundSize)
 	device.queue.decryption = newInboundQueue(device.config.queueInboundSize)
+	if device.config.queueStagedGlobalLimit > 0 {
+		device.config.queueStagedGlobalLimit = max(0, int64(device.config.queueStagedSize), device.config.queueStagedGlobalLimit)
+	}
 
 	// start workers
 
