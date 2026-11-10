@@ -5,7 +5,7 @@
  * Copyright (C) 2017-2023 WireGuard LLC. All Rights Reserved.
  */
 
-package device
+package aead
 
 import (
 	"crypto/cipher"
@@ -27,13 +27,13 @@ func shouldUseTSAsm(hasSSSE3, hasAVX2, hasBMI2 bool) bool {
 var useTSAsm = shouldUseTSAsm(asmAEAD.Available(), cpu.X86.HasAVX2, cpu.X86.HasBMI2)
 
 /*
-chacha20poly1305New returns a ChaCha20-Poly1305 AEAD. On amd64 CPUs with SSSE3 but no AVX2 it uses the assembly kernel from tsasm/amd64/chacha20poly1305.
+New returns a ChaCha20-Poly1305 AEAD. On amd64 CPUs with SSSE3 but no AVX2 it uses the assembly kernel from tsasm/amd64/chacha20poly1305.
 
 The cookie path (which uses the extended-nonce variant via chacha20poly1305.NewX) is left on the x/crypto path because it is not on the per-packet hot path.
 
 As an escape hatch for hardware regressions or asm bugs, setting the environment variable TS_WG_ASM=0 forces the x/crypto implementation instead.
 */
-func chacha20poly1305New(key []byte) (cipher.AEAD, error) {
+func New(key []byte) (cipher.AEAD, error) {
 	if !useTSAsm || os.Getenv("TS_WG_ASM") == "0" {
 		return chacha20poly1305.New(key)
 	}

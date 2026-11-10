@@ -5,7 +5,7 @@
  * Copyright (C) 2017-2023 WireGuard LLC. All Rights Reserved.
  */
 
-package device
+package aead
 
 import (
 	"crypto/cipher"
@@ -13,6 +13,7 @@ import (
 	"golang.org/x/crypto/chacha20poly1305"
 )
 
-func chacha20poly1305New(key []byte) (cipher.AEAD, error) {
+// New returns a ChaCha20-Poly1305 AEAD for the 32-byte key.
+func New(key []byte) (cipher.AEAD, error) {
 	return chacha20poly1305.New(key)
 }
