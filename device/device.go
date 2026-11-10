@@ -22,6 +22,10 @@ import (
 type Device struct {
 	config config
 
+	// invalidGSOLogged is set once the first ErrInvalidGSOPacket from the TUN
+	// device has been logged at error level.
+	invalidGSOLogged atomic.Bool
+
 	state struct {
 		// state holds the device's state. It is accessed atomically.
 		// Use the device.deviceState method to read it.

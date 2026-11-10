@@ -476,6 +476,17 @@ func (device *Device) RoutineReadFromTUN(id int, queue tun.Reader) {
 				device.log.Verbosef("Dropped some packets from multi-segment read: %v", readErr)
 				continue
 			}
+			if errors.Is(readErr, tun.ErrInvalidGSOPacket) {
+				// TODO: record stat for this
+				if device.invalidGSOLogged.CompareAndSwap(false, true) {
+					device.log.Errorf("Dropped a GSO packet from the TUN device, further drops are logged at verbose level: %v. "+
+						"On a router this usually comes from NIC hardware GRO on the receiving interface; "+
+						"'ethtool -K <interface> rx-gro-hw off' works around it", readErr)
+				} else {
+					device.log.Verbosef("Dropped a GSO packet from the TUN device: %v", readErr)
+				}
+				continue
+			}
 			if !device.isClosed() {
 				if !errors.Is(readErr, os.ErrClosed) {
 					device.log.Errorf("Failed to read packet from TUN device: %v", readErr)

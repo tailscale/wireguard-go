@@ -466,6 +466,15 @@ func (q *tunQueue) write(bufs [][]byte, offset int) (int, error) {
 // of the last packet. It mutates packets to reflect the size and offset of each
 // packet in slab, and returns the number of packets read.
 func handleVirtioRead(in []byte, slab []byte, packets []ReadPacket) (int, error) {
+	n, err := splitVirtioRead(in, slab, packets)
+	if err != nil && !errors.Is(err, ErrTooManySegments) {
+		// Only this packet is lost; the next read is unaffected.
+		return n, fmt.Errorf("%w: %w", ErrInvalidGSOPacket, err)
+	}
+	return n, err
+}
+
+func splitVirtioRead(in []byte, slab []byte, packets []ReadPacket) (int, error) {
 	var hdr virtioNetHdr
 	err := hdr.decode(in)
 	if err != nil {
@@ -476,6 +485,17 @@ func handleVirtioRead(in []byte, slab []byte, packets []ReadPacket) (int, error)
 	options, err := hdr.toGSOOptions()
 	if err != nil {
 		return 0, err
+	}
+
+	if options.GSOType != GSONone && (!options.NeedsCsum || options.CsumStart < 20) {
+		// The kernel only fills csum_start and csum_offset for a
+		// CHECKSUM_PARTIAL skb. A GSO packet aggregated by NIC hardware GRO
+		// and forwarded here is CHECKSUM_UNNECESSARY instead, so both are
+		// zero. GSOSplit recomputes every segment's checksums, so the
+		// offsets taken from the packet's own headers are all it needs.
+		if err := setGSOOffsetsFromHeaders(in, &options); err != nil {
+			return 0, err
+		}
 	}
 
 	// Don't trust HdrLen from the kernel as it can be equal to the length
@@ -498,6 +518,53 @@ func handleVirtioRead(in []byte, slab []byte, packets []ReadPacket) (int, error)
 	}
 
 	return GSOSplit(in, options, slab, packets, ReadPacketSpacing)
+}
+
+// setGSOOffsetsFromHeaders sets options.CsumStart and options.CsumOffset from
+// the IP header of in. It fails when the IP header is malformed, or when the
+// transport protocol does not match options.GSOType (this includes IPv6
+// extension headers, which are not walked).
+func setGSOOffsetsFromHeaders(in []byte, options *GSOOptions) error {
+	if len(in) < 1 {
+		return errors.New("packet is too short")
+	}
+	var iphLen int
+	var proto uint8
+	switch ipVersion := in[0] >> 4; ipVersion {
+	case 4:
+		if len(in) < 20 {
+			return fmt.Errorf("length of packet (%d) < minimum ipv4 header size (%d)", len(in), 20)
+		}
+		iphLen = int(in[0]&0x0f) * 4
+		if iphLen < 20 || iphLen > len(in) {
+			return fmt.Errorf("ipv4 header len is invalid: %d", iphLen)
+		}
+		proto = in[9]
+	case 6:
+		if len(in) < 40 {
+			return fmt.Errorf("length of packet (%d) < minimum ipv6 header size (%d)", len(in), 40)
+		}
+		iphLen = 40
+		proto = in[6]
+	default:
+		return fmt.Errorf("invalid ip header version: %d", ipVersion)
+	}
+	var wantProto uint8
+	var csumOffset uint16
+	switch options.GSOType {
+	case GSOTCPv4, GSOTCPv6:
+		wantProto, csumOffset = ipProtoTCP, 16
+	case GSOUDPL4:
+		wantProto, csumOffset = ipProtoUDP, 6
+	default:
+		return fmt.Errorf("unsupported GSO type: %s", options.GSOType)
+	}
+	if proto != wantProto {
+		return fmt.Errorf("transport protocol %d does not match GSO type %s", proto, options.GSOType)
+	}
+	options.CsumStart = uint16(iphLen)
+	options.CsumOffset = csumOffset
+	return nil
 }
 
 // assert that [ReadPacketSpacing] is >= [virtioNetHdrLen], as [NativeTun.Read]
