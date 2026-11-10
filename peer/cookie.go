@@ -95,7 +95,7 @@ type SourceLimiter interface {
 // admission for a local generation. It may be copied or passed to another
 // goroutine. [Admission] does not authenticate the remote peer.
 type AdmittedHandshake struct {
-	wire     [MessageInitiationSize]byte
+	wire     [MessageHybridInitiationSize]byte
 	size     int
 	identity *identityRecord
 }

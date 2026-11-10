@@ -6,6 +6,8 @@
 package peer
 
 import (
+	"crypto/mlkem"
+
 	"golang.org/x/crypto/chacha20poly1305"
 )
 
@@ -81,6 +83,7 @@ func NewLocalIdentity(epoch uint64, provider Static) (LocalIdentity, error) {
 type PreparedInitiation struct {
 	message        messageInitiation
 	remote         PublicKey
+	remoteKEM      *mlkem.EncapsulationKey768
 	chainKey, hash [32]byte
 	generation     *generation
 }
@@ -95,7 +98,7 @@ func (v PreparedInitiation) RemoteStatic() PublicKey { return v.remote }
 // authentication, and propagates key-agreement errors from the provider.
 func PrepareInitiation(admitted AdmittedHandshake) (PreparedInitiation, error) {
 	var v PreparedInitiation
-	if admitted.identity == nil || admitted.size != MessageInitiationSize {
+	if admitted.identity == nil || (admitted.size != MessageInitiationSize && admitted.size != MessageHybridInitiationSize) {
 		return v, ErrHandshake
 	}
 	if err := v.message.unmarshal(admitted.wire[:admitted.size]); err != nil {
@@ -107,9 +110,13 @@ func PrepareInitiation(admitted AdmittedHandshake) (PreparedInitiation, error) {
 	}
 	var key [chacha20poly1305.KeySize]byte
 	pub := admitted.identity.public
-	mixHash(&v.hash, &initialHash, pub[:])
+	startHash, startChainKey := initialHash, initialChainKey
+	if msg.HasKEM {
+		startHash, startChainKey = hybridInitialHash, hybridInitialChainKey
+	}
+	mixHash(&v.hash, &startHash, pub[:])
 	mixHash(&v.hash, &v.hash, msg.Ephemeral[:])
-	mixKey(&v.chainKey, &initialChainKey, msg.Ephemeral[:])
+	mixKey(&v.chainKey, &startChainKey, msg.Ephemeral[:])
 	ss, err := sharedSecret(admitted.identity.provider, msg.Ephemeral)
 	if err != nil {
 		return PreparedInitiation{}, err
@@ -118,7 +125,20 @@ func PrepareInitiation(admitted AdmittedHandshake) (PreparedInitiation, error) {
 	defer clear(key[:])
 	kdf2(&v.chainKey, &key, v.chainKey[:], ss[:])
 	aead, _ := newAEAD(key[:])
-	if _, err := aead.Open(v.remote[:0], zeroNonce[:], msg.Static[:], v.hash[:]); err != nil {
+	staticNonce := zeroNonce[:]
+	if msg.HasKEM {
+		var kem [mlkem.EncapsulationKeySize768]byte
+		if _, err := aead.Open(kem[:0], zeroNonce[:], msg.EphemeralKEM[:], v.hash[:]); err != nil {
+			return PreparedInitiation{}, ErrHandshake
+		}
+		v.remoteKEM, err = mlkem.NewEncapsulationKey768(kem[:])
+		if err != nil {
+			return PreparedInitiation{}, ErrHandshake
+		}
+		mixHash(&v.hash, &v.hash, msg.EphemeralKEM[:])
+		staticNonce = oneNonce[:]
+	}
+	if _, err := aead.Open(v.remote[:0], staticNonce, msg.Static[:], v.hash[:]); err != nil {
 		return PreparedInitiation{}, ErrHandshake
 	}
 	mixHash(&v.hash, &v.hash, msg.Static[:])

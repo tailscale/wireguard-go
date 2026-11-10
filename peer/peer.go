@@ -99,6 +99,9 @@ const (
 type Config struct {
 	// PresharedKey is the optional symmetric handshake secret.
 	PresharedKey PresharedKey
+	// Hybrid selects the Tailscale ML-KEM-768 hybrid handshake.
+	// Both endpoints must use the same mode. There is no automatic fallback.
+	Hybrid bool
 	// PersistentKeepalive is the interval between idle keepalives.
 	// Zero disables persistent keepalives. Negative values are invalid.
 	PersistentKeepalive time.Duration
@@ -131,6 +134,7 @@ type Peer struct {
 	static                     Static
 	localPublic                PublicKey
 	presharedKey               PresharedKey
+	hybrid                     bool
 	precomputedStaticStatic    [32]byte
 	precomputedValid           bool
 	handshake                  handshake
@@ -167,7 +171,7 @@ func New(now time.Time, id LocalIdentity, alloc IndexAllocator, remote PublicKey
 	if err != nil {
 		return nil, Update{}, err
 	}
-	p := &Peer{static: id.record.provider, localPublic: id.record.public, identity: id, identityEpoch: id.record.epoch, alloc: alloc, remoteStatic: remote, presharedKey: config.PresharedKey, precomputedStaticStatic: ss, precomputedValid: true, policy: config.HandshakePolicy, persistent: config.PersistentKeepalive, mtu: config.PaddingMTU, now: now}
+	p := &Peer{static: id.record.provider, localPublic: id.record.public, identity: id, identityEpoch: id.record.epoch, alloc: alloc, remoteStatic: remote, presharedKey: config.PresharedKey, hybrid: config.Hybrid, precomputedStaticStatic: ss, precomputedValid: true, policy: config.HandshakePolicy, persistent: config.PersistentKeepalive, mtu: config.PaddingMTU, now: now}
 	p.transport.tx.now, p.transport.rx.now = now, now
 	p.cookieGen.init(remote)
 	p.armPersistent(config.KeepaliveStart)
@@ -197,6 +201,35 @@ func (p *Peer) LastHandshake() time.Time { return p.lastHandshake }
 // It returns false for a closed peer or a time before the peer's current time.
 func (p *Peer) HasSession(now time.Time) bool {
 	return !p.closed && !now.Before(p.now) && usable(p.keypairs.current, now)
+}
+
+// HasHybridSession reports whether p has a usable send session derived from a
+// hybrid handshake at now. Changing handshake mode does not change existing keys.
+func (p *Peer) HasHybridSession(now time.Time) bool {
+	return p.HasSession(now) && p.keypairs.current.isHybrid
+}
+
+// SetHybridHandshake changes the mode used by subsequent handshakes.
+// A mode change discards the pending handshake and schedules recovery according
+// to [HandshakePolicy]. Established sessions remain usable. Repeating the current
+// mode preserves pending work. The handshake send-rate guard remains in effect.
+func (p *Peer) SetHybridHandshake(now time.Time, hybrid bool) (u Update, err error) {
+	defer func() { u = p.update() }()
+	if err = p.advance(now); err != nil {
+		return
+	}
+	if p.hybrid == hybrid {
+		return
+	}
+	p.hybrid = hybrid
+	p.releaseHandshakeIndex()
+	p.handshake.clear()
+	p.setWakeTimer(&p.timers.handshakeExpiry, time.Time{})
+	p.timers.attempted = false
+	p.timers.attempts = 0
+	p.timers.refreshNeeded = true
+	p.scheduleRecovery()
+	return
 }
 
 // SetPresharedKey changes the secret used by subsequent handshake processing.

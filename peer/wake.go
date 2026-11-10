@@ -231,7 +231,7 @@ func (p *Peer) HandleWake(now time.Time, controls []Packet) (result BatchResult,
 		}
 		size := MessageKeepaliveSize
 		if handshake {
-			size = MessageInitiationSize
+			size = p.initiationSize()
 		}
 		if n == len(controls) {
 			return BatchResult{N: n}, ErrShortBuffer

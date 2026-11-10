@@ -24,7 +24,7 @@ type keypair struct {
 	_                       cpu.CacheLinePad
 	send, receive           cipher.AEAD
 	replayFilter            replay.Filter
-	isInitiator             bool
+	isInitiator, isHybrid   bool
 	created                 time.Time
 	localIndex, remoteIndex uint32
 }

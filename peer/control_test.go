@@ -42,7 +42,15 @@ func (a *failingAllocator) Release(index uint32, p *Peer) {
 }
 
 func TestIndexFailureTransactionalRollback(t *testing.T) {
-	q := newPair(t, Config{HandshakePolicy: automaticPolicy})
+	testIndexFailureTransactionalRollback(t, false)
+}
+
+func TestHybridIndexFailureTransactionalRollback(t *testing.T) {
+	testIndexFailureTransactionalRollback(t, true)
+}
+
+func testIndexFailureTransactionalRollback(t *testing.T, hybrid bool) {
+	q := newPair(t, Config{HandshakePolicy: automaticPolicy, Hybrid: hybrid})
 	alloc := new(failingAllocator)
 	q.a.alloc = alloc
 	first, _, err := q.a.Initiate(epoch, control())
@@ -86,7 +94,15 @@ func TestIndexFailureTransactionalRollback(t *testing.T) {
 }
 
 func TestHandshakeShortOutputAndResponseFailureRollback(t *testing.T) {
-	q := newPair(t, Config{HandshakePolicy: automaticPolicy})
+	testHandshakeShortOutputAndResponseFailureRollback(t, false)
+}
+
+func TestHybridHandshakeShortOutputAndResponseFailureRollback(t *testing.T) {
+	testHandshakeShortOutputAndResponseFailureRollback(t, true)
+}
+
+func testHandshakeShortOutputAndResponseFailureRollback(t *testing.T, hybrid bool) {
+	q := newPair(t, Config{HandshakePolicy: automaticPolicy, Hybrid: hybrid})
 	short := Packet{Buffer: make([]byte, 147)}
 	if _, _, err := q.a.Initiate(epoch, short); !errors.Is(err, ErrShortBuffer) || q.indexes.Len() != 0 {
 		t.Fatal("initiation short buffer changed state")
@@ -124,7 +140,15 @@ func TestHandshakeShortOutputAndResponseFailureRollback(t *testing.T) {
 }
 
 func TestHandshakeReplayFloodAndMismatchedPSK(t *testing.T) {
-	q := newPair(t, Config{HandshakePolicy: automaticPolicy})
+	testHandshakeReplayFloodAndMismatchedPSK(t, false)
+}
+
+func TestHybridHandshakeReplayFloodAndMismatchedPSK(t *testing.T) {
+	testHandshakeReplayFloodAndMismatchedPSK(t, true)
+}
+
+func testHandshakeReplayFloodAndMismatchedPSK(t *testing.T, hybrid bool) {
+	q := newPair(t, Config{HandshakePolicy: automaticPolicy, Hybrid: hybrid})
 	init, _, err := q.a.Initiate(epoch, control())
 	if err != nil {
 		t.Fatal(err)
@@ -153,7 +177,7 @@ func TestHandshakeReplayFloodAndMismatchedPSK(t *testing.T) {
 	if _, _, err = q.b.HandleInitiation(epoch.Add(2*time.Second), prepare(t, admit(t, q.ab, epoch.Add(2*time.Second), fresh)), control()); !errors.Is(err, ErrHandshake) {
 		t.Fatal("flood accepted")
 	}
-	q2 := newPair(t, Config{HandshakePolicy: automaticPolicy})
+	q2 := newPair(t, Config{HandshakePolicy: automaticPolicy, Hybrid: hybrid})
 	if _, err = q2.b.SetPresharedKey(epoch, PresharedKey{1}); err != nil {
 		t.Fatal(err)
 	}

@@ -6,6 +6,7 @@
 package peer
 
 import (
+	"crypto/mlkem"
 	"encoding/binary"
 	"errors"
 	"time"
@@ -17,10 +18,11 @@ import (
 )
 
 const (
-	noiseConstruction = "Noise_IKpsk2_25519_ChaChaPoly_BLAKE2s"
-	wgIdentifier      = "WireGuard v1 zx2c4 Jason@zx2c4.com"
-	labelMAC1         = "mac1----"
-	labelCookie       = "cookie--"
+	noiseConstruction       = "Noise_IKpsk2_25519_ChaChaPoly_BLAKE2s"
+	hybridNoiseConstruction = "Noise_IKhfs+psk2_25519+MLKEM768_ChaChaPoly_BLAKE2s"
+	wgIdentifier            = "WireGuard v1 zx2c4 Jason@zx2c4.com"
+	labelMAC1               = "mac1----"
+	labelCookie             = "cookie--"
 )
 
 const (
@@ -37,10 +39,16 @@ const (
 
 const (
 	// MessageInitiationSize, MessageResponseSize, and MessageCookieReplySize
-	// are the exact wire lengths of their handshake and cookie messages.
+	// are the exact wire lengths of classical handshakes and cookie replies.
 	MessageInitiationSize = 148
 
 	MessageResponseSize = 92
+
+	// MessageHybridInitiationSize is the hybrid initiation wire length.
+	MessageHybridInitiationSize = MessageInitiationSize + mlkem.EncapsulationKeySize768 + chacha20poly1305.Overhead
+
+	// MessageHybridResponseSize is the hybrid response wire length.
+	MessageHybridResponseSize = MessageResponseSize + mlkem.CiphertextSize768 + chacha20poly1305.Overhead
 
 	MessageCookieReplySize = 64
 
@@ -59,95 +67,142 @@ const (
 )
 
 type messageInitiation struct {
-	Type      uint32
-	Sender    uint32
-	Ephemeral PublicKey
-	// Static is the encrypted static public key and authentication tag.
-	Static [PublicKeySize + chacha20poly1305.Overhead]byte
-	// Timestamp is the encrypted replay timestamp and authentication tag.
-	Timestamp [tai64n.TimestampSize + chacha20poly1305.Overhead]byte
-	// MAC1 is the message MAC keyed from the receiver's public key.
-	MAC1 [blake2s.Size128]byte
-	// MAC2 is the message MAC keyed from the source cookie.
-	MAC2 [blake2s.Size128]byte
+	Type         uint32
+	IsRetry      bool
+	Sender       uint32
+	Ephemeral    PublicKey
+	HasKEM       bool
+	EphemeralKEM [mlkem.EncapsulationKeySize768 + chacha20poly1305.Overhead]byte
+	Static       [PublicKeySize + chacha20poly1305.Overhead]byte
+	Timestamp    [tai64n.TimestampSize + chacha20poly1305.Overhead]byte
+	MAC1         [blake2s.Size128]byte
+	MAC2         [blake2s.Size128]byte
 }
 
 type messageResponse struct {
-	Type      uint32
-	Sender    uint32
-	Receiver  uint32
-	Ephemeral PublicKey
-	// Empty authenticates the empty response payload.
-	Empty [chacha20poly1305.Overhead]byte
-	// MAC1 is the message MAC keyed from the receiver's public key.
-	MAC1 [blake2s.Size128]byte
-	// MAC2 is the message MAC keyed from the source cookie.
-	MAC2 [blake2s.Size128]byte
+	Type         uint32
+	IsRetry      bool
+	Sender       uint32
+	Receiver     uint32
+	Ephemeral    PublicKey
+	HasKEM       bool
+	EphemeralKEM [mlkem.CiphertextSize768 + chacha20poly1305.Overhead]byte
+	Empty        [chacha20poly1305.Overhead]byte
+	MAC1         [blake2s.Size128]byte
+	MAC2         [blake2s.Size128]byte
 }
 
 var errMessageLengthMismatch = errors.New("message length mismatch")
 
 func (msg *messageInitiation) unmarshal(b []byte) error {
-	if len(b) != MessageInitiationSize {
+	if len(b) != MessageInitiationSize && len(b) != MessageHybridInitiationSize {
 		return errMessageLengthMismatch
 	}
-	msg.Type = binary.LittleEndian.Uint32(b)
+
+	msg.Type, msg.IsRetry = parseTypeField(b)
 	msg.Sender = binary.LittleEndian.Uint32(b[4:])
 	copy(msg.Ephemeral[:], b[8:])
-	copy(msg.Static[:], b[8+len(msg.Ephemeral):])
-	copy(msg.Timestamp[:], b[8+len(msg.Ephemeral)+len(msg.Static):])
-	copy(msg.MAC1[:], b[8+len(msg.Ephemeral)+len(msg.Static)+len(msg.Timestamp):])
-	copy(msg.MAC2[:], b[8+len(msg.Ephemeral)+len(msg.Static)+len(msg.Timestamp)+len(msg.MAC1):])
+	off := 8 + len(msg.Ephemeral)
+	msg.HasKEM = len(b) == MessageHybridInitiationSize
+	if msg.HasKEM {
+		copy(msg.EphemeralKEM[:], b[off:])
+		off += len(msg.EphemeralKEM)
+	}
+	copy(msg.Static[:], b[off:])
+	copy(msg.Timestamp[:], b[off+len(msg.Static):])
+	copy(msg.MAC1[:], b[off+len(msg.Static)+len(msg.Timestamp):])
+	copy(msg.MAC2[:], b[off+len(msg.Static)+len(msg.Timestamp)+len(msg.MAC1):])
+
 	return nil
 }
 
 func (msg *messageInitiation) marshal(b []byte) error {
-	if len(b) != MessageInitiationSize {
+	if (msg.HasKEM && len(b) != MessageHybridInitiationSize) || (!msg.HasKEM && len(b) != MessageInitiationSize) {
 		return errMessageLengthMismatch
 	}
-	binary.LittleEndian.PutUint32(b, msg.Type)
+
+	putTypeField(b, msg.Type, msg.IsRetry)
 	binary.LittleEndian.PutUint32(b[4:], msg.Sender)
 	copy(b[8:], msg.Ephemeral[:])
-	copy(b[8+len(msg.Ephemeral):], msg.Static[:])
-	copy(b[8+len(msg.Ephemeral)+len(msg.Static):], msg.Timestamp[:])
-	copy(b[8+len(msg.Ephemeral)+len(msg.Static)+len(msg.Timestamp):], msg.MAC1[:])
-	copy(b[8+len(msg.Ephemeral)+len(msg.Static)+len(msg.Timestamp)+len(msg.MAC1):], msg.MAC2[:])
+	off := 8 + len(msg.Ephemeral)
+	if msg.HasKEM {
+		copy(b[off:], msg.EphemeralKEM[:])
+		off += len(msg.EphemeralKEM)
+	}
+	copy(b[off:], msg.Static[:])
+	copy(b[off+len(msg.Static):], msg.Timestamp[:])
+	copy(b[off+len(msg.Static)+len(msg.Timestamp):], msg.MAC1[:])
+	copy(b[off+len(msg.Static)+len(msg.Timestamp)+len(msg.MAC1):], msg.MAC2[:])
+
 	return nil
 }
 
 func (msg *messageResponse) unmarshal(b []byte) error {
-	if len(b) != MessageResponseSize {
+	if len(b) != MessageResponseSize && len(b) != MessageHybridResponseSize {
 		return errMessageLengthMismatch
 	}
-	msg.Type = binary.LittleEndian.Uint32(b)
+
+	msg.Type, msg.IsRetry = parseTypeField(b)
 	msg.Sender = binary.LittleEndian.Uint32(b[4:])
 	msg.Receiver = binary.LittleEndian.Uint32(b[8:])
 	copy(msg.Ephemeral[:], b[12:])
-	copy(msg.Empty[:], b[12+len(msg.Ephemeral):])
-	copy(msg.MAC1[:], b[12+len(msg.Ephemeral)+len(msg.Empty):])
-	copy(msg.MAC2[:], b[12+len(msg.Ephemeral)+len(msg.Empty)+len(msg.MAC1):])
+	off := 12 + len(msg.Ephemeral)
+	msg.HasKEM = len(b) == MessageHybridResponseSize
+	if msg.HasKEM {
+		copy(msg.EphemeralKEM[:], b[off:])
+		off += len(msg.EphemeralKEM)
+	}
+	copy(msg.Empty[:], b[off:])
+	copy(msg.MAC1[:], b[off+len(msg.Empty):])
+	copy(msg.MAC2[:], b[off+len(msg.Empty)+len(msg.MAC1):])
+
 	return nil
 }
 
 func (msg *messageResponse) marshal(b []byte) error {
-	if len(b) != MessageResponseSize {
+	if (msg.HasKEM && len(b) != MessageHybridResponseSize) || (!msg.HasKEM && len(b) != MessageResponseSize) {
 		return errMessageLengthMismatch
 	}
-	binary.LittleEndian.PutUint32(b, msg.Type)
+
+	putTypeField(b, msg.Type, msg.IsRetry)
 	binary.LittleEndian.PutUint32(b[4:], msg.Sender)
 	binary.LittleEndian.PutUint32(b[8:], msg.Receiver)
 	copy(b[12:], msg.Ephemeral[:])
-	copy(b[12+len(msg.Ephemeral):], msg.Empty[:])
-	copy(b[12+len(msg.Ephemeral)+len(msg.Empty):], msg.MAC1[:])
-	copy(b[12+len(msg.Ephemeral)+len(msg.Empty)+len(msg.MAC1):], msg.MAC2[:])
+	off := 12 + len(msg.Ephemeral)
+	if msg.HasKEM {
+		copy(b[off:], msg.EphemeralKEM[:])
+		off += len(msg.EphemeralKEM)
+	}
+	copy(b[off:], msg.Empty[:])
+	copy(b[off+len(msg.Empty):], msg.MAC1[:])
+	copy(b[off+len(msg.Empty)+len(msg.MAC1):], msg.MAC2[:])
+
 	return nil
 }
 
-func msgType(dgram []byte) uint32 {
-	if len(dgram) < 4 {
-		return 0
+const handshakeRetryMask = uint32(1 << 31)
+
+// PacketIsRetry reports whether a packet carries the Tailscale handshake retry hint.
+// The hint is unauthenticated and must not be used for authorization.
+// Standard WireGuard packets and inputs shorter than four bytes return false.
+func PacketIsRetry(b []byte) bool {
+	_, retry := parseTypeField(b)
+	return retry
+}
+
+func parseTypeField(b []byte) (uint32, bool) {
+	if len(b) < 4 {
+		return 0, false
 	}
-	return binary.LittleEndian.Uint32(dgram[:4])
+	v := binary.LittleEndian.Uint32(b)
+	return v &^ handshakeRetryMask, v&handshakeRetryMask != 0
+}
+
+func putTypeField(b []byte, typ uint32, retry bool) {
+	if retry {
+		typ |= handshakeRetryMask
+	}
+	binary.LittleEndian.PutUint32(b, typ)
 }
 
 // ParseHeader returns the message type and receiver index after checking framing.
@@ -155,15 +210,20 @@ func msgType(dgram []byte) uint32 {
 // It returns an error for an unknown type, a wrong fixed message length, or a
 // transport shorter than [MessageKeepaliveSize]. It does not authenticate the
 // message. Use the index only to select the [Peer] that will validate it.
+// Handshake framing accepts classical and hybrid lengths and strips the retry
+// hint from typ. Other reserved bits and retry hints on non-handshakes are rejected.
 func ParseHeader(wire []byte) (typ, receiver uint32, err error) {
-	typ = msgType(wire)
+	typ, retry := parseTypeField(wire)
+	if retry && typ != MessageInitiationType && typ != MessageResponseType {
+		return 0, 0, ErrTransport
+	}
 	switch typ {
 	case MessageInitiationType:
-		if len(wire) != MessageInitiationSize {
+		if len(wire) != MessageInitiationSize && len(wire) != MessageHybridInitiationSize {
 			return 0, 0, errMessageLengthMismatch
 		}
 	case MessageResponseType:
-		if len(wire) != MessageResponseSize {
+		if len(wire) != MessageResponseSize && len(wire) != MessageHybridResponseSize {
 			return 0, 0, errMessageLengthMismatch
 		}
 		receiver = binary.LittleEndian.Uint32(wire[8:12])
@@ -184,14 +244,20 @@ func ParseHeader(wire []byte) (typ, receiver uint32, err error) {
 }
 
 var (
-	initialChainKey [blake2s.Size]byte
-	initialHash     [blake2s.Size]byte
-	zeroNonce       noiseNonce
+	initialChainKey       [blake2s.Size]byte
+	initialHash           [blake2s.Size]byte
+	hybridInitialChainKey [blake2s.Size]byte
+	hybridInitialHash     [blake2s.Size]byte
+	oneNonce              noiseNonce
+	zeroNonce             noiseNonce
 )
 
 func init() {
 	initialChainKey = blake2s.Sum256([]byte(noiseConstruction))
 	mixHash(&initialHash, &initialChainKey, []byte(wgIdentifier))
+	hybridInitialChainKey = blake2s.Sum256([]byte(hybridNoiseConstruction))
+	mixHash(&hybridInitialHash, &hybridInitialChainKey, []byte(wgIdentifier))
+	oneNonce[4] = 1
 }
 
 const (

@@ -8,18 +8,49 @@ package peer
 import "time"
 
 // Initiate writes a handshake initiation at out.Offset and returns its packet.
-// It requires [MessageInitiationSize] bytes after the offset. It returns
+// It requires [MessageInitiationSize] bytes after the offset, or
+// [MessageHybridInitiationSize] when hybrid mode is enabled. It returns
 // [ErrRateLimited] if the last sent handshake was less than [RekeyTimeout] ago.
-func (p *Peer) Initiate(now time.Time, out Packet) (packet Packet, u Update, err error) {
+func (p *Peer) Initiate(now time.Time, out Packet) (Packet, Update, error) {
+	return p.initiateOutput(now, out, false)
+}
+
+// RetryInitiation writes a fresh initiation for a caller-driven retry.
+// Buffer and rate-limit rules match [Peer.Initiate]. Hybrid packets carry the
+// retry hint. A successful call preserves and increments the automatic retry
+// count instead of starting a new attempt budget. Manual retries are allowed
+// after the automatic budget is exhausted.
+func (p *Peer) RetryInitiation(now time.Time, out Packet) (Packet, Update, error) {
+	return p.initiateOutput(now, out, true)
+}
+
+func (p *Peer) initiationSize() int {
+	if p.hybrid {
+		return MessageHybridInitiationSize
+	}
+	return MessageInitiationSize
+}
+
+func (p *Peer) responseSize() int {
+	if p.hybrid {
+		return MessageHybridResponseSize
+	}
+	return MessageResponseSize
+}
+
+func (p *Peer) initiateOutput(now time.Time, out Packet, retry bool) (packet Packet, u Update, err error) {
 	defer func() { u = p.update() }()
 	if err = p.advance(now); err != nil {
 		return
 	}
-	out, err = output(out, MessageInitiationSize)
+	out, err = output(out, p.initiationSize())
 	if err != nil {
 		return
 	}
-	packet, err = p.initiate(now, out, false)
+	packet, err = p.initiate(now, out, retry)
+	if err == nil && retry && p.timers.attempts <= MaxTimerHandshakes {
+		p.timers.attempts++
+	}
 	return
 }
 
@@ -33,7 +64,8 @@ func (p *Peer) initiate(now time.Time, out Packet, retry bool) (Packet, error) {
 		p.handshake = saved
 		return Packet{}, err
 	}
-	out.Size = MessageInitiationSize
+	msg.IsRetry = p.hybrid && retry
+	out.Size = p.initiationSize()
 	_ = msg.marshal(out.Bytes())
 	p.cookieGen.addMACs(now, out.Bytes())
 	p.handshake.lastSentHandshake = now
@@ -54,16 +86,17 @@ func (p *Peer) initiate(now time.Time, out Packet, retry bool) (Packet, error) {
 }
 
 // HandleInitiation authenticates v and writes a handshake response at out.Offset.
-// It requires [MessageResponseSize] bytes after the offset. It returns [ErrHandshake]
-// if v belongs to another local generation or remote, fails authentication, or
-// violates timestamp replay or initiation rate limits. On success, the derived
+// It requires [MessageResponseSize] bytes after the offset, or
+// [MessageHybridResponseSize] when hybrid mode is enabled. It returns [ErrHandshake]
+// if v belongs to another local generation or remote, uses another handshake
+// mode, fails authentication, or violates timestamp replay or initiation rate limits. On success, the derived
 // session awaits an authenticated transport packet before it can send.
 func (p *Peer) HandleInitiation(now time.Time, v PreparedInitiation, out Packet) (packet Packet, u Update, err error) {
 	defer func() { u = p.update() }()
 	if err = p.advance(now); err != nil {
 		return
 	}
-	out, err = output(out, MessageResponseSize)
+	out, err = output(out, p.responseSize())
 	if err != nil {
 		return
 	}
@@ -80,6 +113,7 @@ func (p *Peer) HandleInitiation(now time.Time, v PreparedInitiation, out Packet)
 	if err = p.beginSession(now); err != nil {
 		panic(err)
 	}
+	response.IsRetry = p.hybrid && v.message.IsRetry
 	_ = response.marshal(out.Bytes())
 	p.cookieGen.addMACs(now, out.Bytes())
 	p.handshake.lastSentHandshake = now
@@ -102,7 +136,7 @@ func (p *Peer) HandleResponse(now time.Time, v AdmittedHandshake, out Packet) (p
 	if err != nil {
 		return
 	}
-	if v.identity == nil || p.identity.record == nil || v.identity.marker != p.identity.record.marker || v.size != MessageResponseSize {
+	if v.identity == nil || p.identity.record == nil || v.identity.marker != p.identity.record.marker || v.size != p.responseSize() {
 		return Packet{}, u, ErrHandshake
 	}
 	var msg messageResponse

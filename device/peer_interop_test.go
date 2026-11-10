@@ -92,6 +92,11 @@ type interopPair struct {
 
 func newInteropPair(t testing.TB, psk, devicePSK core.PresharedKey) *interopPair {
 	t.Helper()
+	return newInteropPairMode(t, psk, devicePSK, false)
+}
+
+func newInteropPairMode(t testing.TB, psk, devicePSK core.PresharedKey, hybrid bool) *interopPair {
+	t.Helper()
 	var ck core.PrivateKey
 	ck[0] = 7
 	var dk NoisePrivateKey
@@ -110,11 +115,11 @@ func newInteropPair(t testing.TB, psk, devicePSK core.PresharedKey) *interopPair
 	h.dev = NewDevice(h.tun.TUN(), h.bind, NewLogger(LogLevelError, "interop: "))
 	t.Cleanup(h.dev.Close)
 	public := id.Public()
-	if err := h.dev.IpcSet(uapiCfg("private_key", hex.EncodeToString(dk[:]), "public_key", hex.EncodeToString(public[:]), "preshared_key", hex.EncodeToString(devicePSK[:]), "allowed_ip", "10.0.0.1/32", "allowed_ip", "fd00::1/128", "endpoint", "127.0.0.1:1")); err != nil {
+	if err := h.dev.IpcSet(uapiCfg("private_key", hex.EncodeToString(dk[:]), "public_key", hex.EncodeToString(public[:]), "preshared_key", hex.EncodeToString(devicePSK[:]), "hybrid", fmt.Sprint(hybrid), "allowed_ip", "10.0.0.1/32", "allowed_ip", "fd00::1/128", "endpoint", "127.0.0.1:1")); err != nil {
 		t.Fatal(err)
 	}
 	h.dp, _ = h.dev.LookupActivePeer(NoisePublicKey(public))
-	h.p, h.update, err = core.New(time.Now(), generation, h.indexes, core.PublicKey(dk.publicKey()), core.Config{PresharedKey: psk, PaddingMTU: 1420})
+	h.p, h.update, err = core.New(time.Now(), generation, h.indexes, core.PublicKey(dk.publicKey()), core.Config{PresharedKey: psk, PaddingMTU: 1420, Hybrid: hybrid})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -393,11 +398,15 @@ func (h *interopPair) checkPlain(r core.ReceiveResult, ip []byte) {
 	}
 }
 
-func TestPeerInteropBothRoles(t *testing.T) { testPeerInteropBothRoles(t, false) }
+func TestPeerInteropBothRoles(t *testing.T) { testPeerInteropBothRoles(t, false, false) }
 
-func TestPeerInteropTransportBothRoles(t *testing.T) { testPeerInteropBothRoles(t, true) }
+func TestPeerInteropTransportBothRoles(t *testing.T) { testPeerInteropBothRoles(t, true, false) }
 
-func testPeerInteropBothRoles(t *testing.T, duplex bool) {
+func TestPeerHybridInteropBothRoles(t *testing.T) { testPeerInteropBothRoles(t, false, true) }
+
+func TestPeerHybridInteropTransportBothRoles(t *testing.T) { testPeerInteropBothRoles(t, true, true) }
+
+func testPeerInteropBothRoles(t *testing.T, duplex, hybrid bool) {
 	for _, initiator := range []bool{true, false} {
 		for _, pskEnabled := range []bool{false, true} {
 			t.Run(fmt.Sprintf("coreInitiator=%t/psk=%t", initiator, pskEnabled), func(t *testing.T) {
@@ -406,7 +415,7 @@ func testPeerInteropBothRoles(t *testing.T, duplex bool) {
 					if pskEnabled {
 						psk[0] = 0x42
 					}
-					h := newInteropPair(t, psk, psk)
+					h := newInteropPairMode(t, psk, psk, hybrid)
 					h.duplex = duplex
 					h.establish(initiator)
 					for _, v6 := range []bool{false, true} {
@@ -476,13 +485,21 @@ func testPeerInteropBothRoles(t *testing.T, duplex bool) {
 }
 
 func TestPeerInteropPSKFailureAndRotation(t *testing.T) {
+	testPeerInteropPSKFailureAndRotation(t, false)
+}
+
+func TestPeerHybridInteropPSKFailureAndRotation(t *testing.T) {
+	testPeerInteropPSKFailureAndRotation(t, true)
+}
+
+func testPeerInteropPSKFailureAndRotation(t *testing.T, hybrid bool) {
 	for _, initiator := range []bool{true, false} {
 		t.Run(fmt.Sprint(initiator), func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				var a, b core.PresharedKey
 				a[0] = 1
 				b[0] = 2
-				h := newInteropPair(t, a, b)
+				h := newInteropPairMode(t, a, b, hybrid)
 				if initiator {
 					init := h.initiate()
 					h.inject(init.Bytes())
@@ -531,11 +548,15 @@ func TestPeerInteropPSKFailureAndRotation(t *testing.T) {
 	}
 }
 
-func TestPeerInteropRepeatedRekeys(t *testing.T) {
+func TestPeerInteropRepeatedRekeys(t *testing.T) { testPeerInteropRepeatedRekeys(t, false) }
+
+func TestPeerHybridInteropRepeatedRekeys(t *testing.T) { testPeerInteropRepeatedRekeys(t, true) }
+
+func testPeerInteropRepeatedRekeys(t *testing.T, hybrid bool) {
 	for _, initiator := range []bool{true, false} {
 		t.Run(fmt.Sprint(initiator), func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				h := newInteropPair(t, core.PresharedKey{}, core.PresharedKey{})
+				h := newInteropPairMode(t, core.PresharedKey{}, core.PresharedKey{}, hybrid)
 				h.establish(initiator)
 				var retiredToDevice, retiredToCore []byte
 				for round := 0; round < 4; round++ {
@@ -616,10 +637,14 @@ type interopLimiter struct{ calls int }
 
 func (l *interopLimiter) Allow(time.Time, []byte) bool { l.calls++; return true }
 
-func TestPeerInteropCookies(t *testing.T) {
+func TestPeerInteropCookies(t *testing.T) { testPeerInteropCookies(t, false) }
+
+func TestPeerHybridInteropCookies(t *testing.T) { testPeerInteropCookies(t, true) }
+
+func testPeerInteropCookies(t *testing.T, hybrid bool) {
 	t.Run("device-challenges-core", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
-			h := newInteropPair(t, core.PresharedKey{}, core.PresharedKey{})
+			h := newInteropPairMode(t, core.PresharedKey{}, core.PresharedKey{}, hybrid)
 			h.dev.rate.underLoadUntil.Store(time.Now().Add(time.Minute).UnixNano())
 			init := h.initiate()
 			h.inject(init.Bytes())
@@ -644,7 +669,7 @@ func TestPeerInteropCookies(t *testing.T) {
 	})
 	t.Run("core-challenges-device", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
-			h := newInteropPair(t, core.PresharedKey{}, core.PresharedKey{})
+			h := newInteropPairMode(t, core.PresharedKey{}, core.PresharedKey{}, hybrid)
 			source := []byte("canonical-ip-and-port")
 			limiter := new(interopLimiter)
 			if err := h.dp.SendHandshakeInitiation(false); err != nil {
@@ -733,10 +758,14 @@ func TestPeerInteropManualLossAndExpiry(t *testing.T) {
 	})
 }
 
-func TestPeerInteropResponseCookies(t *testing.T) {
+func TestPeerInteropResponseCookies(t *testing.T) { testPeerInteropResponseCookies(t, false) }
+
+func TestPeerHybridInteropResponseCookies(t *testing.T) { testPeerInteropResponseCookies(t, true) }
+
+func testPeerInteropResponseCookies(t *testing.T, hybrid bool) {
 	t.Run("device-challenges-core-response", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
-			h := newInteropPair(t, core.PresharedKey{}, core.PresharedKey{})
+			h := newInteropPairMode(t, core.PresharedKey{}, core.PresharedKey{}, hybrid)
 			h.dev.rate.underLoadUntil.Store(time.Now().Add(time.Minute).UnixNano())
 			if err := h.dp.SendHandshakeInitiation(false); err != nil {
 				t.Fatal(err)
@@ -766,7 +795,7 @@ func TestPeerInteropResponseCookies(t *testing.T) {
 	})
 	t.Run("core-challenges-device-response", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
-			h := newInteropPair(t, core.PresharedKey{}, core.PresharedKey{})
+			h := newInteropPairMode(t, core.PresharedKey{}, core.PresharedKey{}, hybrid)
 			src := []byte("pinned-source")
 			limiter := new(interopLimiter)
 			init := h.initiate()

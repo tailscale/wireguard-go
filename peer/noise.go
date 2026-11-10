@@ -6,6 +6,7 @@
 package peer
 
 import (
+	"crypto/mlkem"
 	"encoding/binary"
 	"errors"
 	"time"
@@ -34,6 +35,8 @@ type handshake struct {
 	localIndex      uint32
 	remoteIndex     uint32
 	remoteEphemeral PublicKey
+	localKEM        *mlkem.DecapsulationKey768
+	remoteKEM       *mlkem.EncapsulationKey768
 
 	lastTimestamp             tai64n.Timestamp
 	lastInitiationConsumption time.Time
@@ -53,6 +56,8 @@ func (h *handshake) clear() {
 	setZero(h.hash[:])
 	h.localIndex = 0
 	h.remoteIndex = 0
+	h.localKEM = nil
+	h.remoteKEM = nil
 	h.state = handshakeZeroed
 }
 
@@ -63,8 +68,15 @@ func (p *Peer) createInitiation(now time.Time) (*messageInitiation, error) {
 	}
 
 	var err error
-	h.hash = initialHash
-	h.chainKey = initialChainKey
+	h.hash, h.chainKey = initialHash, initialChainKey
+	h.localKEM, h.remoteKEM = nil, nil
+	if p.hybrid {
+		h.hash, h.chainKey = hybridInitialHash, hybridInitialChainKey
+		h.localKEM, err = mlkem.GenerateKey768()
+		if err != nil {
+			return nil, err
+		}
+	}
 	h.localEphemeral, err = NewPrivateKey()
 	if err != nil {
 		return nil, err
@@ -74,6 +86,7 @@ func (p *Peer) createInitiation(now time.Time) (*messageInitiation, error) {
 
 	msg := &messageInitiation{
 		Type:      MessageInitiationType,
+		HasKEM:    p.hybrid,
 		Ephemeral: h.localEphemeral.Public(),
 	}
 	h.mixKey(msg.Ephemeral[:])
@@ -88,7 +101,13 @@ func (p *Peer) createInitiation(now time.Time) (*messageInitiation, error) {
 	kdf2(&h.chainKey, &key, h.chainKey[:], ss[:])
 	aead, _ := newAEAD(key[:])
 	pub := p.localPublic
-	aead.Seal(msg.Static[:0], zeroNonce[:], pub[:], h.hash[:])
+	staticNonce := zeroNonce[:]
+	if p.hybrid {
+		aead.Seal(msg.EphemeralKEM[:0], zeroNonce[:], h.localKEM.EncapsulationKey().Bytes(), h.hash[:])
+		h.mixHash(msg.EphemeralKEM[:])
+		staticNonce = oneNonce[:]
+	}
+	aead.Seal(msg.Static[:0], staticNonce, pub[:], h.hash[:])
 	h.mixHash(msg.Static[:])
 
 	// encrypt timestamp using the precomputed static-static secret
@@ -117,6 +136,9 @@ func (p *Peer) consumeInitiation(v PreparedInitiation, now time.Time) bool {
 		return false
 	}
 	msg := &v.message
+	if msg.HasKEM != p.hybrid {
+		return false
+	}
 	hash, chainKey := v.hash, v.chainKey
 	var key [chacha20poly1305.KeySize]byte
 
@@ -141,6 +163,8 @@ func (p *Peer) consumeInitiation(v PreparedInitiation, now time.Time) bool {
 	h.chainKey = chainKey
 	h.remoteIndex = msg.Sender
 	h.remoteEphemeral = msg.Ephemeral
+	h.localKEM = nil
+	h.remoteKEM = v.remoteKEM
 	if timestamp.After(h.lastTimestamp) {
 		h.lastTimestamp = timestamp
 	}
@@ -161,6 +185,7 @@ func (p *Peer) createResponse() (*messageResponse, error) {
 
 	msg := &messageResponse{
 		Type:     MessageResponseType,
+		HasKEM:   p.hybrid,
 		Sender:   h.localIndex,
 		Receiver: h.remoteIndex,
 	}
@@ -177,14 +202,30 @@ func (p *Peer) createResponse() (*messageResponse, error) {
 	if err != nil {
 		return nil, err
 	}
-	h.mixKey(ss[:])
+	var key [chacha20poly1305.KeySize]byte
+	if p.hybrid {
+		if h.remoteKEM == nil {
+			return nil, errors.New("remote KEM not available in hybrid handshake")
+		}
+		kdf2(&h.chainKey, &key, h.chainKey[:], ss[:])
+		clear(ss[:])
+		aead, _ := newAEAD(key[:])
+		kemSS, ciphertext := h.remoteKEM.Encapsulate()
+		aead.Seal(msg.EphemeralKEM[:0], zeroNonce[:], ciphertext, h.hash[:])
+		h.mixHash(msg.EphemeralKEM[:])
+		h.mixKey(kemSS)
+		clear(kemSS)
+	} else {
+		h.mixKey(ss[:])
+		clear(ss[:])
+	}
 	ss, err = h.localEphemeral.sharedSecret(p.remoteStatic)
 	if err != nil {
 		return nil, err
 	}
 	h.mixKey(ss[:])
 
-	var tau, key [blake2s.Size]byte
+	var tau [blake2s.Size]byte
 	kdf3(&h.chainKey, &tau, &key, h.chainKey[:], p.presharedKey[:])
 	h.mixHash(tau[:])
 
@@ -205,7 +246,7 @@ func (p *Peer) createResponse() (*messageResponse, error) {
 
 func (p *Peer) consumeResponse(msg *messageResponse) bool {
 	h := &p.handshake
-	if msg.Type != MessageResponseType || h.state != handshakeInitiationCreated || msg.Receiver != h.localIndex {
+	if msg.Type != MessageResponseType || h.state != handshakeInitiationCreated || msg.Receiver != h.localIndex || msg.HasKEM != p.hybrid || msg.HasKEM != (h.localKEM != nil) {
 		return false
 	}
 
@@ -217,8 +258,26 @@ func (p *Peer) consumeResponse(msg *messageResponse) bool {
 	if err != nil {
 		return false
 	}
-	mixKey(&chainKey, &chainKey, ss[:])
-	setZero(ss[:])
+	var key [chacha20poly1305.KeySize]byte
+	if msg.HasKEM {
+		kdf2(&chainKey, &key, chainKey[:], ss[:])
+		clear(ss[:])
+		aead, _ := newAEAD(key[:])
+		var ciphertext [mlkem.CiphertextSize768]byte
+		if _, err := aead.Open(ciphertext[:0], zeroNonce[:], msg.EphemeralKEM[:], hash[:]); err != nil {
+			return false
+		}
+		mixHash(&hash, &hash, msg.EphemeralKEM[:])
+		kemSS, err := h.localKEM.Decapsulate(ciphertext[:])
+		if err != nil {
+			return false
+		}
+		mixKey(&chainKey, &chainKey, kemSS)
+		clear(kemSS)
+	} else {
+		mixKey(&chainKey, &chainKey, ss[:])
+		clear(ss[:])
+	}
 
 	ss, err = sharedSecret(p.static, msg.Ephemeral)
 	if err != nil {
@@ -227,7 +286,7 @@ func (p *Peer) consumeResponse(msg *messageResponse) bool {
 	mixKey(&chainKey, &chainKey, ss[:])
 	setZero(ss[:])
 
-	var tau, key [blake2s.Size]byte
+	var tau [blake2s.Size]byte
 	kdf3(&chainKey, &tau, &key, chainKey[:], p.presharedKey[:])
 	mixHash(&hash, &hash, tau[:])
 
@@ -261,7 +320,7 @@ func (p *Peer) beginSession(now time.Time) error {
 		return errors.New("invalid state for keypair derivation")
 	}
 
-	kp := &keypair{isInitiator: isInitiator, created: now}
+	kp := &keypair{isInitiator: isInitiator, isHybrid: p.hybrid, created: now}
 	kp.send, _ = newAEAD(sendKey[:])
 	kp.receive, _ = newAEAD(recvKey[:])
 	setZero(sendKey[:])
@@ -276,6 +335,7 @@ func (p *Peer) beginSession(now time.Time) error {
 	setZero(h.hash[:])
 	setZero(h.localEphemeral[:])
 	setZero(h.remoteEphemeral[:])
+	h.localKEM, h.remoteKEM = nil, nil
 	h.state = handshakeZeroed
 
 	kps := &p.keypairs

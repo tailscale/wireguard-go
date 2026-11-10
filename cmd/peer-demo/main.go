@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 
 // Command peer-demo exchanges framed records between four WireGuard identities
-// using three loopback UDP sockets and a shared receiver-index table.
+// using three loopback UDP sockets and a shared receiver-index table. One pair
+// uses classical handshakes and the other uses Tailscale hybrid handshakes.
 // The control owner applies transport activity in bounded batches before
 // control work, scheduling, and the end of each application turn.
 package main
@@ -42,7 +43,7 @@ type route struct {
 	socket      int
 	destination netip.AddrPort
 	remote      *route
-	control     [prefix + peer.MessageInitiationSize]byte
+	control     [prefix + peer.MessageHybridInitiationSize]byte
 	send        [2048]byte
 }
 
@@ -82,7 +83,7 @@ func newOwner(now time.Time, addresses []netip.AddrPort) (*owner, error) {
 		r.remote = o.locals[i^1]
 		r.destination = addresses[r.remote.socket]
 		var err error
-		r.p, r.update, err = peer.New(now, r.generation, &o.indexes, r.remote.identity.Public(), peer.Config{PaddingMTU: 1420})
+		r.p, r.update, err = peer.New(now, r.generation, &o.indexes, r.remote.identity.Public(), peer.Config{PaddingMTU: 1420, Hybrid: i >= 2})
 		if err != nil {
 			o.close()
 			return nil, err
@@ -448,5 +449,5 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	fmt.Printf("4 identities, 3 UDP sockets, 1 index namespace; 8 records; %d coalesced keepalives; no automatic retries\n", wakes)
+	fmt.Printf("4 identities, 3 UDP sockets, 1 index namespace; classical and hybrid sessions; 8 records; %d coalesced keepalives; no automatic retries\n", wakes)
 }

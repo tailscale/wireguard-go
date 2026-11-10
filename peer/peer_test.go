@@ -50,7 +50,9 @@ func newPair(t testing.TB, config Config) pair {
 	return pair{a, b, ia, ib, admission(t, a.identity), admission(t, b.identity), indexes}
 }
 
-func control() Packet { return Packet{Buffer: bytes.Repeat([]byte{0xcc}, 200), Offset: 11} }
+func control() Packet {
+	return Packet{Buffer: bytes.Repeat([]byte{0xcc}, 11+MessageHybridInitiationSize), Offset: 11}
+}
 
 func admit(t testing.TB, a *Admission, now time.Time, wire Packet) AdmittedHandshake {
 	t.Helper()
