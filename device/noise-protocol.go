@@ -444,6 +444,8 @@ func (device *Device) CreateMessageInitiation(peer *Peer) (*MessageInitiation, e
 	return &msg, nil
 }
 
+var errInitiationRejected = errors.New("initiation rejected")
+
 func (device *Device) ConsumeMessageInitiation(msg *MessageInitiation, endpoint conn.Endpoint) *Peer {
 	var (
 		hash     [blake2s.Size]byte
@@ -528,65 +530,64 @@ func (device *Device) ConsumeMessageInitiation(msg *MessageInitiation, endpoint 
 
 	var timestamp tai64n.Timestamp
 
-	handshake.mutex.RLock()
+	if err := func() error {
+		handshake.mutex.Lock()
+		defer handshake.mutex.Unlock()
 
-	// verify that handshake type matches expectation
-	if msg.HasKEM != handshake.hybridHandshake {
-		handshake.mutex.RUnlock()
+		// verify that handshake type matches expectation
+		if msg.HasKEM != handshake.hybridHandshake {
+			return errInitiationRejected
+		}
+
+		if isZero(handshake.precomputedStaticStatic[:]) {
+			return errInitiationRejected
+		}
+		KDF2(
+			&chainKey,
+			&key,
+			chainKey[:],
+			handshake.precomputedStaticStatic[:],
+		)
+		aead, _ = chacha20poly1305New(key[:])
+		_, err = aead.Open(timestamp[:0], ZeroNonce[:], msg.Timestamp[:], hash[:])
+		if err != nil {
+			return errInitiationRejected
+		}
+		mixHash(&hash, &hash, msg.Timestamp[:])
+
+		// protect against replay & flood
+
+		replay := !timestamp.After(handshake.lastTimestamp)
+		flood := time.Since(handshake.lastInitiationConsumption) <= HandshakeInitationRate
+		if replay {
+			return fmt.Errorf("handshake replay @ %v", timestamp)
+		}
+		if flood {
+			return errors.New("handshake flood")
+		}
+
+		// update handshake state
+
+		handshake.hash = hash
+		handshake.chainKey = chainKey
+		handshake.remoteIndex = msg.Sender
+		handshake.remoteEphemeral = msg.Ephemeral
+		handshake.remoteKEM = peerKEM
+		if timestamp.After(handshake.lastTimestamp) {
+			handshake.lastTimestamp = timestamp
+		}
+		now := time.Now()
+		if now.After(handshake.lastInitiationConsumption) {
+			handshake.lastInitiationConsumption = now
+		}
+		handshake.state = handshakeInitiationConsumed
+		return nil
+	}(); err != nil {
+		if err != errInitiationRejected {
+			device.log.Verbosef("%v - ConsumeMessageInitiation: %v", peer, err)
+		}
 		return nil
 	}
-
-	if isZero(handshake.precomputedStaticStatic[:]) {
-		handshake.mutex.RUnlock()
-		return nil
-	}
-	KDF2(
-		&chainKey,
-		&key,
-		chainKey[:],
-		handshake.precomputedStaticStatic[:],
-	)
-	aead, _ = chacha20poly1305New(key[:])
-	_, err = aead.Open(timestamp[:0], ZeroNonce[:], msg.Timestamp[:], hash[:])
-	if err != nil {
-		handshake.mutex.RUnlock()
-		return nil
-	}
-	mixHash(&hash, &hash, msg.Timestamp[:])
-
-	// protect against replay & flood
-
-	replay := !timestamp.After(handshake.lastTimestamp)
-	flood := time.Since(handshake.lastInitiationConsumption) <= HandshakeInitationRate
-	handshake.mutex.RUnlock()
-	if replay {
-		device.log.Verbosef("%v - ConsumeMessageInitiation: handshake replay @ %v", peer, timestamp)
-		return nil
-	}
-	if flood {
-		device.log.Verbosef("%v - ConsumeMessageInitiation: handshake flood", peer)
-		return nil
-	}
-
-	// update handshake state
-
-	handshake.mutex.Lock()
-
-	handshake.hash = hash
-	handshake.chainKey = chainKey
-	handshake.remoteIndex = msg.Sender
-	handshake.remoteEphemeral = msg.Ephemeral
-	handshake.remoteKEM = peerKEM
-	if timestamp.After(handshake.lastTimestamp) {
-		handshake.lastTimestamp = timestamp
-	}
-	now := time.Now()
-	if now.After(handshake.lastInitiationConsumption) {
-		handshake.lastInitiationConsumption = now
-	}
-	handshake.state = handshakeInitiationConsumed
-
-	handshake.mutex.Unlock()
 
 	setZero(hash[:])
 	setZero(chainKey[:])
