@@ -487,12 +487,16 @@ func splitVirtioRead(in []byte, slab []byte, packets []ReadPacket) (int, error) 
 		return 0, err
 	}
 
-	if options.GSOType != GSONone && (!options.NeedsCsum || options.CsumStart < 20) {
+	if options.GSOType != GSONone && !options.NeedsCsum {
 		// The kernel only fills csum_start and csum_offset for a
-		// CHECKSUM_PARTIAL skb. A GSO packet aggregated by NIC hardware GRO
-		// and forwarded here is CHECKSUM_UNNECESSARY instead, so both are
-		// zero. GSOSplit recomputes every segment's checksums, so the
-		// offsets taken from the packet's own headers are all it needs.
+		// CHECKSUM_PARTIAL skb (NEEDS_CSUM). A GSO packet aggregated by NIC
+		// hardware GRO and forwarded here is CHECKSUM_UNNECESSARY instead,
+		// flagged DATA_VALID with both offsets zero. GSOSplit recomputes
+		// every segment's checksums, so the offsets taken from the packet's
+		// own headers are all it needs.
+		if hdr.flags&unix.VIRTIO_NET_HDR_F_DATA_VALID == 0 {
+			return 0, errors.New("GSO packet with neither NEEDS_CSUM nor DATA_VALID")
+		}
 		if err := setGSOOffsetsFromHeaders(in, &options); err != nil {
 			return 0, err
 		}

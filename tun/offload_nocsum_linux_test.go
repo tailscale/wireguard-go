@@ -89,22 +89,31 @@ func Test_handleVirtioReadInvalidGSOPacket(t *testing.T) {
 	}{
 		{
 			"tcp gso type, udp payload",
-			virtioNetHdr{gsoType: unix.VIRTIO_NET_HDR_GSO_TCPV4, gsoSize: 100},
+			virtioNetHdr{flags: unix.VIRTIO_NET_HDR_F_DATA_VALID, gsoType: unix.VIRTIO_NET_HDR_GSO_TCPV4, gsoSize: 100},
 			udp4Packet(ip4PortA, ip4PortB, 250),
 		},
 		{
 			"udp gso type, tcp payload",
-			virtioNetHdr{gsoType: unix.VIRTIO_NET_HDR_GSO_UDP_L4, gsoSize: 100},
+			virtioNetHdr{flags: unix.VIRTIO_NET_HDR_F_DATA_VALID, gsoType: unix.VIRTIO_NET_HDR_GSO_UDP_L4, gsoSize: 100},
 			tcp4Packet(ip4PortA, ip4PortB, header.TCPFlagAck, 250, 1),
 		},
 		{
 			"ipv4 ihl below minimum",
-			virtioNetHdr{gsoType: unix.VIRTIO_NET_HDR_GSO_TCPV4, gsoSize: 100},
+			virtioNetHdr{flags: unix.VIRTIO_NET_HDR_F_DATA_VALID, gsoType: unix.VIRTIO_NET_HDR_GSO_TCPV4, gsoSize: 100},
 			func() []byte {
 				b := tcp4Packet(ip4PortA, ip4PortB, header.TCPFlagAck, 250, 1)
 				b[offset] = 0x44
 				return b
 			}(),
+		},
+		{
+			// Not CHECKSUM_PARTIAL and not CHECKSUM_UNNECESSARY: nothing
+			// says the offsets or the checksums can be trusted. With a
+			// 192.0.2.0/24 source, byte 12 still parses as a valid TCP
+			// header length, so this must be caught before splitting.
+			"gso without checksum flags",
+			virtioNetHdr{gsoType: unix.VIRTIO_NET_HDR_GSO_TCPV4, gsoSize: 100},
+			tcp4Packet(ip4PortA, ip4PortB, header.TCPFlagAck, 250, 1),
 		},
 		{
 			"unsupported gso type",
