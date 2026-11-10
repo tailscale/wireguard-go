@@ -11,43 +11,6 @@ import (
 	"github.com/tailscale/wireguard-go/tun"
 )
 
-type WaitPool struct {
-	pool  sync.Pool
-	cond  sync.Cond
-	lock  sync.Mutex
-	count uint32 // Get calls not yet Put back
-	max   uint32
-}
-
-func NewWaitPool(max uint32, new func() any) *WaitPool {
-	p := &WaitPool{pool: sync.Pool{New: new}, max: max}
-	p.cond = sync.Cond{L: &p.lock}
-	return p
-}
-
-func (p *WaitPool) Get() any {
-	if p.max != 0 {
-		p.lock.Lock()
-		for p.count >= p.max {
-			p.cond.Wait()
-		}
-		p.count++
-		p.lock.Unlock()
-	}
-	return p.pool.Get()
-}
-
-func (p *WaitPool) Put(x any) {
-	p.pool.Put(x)
-	if p.max == 0 {
-		return
-	}
-	p.lock.Lock()
-	defer p.lock.Unlock()
-	p.count--
-	p.cond.Signal()
-}
-
 const (
 	// smallPacketBufSize is the size to be used for [packetBuf.slab]'s pooled in
 	// [Device.pool.smallPacketBufs]. It's large enough to fit WireGuard keepalive
@@ -79,41 +42,52 @@ const (
 )
 
 func (device *Device) PopulatePools() {
-	device.pool.inboundElementsContainer = NewWaitPool(device.config.preallocatedBuffersPerPool, func() any {
-		s := make([]*QueueInboundElement, 0, device.BatchSize())
-		return &QueueInboundElementsContainer{elems: s}
-	})
-	device.pool.outboundElementsContainer = NewWaitPool(device.config.preallocatedBuffersPerPool, func() any {
-		s := make([]*QueueOutboundElement, 0, device.BatchSize())
-		return &QueueOutboundElementsContainer{elems: s}
-	})
-	device.pool.inboundElements = NewWaitPool(device.config.preallocatedBuffersPerPool, func() any {
-		return new(QueueInboundElement)
-	})
-	device.pool.outboundElements = NewWaitPool(device.config.preallocatedBuffersPerPool, func() any {
-		return new(QueueOutboundElement)
-	})
+	device.pool.inboundElementsContainer = &sync.Pool{
+		New: func() any {
+			s := make([]*QueueInboundElement, 0, device.BatchSize())
+			return &QueueInboundElementsContainer{elems: s}
+		},
+	}
+	device.pool.outboundElementsContainer = &sync.Pool{
+		New: func() any {
+			s := make([]*QueueOutboundElement, 0, device.BatchSize())
+			return &QueueOutboundElementsContainer{elems: s}
+		},
+	}
+	device.pool.inboundElements = &sync.Pool{
+		New: func() any {
+			return new(QueueInboundElement)
+		},
+	}
+	device.pool.outboundElements = &sync.Pool{
+		New: func() any {
+			return new(QueueOutboundElement)
+		},
+	}
 	packetBufSize := singlePacketSlabSize
 	if device.BatchSize() > 1 {
 		packetBufSize = batchingSlabSize
 	}
-	device.pool.packetBufs = NewWaitPool(device.config.preallocatedBuffersPerPool, func() any {
-		return newPacketBuf(packetBufSize, func(buf *packetBuf) {
-			device.pool.packetBufs.Put(buf)
-		})
-	})
+	device.pool.packetBufs = &sync.Pool{
+		New: func() any {
+			return newPacketBuf(packetBufSize, func(buf *packetBuf) {
+				device.pool.packetBufs.Put(buf)
+			})
+		},
+	}
 	// A distinct smallPacketBufs pool makes TUN readers copy packets that fit
 	// into [smallPacketBufSize] in the interest of memory savings. Alias
 	// smallPacketBufs to the "full-sized" pool if there is little to be gained
-	// in memory savings, or if the device is configured to limit outstanding
-	// packet memory pool items, which we don't want to artificially inflate.
+	// in memory savings.
 	device.pool.smallPacketBufs = device.pool.packetBufs
-	if packetBufSize >= minPacketBufSizeForDistinctSmallPool && device.config.preallocatedBuffersPerPool == 0 {
-		device.pool.smallPacketBufs = NewWaitPool(device.config.preallocatedBuffersPerPool, func() any {
-			return newPacketBuf(smallPacketBufSize, func(buf *packetBuf) {
-				device.pool.smallPacketBufs.Put(buf)
-			})
-		})
+	if packetBufSize >= minPacketBufSizeForDistinctSmallPool {
+		device.pool.smallPacketBufs = &sync.Pool{
+			New: func() any {
+				return newPacketBuf(smallPacketBufSize, func(buf *packetBuf) {
+					device.pool.smallPacketBufs.Put(buf)
+				})
+			},
+		}
 	}
 }
 
@@ -150,8 +124,7 @@ func (device *Device) hasDistinctSmallPacketBufPool() bool {
 }
 
 // getSmallPacketBuf returns a [*packetBuf] smaller or equal in size to what
-// [Device.getPacketBuf] returns depending on [Device] batching and [WaitPool]
-// configuration.
+// [Device.getPacketBuf] returns depending on [Device] batching configuration.
 func (device *Device) getSmallPacketBuf() *packetBuf {
 	b := device.pool.smallPacketBufs.Get().(*packetBuf)
 	b.incRef()

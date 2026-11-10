@@ -6,6 +6,7 @@
 package device
 
 import (
+	"sync"
 	"sync/atomic"
 	"testing"
 )
@@ -56,11 +57,13 @@ func TestPacketBufRefCountUnderflow(t *testing.T) {
 
 func TestGetPacketBufOwnsReference(t *testing.T) {
 	device := new(Device)
-	device.pool.packetBufs = NewWaitPool(0, func() any {
-		return newPacketBuf(0, func(buf *packetBuf) {
-			device.pool.packetBufs.Put(buf)
-		})
-	})
+	device.pool.packetBufs = &sync.Pool{
+		New: func() any {
+			return newPacketBuf(0, func(buf *packetBuf) {
+				device.pool.packetBufs.Put(buf)
+			})
+		},
+	}
 
 	buf := device.getPacketBuf()
 	if got := buf.refCount.Load(); got != 1 {

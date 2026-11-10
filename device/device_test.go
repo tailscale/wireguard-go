@@ -683,7 +683,7 @@ func TestDeviceConfig(t *testing.T) {
 		c.queueOutboundSize != DefaultQueueOutboundSize ||
 		c.queueInboundSize != DefaultQueueInboundSize ||
 		c.queueHandshakeSize != DefaultQueueHandshakeSize ||
-		c.preallocatedBuffersPerPool != DefaultPreallocatedBuffersPerPool {
+		c.queueStagedGlobalLimit != DefaultQueueStagedGlobalLimit {
 		t.Fatalf("default device config: %+v", c)
 	}
 
@@ -696,9 +696,9 @@ func TestDeviceOptions(t *testing.T) {
 		WithQueueOutboundSize(2),
 		WithQueueInboundSize(3),
 		WithQueueHandshakeSize(4),
-		WithPreallocatedBuffersPerPool(5),
-		WithPeerQueueOutboundSize(6),
-		WithPeerQueueInboundSize(7),
+		WithPeerQueueOutboundSize(5),
+		WithPeerQueueInboundSize(6),
+		WithQueueStagedGlobalLimit(7),
 	}
 	for _, opt := range opts {
 		opt.apply(&c)
@@ -707,9 +707,9 @@ func TestDeviceOptions(t *testing.T) {
 		c.queueOutboundSize != 2 ||
 		c.queueInboundSize != 3 ||
 		c.queueHandshakeSize != 4 ||
-		c.preallocatedBuffersPerPool != 5 ||
-		c.peerQueueOutboundSize != 6 ||
-		c.peerQueueInboundSize != 7 {
+		c.peerQueueOutboundSize != 5 ||
+		c.peerQueueInboundSize != 6 ||
+		c.queueStagedGlobalLimit != 7 {
 		t.Fatalf("configured device config: %+v", c)
 	}
 }
@@ -717,13 +717,12 @@ func TestDeviceOptions(t *testing.T) {
 func TestDeviceOptionsResolve(t *testing.T) {
 	c := defaultConfig()
 	opts := []Option{
-		WithPeerQueueOutboundSize(6),
-		WithPeerQueueInboundSize(7),
+		WithPeerQueueOutboundSize(5),
+		WithPeerQueueInboundSize(6),
 		WithQueueStagedSize(1),
 		WithQueueOutboundSize(2),
 		WithQueueInboundSize(3),
 		WithQueueHandshakeSize(4),
-		WithPreallocatedBuffersPerPool(5),
 	}
 	for _, opt := range opts {
 		opt.apply(&c)
@@ -733,9 +732,8 @@ func TestDeviceOptionsResolve(t *testing.T) {
 		c.queueOutboundSize != 2 ||
 		c.queueInboundSize != 3 ||
 		c.queueHandshakeSize != 4 ||
-		c.preallocatedBuffersPerPool != 5 ||
-		c.peerQueueOutboundSize != 6 ||
-		c.peerQueueInboundSize != 7 {
+		c.peerQueueOutboundSize != 5 ||
+		c.peerQueueInboundSize != 6 {
 		t.Fatalf("resolved device config: %+v", c)
 	}
 }
@@ -750,49 +748,29 @@ func TestPopulatePoolsPacketBufs(t *testing.T) {
 	tests := []struct {
 		name           string
 		batchSize      int
-		preallocated   uint32
 		wantDistinct   bool
 		wantPacketSize int
 		wantSmallSize  int
 	}{
 		{
-			name:           "single unbounded",
+			name:           "single",
 			batchSize:      1,
-			preallocated:   0,
 			wantDistinct:   wantSingleDistinct,
 			wantPacketSize: singlePacketSlabSize,
 			wantSmallSize:  wantSingleSmallSize,
 		},
 		{
-			name:           "batched unbounded",
+			name:           "batched",
 			batchSize:      2,
-			preallocated:   0,
 			wantDistinct:   true,
 			wantPacketSize: batchingSlabSize,
 			wantSmallSize:  smallPacketBufSize,
-		},
-		{
-			name:           "single bounded",
-			batchSize:      1,
-			preallocated:   1,
-			wantDistinct:   false,
-			wantPacketSize: singlePacketSlabSize,
-			wantSmallSize:  singlePacketSlabSize,
-		},
-		{
-			name:           "batched bounded",
-			batchSize:      2,
-			preallocated:   1,
-			wantDistinct:   false,
-			wantPacketSize: batchingSlabSize,
-			wantSmallSize:  batchingSlabSize,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			device := new(Device)
-			device.config.preallocatedBuffersPerPool = tt.preallocated
 			device.net.bind = &fakeBindSized{size: tt.batchSize}
 			device.tun.device = &fakeTUNDeviceSized{size: tt.batchSize}
 			device.PopulatePools()
@@ -960,7 +938,7 @@ func TestWithQueueStagedGlobalLimit(t *testing.T) {
 		opts []Option
 		want int64
 	}{
-		{"default", nil, 0},
+		{"default", nil, int64(DefaultQueueStagedGlobalLimit)},
 		{"disabled", []Option{WithQueueStagedGlobalLimit(0)}, 0},
 		{"raised", []Option{WithQueueStagedGlobalLimit(1)}, 2},
 		{"preserved", []Option{WithQueueStagedGlobalLimit(3)}, 3},

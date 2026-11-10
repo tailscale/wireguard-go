@@ -283,7 +283,7 @@ func (r *resolver) typeName(ident *ast.Ident) string {
 		case "Device", "Peer", "AllowedIPs", "IndexTable",
 			"Handshake", "Keypairs",
 			"CookieChecker", "CookieGenerator",
-			"Timer", "WaitPool":
+			"Timer":
 			return name
 		}
 	}

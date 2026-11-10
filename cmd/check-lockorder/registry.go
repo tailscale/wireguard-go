@@ -90,7 +90,6 @@ var trackedLocks = []TrackedLock{
 	{ID: "Peer.queue.nonceMu", OwnerType: "Peer", FieldPath: "queue.nonceMu", Kind: PlainMutex, DefType: "Peer", DefPath: "queue.nonceMu"},
 	{ID: "Timer.modifyingLock", OwnerType: "Timer", FieldPath: "modifyingLock", Kind: ReadWriteMutex, DefType: "Timer", DefPath: "modifyingLock"},
 	{ID: "Timer.runningLock", OwnerType: "Timer", FieldPath: "runningLock", Kind: PlainMutex, DefType: "Timer", DefPath: "runningLock"},
-	{ID: "WaitPool.lock", OwnerType: "WaitPool", FieldPath: "lock", Kind: PlainMutex, DefType: "WaitPool", DefPath: "lock"},
 }
 
 // instanceLocalLocks is the set of LockIDs marked InstanceLocal in

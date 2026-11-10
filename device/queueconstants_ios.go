@@ -11,11 +11,11 @@ package device
 // requirements. Heavier network extensions can reduce these further using
 // [Device.Option]'s.
 const (
-	DefaultQueueStagedSize            = 128
-	DefaultQueueOutboundSize          = 1024
-	DefaultQueueInboundSize           = 1024
-	DefaultQueueHandshakeSize         = 1024
-	DefaultPreallocatedBuffersPerPool = 1024
+	DefaultQueueStagedSize        = 128
+	DefaultQueueOutboundSize      = 1024
+	DefaultQueueInboundSize       = 1024
+	DefaultQueueHandshakeSize     = 1024
+	DefaultQueueStagedGlobalLimit = 1024
 )
 
 const MaxSegmentSize = 1700
