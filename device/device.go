@@ -76,14 +76,14 @@ type Device struct {
 	cookieChecker CookieChecker
 
 	pool struct {
-		inboundElementsContainer  *WaitPool
-		outboundElementsContainer *WaitPool
-		inboundElements           *WaitPool
-		outboundElements          *WaitPool
-		packetBufs                *WaitPool
+		inboundElementsContainer  *sync.Pool
+		outboundElementsContainer *sync.Pool
+		inboundElements           *sync.Pool
+		outboundElements          *sync.Pool
+		packetBufs                *sync.Pool
 		// smallPacketBufs aliases packetBufs when no distinct small packet pool
 		// is used. See [Device.PopulatePools].
-		smallPacketBufs *WaitPool
+		smallPacketBufs *sync.Pool
 	}
 
 	queue struct {
@@ -112,15 +112,14 @@ type Device struct {
 }
 
 type config struct {
-	queueStagedSize            int
-	queueOutboundSize          int
-	queueInboundSize           int
-	peerQueueOutboundSize      int // zero inherits queueOutboundSize
-	peerQueueInboundSize       int // zero inherits queueInboundSize
-	queueHandshakeSize         int
-	preallocatedBuffersPerPool uint32
-	queueStagedGlobalLimit     int64
-	metrics                    Metrics
+	queueStagedSize        int
+	queueOutboundSize      int
+	queueInboundSize       int
+	peerQueueOutboundSize  int // zero inherits queueOutboundSize
+	peerQueueInboundSize   int // zero inherits queueInboundSize
+	queueHandshakeSize     int
+	queueStagedGlobalLimit int64
+	metrics                Metrics
 }
 
 func (c *config) resolve() {
@@ -134,11 +133,11 @@ func (c *config) resolve() {
 
 func defaultConfig() config {
 	return config{
-		queueStagedSize:            DefaultQueueStagedSize,
-		queueOutboundSize:          DefaultQueueOutboundSize,
-		queueInboundSize:           DefaultQueueInboundSize,
-		queueHandshakeSize:         DefaultQueueHandshakeSize,
-		preallocatedBuffersPerPool: DefaultPreallocatedBuffersPerPool,
+		queueStagedSize:        DefaultQueueStagedSize,
+		queueOutboundSize:      DefaultQueueOutboundSize,
+		queueInboundSize:       DefaultQueueInboundSize,
+		queueHandshakeSize:     DefaultQueueHandshakeSize,
+		queueStagedGlobalLimit: DefaultQueueStagedGlobalLimit,
 	}
 }
 
@@ -208,26 +207,15 @@ func WithQueueHandshakeSize(size int) Option {
 	})
 }
 
-// WithPreallocatedBuffersPerPool sets the maximum number of packet memory
-// pool outstanding items. A value of zero is unlimited. Care must be taken to
-// not set a size that is too small, which can lead to immediate deadlock, or
-// increase the probability of deadlock once packets start flowing.
-// See tailscale/corp#46396. [DefaultPreallocatedBuffersPerPool] is the default.
-func WithPreallocatedBuffersPerPool(size uint32) Option {
-	return optionFunc(func(config *config) {
-		config.preallocatedBuffersPerPool = size
-	})
-}
-
 // WithQueueStagedGlobalLimit sets the maximum number of packet container objects
-// outstanding across all staged queues. The limit is disabled by default.
-// Non-positive values disable it. It counts objects which are long-lived, i.e.
-// objects sitting in queues awaiting handshake. It is not an exact limit, it
-// may temporarily over or undercount. It exists to limit the amount of memory
-// consumed by packets. Packets awaiting handshake will be dropped if limit is
-// exceeded. If limit is greater than zero, and less than the size of an
-// individual peer's staged queue ([WithQueueStagedSize]), it will be silently
-// raised to match.
+// outstanding across all staged queues. [DefaultQueueStagedGlobalLimit] is the
+// default. Non-positive values disable it. It counts objects which are
+// long-lived, i.e. objects sitting in queues awaiting handshake. It is not an
+// exact limit, it may temporarily over or undercount. It exists to limit the
+// amount of memory consumed by packets. Packets awaiting handshake will be
+// dropped if limit is exceeded. If limit is greater than zero, and less than
+// the size of an individual peer's staged queue ([WithQueueStagedSize]), it
+// will be silently raised to match.
 func WithQueueStagedGlobalLimit(limit int) Option {
 	return optionFunc(func(config *config) {
 		config.queueStagedGlobalLimit = int64(limit)
