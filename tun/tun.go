@@ -167,6 +167,19 @@ func WithQueues(n int) Option {
 	})
 }
 
+// BatchedReadDevice is a Device that can return several queued packets per
+// Read even when the kernel hands them over one at a time. The kernel delivers
+// UDP-encapsulated traffic such as VXLAN to a Linux tun one datagram per read,
+// because the tun cannot describe tunnel segmentation offload; batching those
+// reads lets the encrypt and send path amortize its per-batch costs the way it
+// does for a GSO superframe. It is off until enabled.
+type BatchedReadDevice interface {
+	Device
+	// EnableBatchedReads enables batched reads. It never makes a Read wait
+	// for more packets; it only collects packets that are already queued.
+	EnableBatchedReads()
+}
+
 // GRODevice is a Device extended with methods for disabling GRO. Certain OS
 // versions may have offload bugs. Where these bugs negatively impact throughput
 // or break connectivity entirely we can use these methods to disable the

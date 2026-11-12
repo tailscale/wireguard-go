@@ -49,6 +49,8 @@ type NativeTun struct {
 	nameErr   error
 
 	gro atomic.Int32 // groDisablementFlags for cross-queue access
+
+	batchedRead atomic.Bool // see EnableBatchedReads
 }
 
 // tunQueue is a single kernel queue of a tun device, and is the [Queue]
@@ -59,6 +61,15 @@ type tunQueue struct {
 	tun     *NativeTun
 	file    *os.File
 	rawConn syscall.RawConn
+
+	// pending holds a frame drained by a batched read that did not fit in the
+	// caller's slab. The next Read delivers it first. See [tunQueue.drain].
+	pending  []byte
+	pendingN int
+	// drainable is whether the fd is non-blocking, so drain's raw reads
+	// return EAGAIN instead of parking. A caller of CreateTUNFromFiles may
+	// pass a blocking fd; those queues are never drained.
+	drainable bool
 
 	writeOpMu   sync.Mutex // writeOpMu guards the following fields
 	toWrite     groToWrite
@@ -80,6 +91,12 @@ func appendQueue(tun *NativeTun, file *os.File) error {
 	q.rawConn, err = file.SyscallConn()
 	if err != nil {
 		return err
+	}
+	if cerr := q.rawConn.Control(func(fd uintptr) {
+		flags, ferr := unix.FcntlInt(fd, unix.F_GETFL, 0)
+		q.drainable = ferr == nil && flags&unix.O_NONBLOCK != 0
+	}); cerr != nil {
+		return cerr
 	}
 	tun.queues = append(tun.queues, q)
 	return nil
@@ -466,16 +483,26 @@ func (q *tunQueue) write(bufs [][]byte, offset int) (int, error) {
 // of the last packet. It mutates packets to reflect the size and offset of each
 // packet in slab, and returns the number of packets read.
 func handleVirtioRead(in []byte, slab []byte, packets []ReadPacket) (int, error) {
+	in, options, err := virtioGSOOptions(in)
+	if err != nil {
+		return 0, err
+	}
+	return GSOSplit(in, options, slab, packets, ReadPacketSpacing)
+}
+
+// virtioGSOOptions strips the virtio header from in and returns the remaining
+// packet and the options GSOSplit needs to split it.
+func virtioGSOOptions(in []byte) ([]byte, GSOOptions, error) {
 	var hdr virtioNetHdr
 	err := hdr.decode(in)
 	if err != nil {
-		return 0, err
+		return nil, GSOOptions{}, err
 	}
 	in = in[virtioNetHdrLen:]
 
 	options, err := hdr.toGSOOptions()
 	if err != nil {
-		return 0, err
+		return nil, GSOOptions{}, err
 	}
 
 	// Don't trust HdrLen from the kernel as it can be equal to the length
@@ -486,18 +513,33 @@ func handleVirtioRead(in []byte, slab []byte, packets []ReadPacket) (int, error)
 		options.HdrLen = options.CsumStart + 8
 	} else if options.GSOType != GSONone {
 		if len(in) <= int(options.CsumStart+12) {
-			return 0, errors.New("packet is too short")
+			return nil, GSOOptions{}, errors.New("packet is too short")
 		}
 
 		tcpHLen := uint16(in[options.CsumStart+12] >> 4 * 4)
 		if tcpHLen < 20 || tcpHLen > 60 {
 			// A TCP header must be between 20 and 60 bytes in length.
-			return 0, fmt.Errorf("tcp header len is invalid: %d", tcpHLen)
+			return nil, GSOOptions{}, fmt.Errorf("tcp header len is invalid: %d", tcpHLen)
 		}
 		options.HdrLen = options.CsumStart + tcpHLen
 	}
+	return in, options, nil
+}
 
-	return GSOSplit(in, options, slab, packets, ReadPacketSpacing)
+// splitNeeds reports how many packets entries and slab bytes GSOSplit needs to
+// split in, with spacing before, between and after the segments. It mirrors
+// GSOSplit's own accounting, so a frame it reports as fitting is split whole.
+func splitNeeds(in []byte, options GSOOptions, spacing int) (segments, bytes int) {
+	payloadLen := len(in) - int(options.HdrLen)
+	if options.GSOType == GSONone || options.GSOSize == 0 || payloadLen < int(options.GSOSize) {
+		return 1, len(in) + 2*spacing
+	}
+	gsoSize := int(options.GSOSize)
+	segments = payloadLen / gsoSize
+	if payloadLen%gsoSize != 0 {
+		segments++
+	}
+	return segments, segments*int(options.HdrLen) + payloadLen + (segments+1)*spacing
 }
 
 // assert that [ReadPacketSpacing] is >= [virtioNetHdrLen], as [NativeTun.Read]
@@ -513,12 +555,27 @@ func (q *tunQueue) Read(slab []byte, packets []ReadPacket) (int, error) {
 	case err := <-q.tun.errors:
 		return 0, err
 	default:
+	}
+
+	var n int
+	if q.pendingN > 0 {
+		// A frame drained by the previous Read that did not fit. It is
+		// delivered first, into an empty slab, exactly as if the blocking
+		// read had just returned it.
+		in := q.pending[:q.pendingN]
+		q.pendingN = 0
+		var err error
+		n, err = q.place(in, slab, packets)
+		if err != nil {
+			return n, err
+		}
+	} else {
 		start := ReadPacketSpacing
 		if q.tun.vnetHdr {
 			start -= virtioNetHdrLen
 		}
 		readInto := slab[start : len(slab)-ReadPacketSpacing]
-		n, err := q.file.Read(readInto)
+		nr, err := q.file.Read(readInto)
 		if errors.Is(err, syscall.EBADFD) {
 			err = os.ErrClosed
 		}
@@ -526,13 +583,105 @@ func (q *tunQueue) Read(slab []byte, packets []ReadPacket) (int, error) {
 			return 0, err
 		}
 		if q.tun.vnetHdr {
-			return handleVirtioRead(readInto[:n], slab, packets)
+			n, err = handleVirtioRead(readInto[:nr], slab, packets)
+			if err != nil {
+				return n, err
+			}
 		} else {
-			packets[0].Size = n
+			packets[0].Size = nr
 			packets[0].Offset = ReadPacketSpacing
-			return 1, nil
+			n = 1
 		}
 	}
+
+	if !q.tun.batchedRead.Load() || !q.drainable {
+		return n, nil
+	}
+	return q.drain(slab, packets, n), nil
+}
+
+// place splits or copies one frame read from the tun (with its virtio header
+// when the tun has one) into slab and packets.
+func (q *tunQueue) place(in []byte, slab []byte, packets []ReadPacket) (int, error) {
+	if q.tun.vnetHdr {
+		return handleVirtioRead(in, slab, packets)
+	}
+	if len(in)+2*ReadPacketSpacing > len(slab) || len(packets) == 0 {
+		return 0, ErrTooManySegments
+	}
+	copy(slab[ReadPacketSpacing:], in)
+	packets[0] = ReadPacket{Offset: ReadPacketSpacing, Size: len(in)}
+	return 1, nil
+}
+
+// drain collects packets already queued on the tun into the rest of slab and
+// packets, after the n packets the blocking read produced, and returns the new
+// count. The kernel hands UDP-encapsulated traffic such as VXLAN to the tun one
+// datagram per read, because the tun cannot describe tunnel segmentation
+// offload; draining lets the encrypt and send path batch those datagrams the
+// way it batches one GSO superframe.
+//
+// It never blocks: each read is non-blocking and the drain stops at EAGAIN, so
+// it only gathers packets that are already waiting. Order is preserved because
+// a queue is read sequentially.
+//
+// Each frame is read into q.pending first and its exact footprint computed from
+// its virtio header before anything is split, so a GSO frame of any segment
+// count either fits whole or stays in q.pending for the next Read. Nothing read
+// is dropped.
+func (q *tunQueue) drain(slab []byte, packets []ReadPacket, n int) int {
+	if n == 0 {
+		return 0
+	}
+	if q.pending == nil {
+		q.pending = make([]byte, virtioNetHdrLen+40+65535) // largest IPv6 frame: 40-byte header + max payload
+	}
+	for n < len(packets) {
+		// Packets are laid out with ReadPacketSpacing before, between and
+		// after them, so the next frame's region starts right after the last
+		// packet, and that packet's trailing spacing is its leading spacing.
+		used := packets[n-1].Offset + packets[n-1].Size
+		rest := slab[used:]
+		if len(rest) < 2*ReadPacketSpacing+1 {
+			break
+		}
+
+		var nr int
+		var rerr error
+		cerr := q.rawConn.Read(func(fd uintptr) bool {
+			nr, rerr = unix.Read(int(fd), q.pending)
+			return true // never park on the poller: EAGAIN ends the drain
+		})
+		if cerr != nil || rerr != nil || nr <= 0 {
+			break
+		}
+		in := q.pending[:nr]
+
+		segs, need := 1, nr+2*ReadPacketSpacing
+		if q.tun.vnetHdr {
+			pkt, opts, err := virtioGSOOptions(in)
+			if err != nil {
+				// Malformed: deliver it next, so the blocking path's error
+				// handling sees it rather than the drain dropping it.
+				q.pendingN = nr
+				break
+			}
+			segs, need = splitNeeds(pkt, opts, ReadPacketSpacing)
+		}
+		if segs > len(packets)-n || need > len(rest) {
+			q.pendingN = nr
+			break
+		}
+		np, err := q.place(in, rest, packets[n:])
+		for i := n; i < n+np; i++ {
+			packets[i].Offset += used
+		}
+		n += np
+		if err != nil {
+			break
+		}
+	}
+	return n
 }
 
 func (tun *NativeTun) Events() <-chan Event {
@@ -570,6 +719,13 @@ func (tun *NativeTun) BatchSize() int {
 // for cases where it should be called.
 func (tun *NativeTun) DisableUDPGRO() {
 	tun.gro.Or(int32(udpGRODisabled))
+}
+
+// EnableBatchedReads makes each Read also return the packets already queued
+// on the tun, read without blocking, instead of only the one its blocking read
+// returned. See [BatchedReadDevice].
+func (tun *NativeTun) EnableBatchedReads() {
+	tun.batchedRead.Store(true)
 }
 
 // DisableTCPGRO disables TCP GRO if it is enabled. See the GRODevice interface
