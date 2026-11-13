@@ -3,6 +3,7 @@ module github.com/tailscale/wireguard-go
 go 1.26.0
 
 require (
+	github.com/go4org/hashtriemap v0.0.0-20260925222741-44e5305f85d9
 	golang.org/x/crypto v0.52.0
 	golang.org/x/net v0.54.0
 	golang.org/x/sys v0.45.0

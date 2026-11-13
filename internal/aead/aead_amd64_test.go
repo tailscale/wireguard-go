@@ -5,14 +5,13 @@
  * Copyright (C) 2017-2023 WireGuard LLC. All Rights Reserved.
  */
 
-package device
+package aead
 
 import (
 	"fmt"
 	"os"
 	"os/exec"
 	"reflect"
-	"strings"
 	"testing"
 
 	"golang.org/x/sys/cpu"
@@ -45,18 +44,18 @@ func TestAEADDispatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	asmType := fmt.Sprintf("%T", asmInst)
-	dispatched, err := chacha20poly1305New(make([]byte, 32))
+	dispatched, err := New(make([]byte, 32))
 	if err != nil {
-		t.Fatalf("chacha20poly1305New: %v", err)
+		t.Fatalf("New: %v", err)
 	}
 	if gotType := fmt.Sprintf("%T", dispatched); (gotType == asmType) != useTSAsm {
 		t.Errorf("dispatch returned %s but useTSAsm = %v; the two disagree", gotType, useTSAsm)
 	}
 
 	// Whatever the CPU, the constructor has to produce a working AEAD.
-	aead, err := chacha20poly1305New(make([]byte, 32))
+	aead, err := New(make([]byte, 32))
 	if err != nil {
-		t.Fatalf("chacha20poly1305New: %v", err)
+		t.Fatalf("New: %v", err)
 	}
 	if got := aead.NonceSize(); got != 12 {
 		t.Errorf("NonceSize = %d, want 12", got)
@@ -78,14 +77,14 @@ func TestAEADEscapeHatch(t *testing.T) {
 	}
 	asmType := fmt.Sprintf("%T", asmAEADInst)
 
-	if got, err := chacha20poly1305New(make([]byte, 32)); err != nil {
+	if got, err := New(make([]byte, 32)); err != nil {
 		t.Fatal(err)
 	} else if fmt.Sprintf("%T", got) != asmType {
 		t.Fatalf("without the override, got %T, want the tsasm type %s", got, asmType)
 	}
 
 	t.Setenv("TS_WG_ASM", "0")
-	got, err := chacha20poly1305New(make([]byte, 32))
+	got, err := New(make([]byte, 32))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,29 +140,13 @@ func TestAEADDispatchSubprocess(t *testing.T) {
 	}
 }
 
-// subprocessEnv replaces rather than appends, since a duplicate GODEBUG entry is ambiguous.
-func subprocessEnv(overrides map[string]string) []string {
-	env := os.Environ()
-	for key, value := range overrides {
-		prefix := key + "="
-		filtered := env[:0]
-		for _, entry := range env {
-			if !strings.HasPrefix(entry, prefix) {
-				filtered = append(filtered, entry)
-			}
-		}
-		env = append(filtered, prefix+value)
-	}
-	return env
-}
-
 func testAEADDispatchHelper(t *testing.T) {
 	wantAsm := os.Getenv("WG_AEAD_WANT") == "tsasm"
 	if useTSAsm != wantAsm {
 		t.Fatalf("SSSE3=%t AVX2=%t BMI2=%t: useTSAsm=%t, want %t",
 			cpu.X86.HasSSSE3, cpu.X86.HasAVX2, cpu.X86.HasBMI2, useTSAsm, wantAsm)
 	}
-	aead, err := chacha20poly1305New(make([]byte, 32))
+	aead, err := New(make([]byte, 32))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,7 +175,7 @@ func TestAEADFIPSPolicy(t *testing.T) {
 			t.Fatalf("subprocess did not reach the assembly path: SSSE3=%t AVX2=%t BMI2=%t",
 				cpu.X86.HasSSSE3, cpu.X86.HasAVX2, cpu.X86.HasBMI2)
 		}
-		if _, err := chacha20poly1305New(make([]byte, 32)); err == nil {
+		if _, err := New(make([]byte, 32)); err == nil {
 			t.Fatal("constructor succeeded under fips140=only; the policy check was bypassed")
 		}
 		return
