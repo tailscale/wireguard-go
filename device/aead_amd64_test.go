@@ -21,20 +21,27 @@ import (
 )
 
 /*
-TestAEADDispatch asserts the two properties the dispatch has to get right: a CPU with SSSE3 but no AVX2 must reach tsasm, and a CPU with AVX2 must not. The second half is the important one, since routing AVX2 machines here would silently replace x/crypto's maintained kernel for most amd64 users.
+TestAEADDispatch asserts the properties the dispatch has to get right on whatever CPU is running it: a CPU with AVX-512 must reach tsasm, a CPU with SSSE3 but no AVX2 must reach tsasm, and a CPU with AVX2 and no AVX-512 must not. The last is the important one, since routing plain AVX2 machines here would silently replace x/crypto's maintained kernel for most amd64 users.
 */
 func TestAEADDispatch(t *testing.T) {
 	hasAVX2 := cpu.X86.HasAVX2 && cpu.X86.HasBMI2
-	t.Logf("SSSE3=%v AVX2=%v BMI2=%v -> useTSAsm=%v",
-		cpu.X86.HasSSSE3, cpu.X86.HasAVX2, cpu.X86.HasBMI2, useTSAsm)
+	hasAVX512 := asmAEAD.AvailableAVX512()
+	t.Logf("SSSE3=%v AVX2=%v BMI2=%v AVX512F=%v AVX512BW=%v -> useTSAsm=%v",
+		cpu.X86.HasSSSE3, cpu.X86.HasAVX2, cpu.X86.HasBMI2,
+		cpu.X86.HasAVX512F, cpu.X86.HasAVX512BW, useTSAsm)
 
 	switch {
-	case hasAVX2 && useTSAsm:
-		t.Error("CPU has AVX2+BMI2 but dispatch chose tsasm; x/crypto's AVX2 kernel must win")
-	case cpu.X86.HasSSSE3 && !hasAVX2 && !useTSAsm:
+	case hasAVX512 && !useTSAsm:
+		t.Error("CPU has AVX-512 but dispatch did not choose tsasm")
+	case !hasAVX512 && hasAVX2 && useTSAsm:
+		t.Error("CPU has AVX2+BMI2 and no AVX-512 but dispatch chose tsasm; x/crypto's AVX2 kernel must win")
+	case !hasAVX512 && cpu.X86.HasSSSE3 && !hasAVX2 && !useTSAsm:
 		t.Error("CPU has SSSE3 and no AVX2 but dispatch did not choose tsasm")
-	case !cpu.X86.HasSSSE3 && useTSAsm:
-		t.Error("CPU lacks SSSE3 but dispatch chose tsasm; the kernel would SIGILL")
+	case !hasAVX512 && !cpu.X86.HasSSSE3 && useTSAsm:
+		/*
+			Only the SSSE3 kernel would fault here. The fused AVX-512 kernel issues no SSE or SSSE3 instruction at all, so on an AVX-512 CPU with GODEBUG=cpu.ssse3=off the dispatch is right to choose tsasm and this case must not fire, which is exactly the configuration someone probing the escape hatches would use.
+		*/
+		t.Error("CPU lacks SSSE3 and AVX-512 but dispatch chose tsasm; the SSSE3 kernel would SIGILL")
 	}
 
 	/*
@@ -94,13 +101,13 @@ func TestAEADEscapeHatch(t *testing.T) {
 	}
 }
 
-// TestShouldUseTSAsm exhausts the dispatch predicate over all eight feature combinations.
+// TestShouldUseTSAsm exhausts the dispatch predicate over all sixteen combinations of its inputs.
 func TestShouldUseTSAsm(t *testing.T) {
-	for bits := 0; bits < 8; bits++ {
-		ssse3, avx2, bmi2 := bits&1 != 0, bits&2 != 0, bits&4 != 0
-		want := ssse3 && !(avx2 && bmi2)
-		t.Run(fmt.Sprintf("ssse3=%t/avx2=%t/bmi2=%t", ssse3, avx2, bmi2), func(t *testing.T) {
-			if got := shouldUseTSAsm(ssse3, avx2, bmi2); got != want {
+	for bits := 0; bits < 16; bits++ {
+		ssse3, avx2, bmi2, avx512 := bits&1 != 0, bits&2 != 0, bits&4 != 0, bits&8 != 0
+		want := avx512 || (ssse3 && !(avx2 && bmi2))
+		t.Run(fmt.Sprintf("ssse3=%t/avx2=%t/bmi2=%t/avx512=%t", ssse3, avx2, bmi2, avx512), func(t *testing.T) {
+			if got := shouldUseTSAsm(ssse3, avx2, bmi2, avx512); got != want {
 				t.Fatalf("shouldUseTSAsm = %t, want %t", got, want)
 			}
 		})
@@ -118,6 +125,13 @@ func TestAEADDispatchSubprocess(t *testing.T) {
 
 	cases := []struct{ name, godebug, want string }{
 		{"fallback-no-ssse3", "cpu.ssse3=off,cpu.avx2=off,cpu.bmi2=off", "xcrypto"},
+	}
+	if asmAEAD.AvailableAVX512() {
+		// Both directions of the new gate, on a host that can actually take either branch.
+		cases = append(cases,
+			struct{ name, godebug, want string }{"avx512-present", "", "tsasm"},
+			struct{ name, godebug, want string }{"avx512-masked-off", "cpu.avx512f=off", "xcrypto"},
+		)
 	}
 	if cpu.X86.HasSSSE3 {
 		cases = append(cases, struct{ name, godebug, want string }{
@@ -160,8 +174,8 @@ func subprocessEnv(overrides map[string]string) []string {
 func testAEADDispatchHelper(t *testing.T) {
 	wantAsm := os.Getenv("WG_AEAD_WANT") == "tsasm"
 	if useTSAsm != wantAsm {
-		t.Fatalf("SSSE3=%t AVX2=%t BMI2=%t: useTSAsm=%t, want %t",
-			cpu.X86.HasSSSE3, cpu.X86.HasAVX2, cpu.X86.HasBMI2, useTSAsm, wantAsm)
+		t.Fatalf("SSSE3=%t AVX2=%t BMI2=%t AVX512F=%t AVX512BW=%t: useTSAsm=%t, want %t",
+			cpu.X86.HasSSSE3, cpu.X86.HasAVX2, cpu.X86.HasBMI2, cpu.X86.HasAVX512F, cpu.X86.HasAVX512BW, useTSAsm, wantAsm)
 	}
 	aead, err := chacha20poly1305New(make([]byte, 32))
 	if err != nil {
