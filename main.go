@@ -230,8 +230,7 @@ func main() {
 
 	// Per-peer queue depth. Using the old default as a cap, applied to both
 	// inbound and outbound direction.
-	// TODO: make cgroup-aware with runtime.GOMAXPROCS(0).
-	queueSize := min(device.DefaultQueueInboundSize, runtime.NumCPU())
+	queueSize := min(device.DefaultQueueInboundSize, runtime.GOMAXPROCS(0))
 	if v := os.Getenv("WG_QUEUE_SIZE"); v != "" {
 		n, perr := strconv.Atoi(v)
 		if perr != nil || n < 1 {
