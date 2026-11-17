@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -31,16 +32,18 @@ const (
 type NativeTun struct {
 	queues []*tunQueue // queues[0] always exists and is used by Read and Write
 
-	index         int32      // if index
-	errors        chan error // async error handling
-	events        chan Event // device related events
-	netlinkSock   int
-	netlinkCancel *rwcancel.RWCancel
+	errors chan error // async error handling
+	events chan Event // device related events
 
-	hackListenerClosed      sync.Mutex
 	statusListenersShutdown chan struct{}
-	batchSize               int
-	vnetHdr                 bool
+
+	// nlMu guards the fields below.
+	nlMu     sync.Mutex
+	nl       *netlinkConn // current; routineNetlinkListener closes replaced ones
+	nlClosed bool         // routineNetlinkListener is exiting or has exited
+
+	batchSize int
+	vnetHdr   bool
 
 	closeOnce sync.Once
 
@@ -115,52 +118,289 @@ func (tun *NativeTun) File() *os.File {
 	return tun.queues[0].file
 }
 
-func (tun *NativeTun) routineHackListener() {
-	defer tun.hackListenerClosed.Unlock()
-	/* This is needed for the detection to work across network namespaces
-	 * If you are reading this and know a better method, please get in touch.
-	 */
-	last := 0
-	const (
-		up   = 1
-		down = 2
-	)
-	for {
-		sysconn, err := tun.File().SyscallConn()
+// initialLinkState returns EventUp or EventDown to report as the interface's
+// initial state, since netlink only reports changes. It tries to use the "tun
+// status hack": a zero-length write to the tun fd fails with EIO if the
+// interface is down, and with EINVAL otherwise. That only worked on Linux 4.5
+// through 5.0. Linux commit 4477138fa0ae ("tun: properly test for IFF_UP", in
+// v5.1 and backported to 5.0.6, 4.19.33, 4.14.110, and 4.9.167) moved
+// tun_get_user's IFF_UP check after its header length validation, so a
+// zero-length write now always fails with EINVAL, and this reports EventUp even
+// for a down interface. That is kept as is because users such as wireguard-go's
+// main rely on the initial EventUp to bring the device up. It returns 0 on
+// error.
+func (tun *NativeTun) initialLinkState() Event {
+	var werr error
+	if err := tun.queues[0].rawConn.Control(func(fd uintptr) {
+		_, werr = unix.Write(int(fd), nil)
+	}); err != nil {
+		return 0
+	}
+	switch werr {
+	case unix.EINVAL:
+		return EventUp
+	case unix.EIO:
+		return EventDown
+	}
+	return 0
+}
+
+// netlinkConn is a netlink route socket subscribed to link and address
+// changes in the network namespace the tun interface is (or was) in.
+type netlinkConn struct {
+	sock   int
+	cancel *rwcancel.RWCancel // for sock
+
+	// index is the interface's index in sock's namespace, or 0 once the
+	// interface has been seen to leave it (by deletion or by moving), after
+	// which the index may refer to some other interface. It is only accessed
+	// by routineNetlinkListener after the conn is published in tun.nl.
+	index int32
+
+	// ioctlSock is a datagram socket in the same namespace as sock, for
+	// interface ioctls, or -1 if sock is in the creator's namespace.
+	ioctlSock int
+}
+
+// close releases c's resources. c.cancel may be nil.
+func (c *netlinkConn) close() {
+	unix.Close(c.sock)
+	if c.cancel != nil {
+		c.cancel.Close()
+	}
+	if c.ioctlSock >= 0 {
+		unix.Close(c.ioctlSock)
+	}
+}
+
+// errRetryFollow is returned by tryFollowLocked when the interface is
+// mid-move, and following it should be retried shortly.
+var errRetryFollow = errors.New("tun interface is moving between network namespaces")
+
+// tryFollowLocked tries once to replace tun.nl with a netlinkConn in the
+// interface's current network namespace, and if successful, wakes
+// routineNetlinkListener to switch to it. It returns errRetryFollow if the
+// interface appears to be mid-move. tun.nlMu must be held.
+func (tun *NativeTun) tryFollowLocked() error {
+	nsFD, err := tun.netnsFD()
+	if err != nil {
+		return err
+	}
+	c, err := newNetlinkConnIn(nsFD, tun.File())
+	unix.Close(nsFD)
+	if errors.Is(err, unix.ENODEV) {
+		// A moving interface is in its new namespace briefly before it can
+		// be looked up by name there.
+		return errRetryFollow
+	}
+	if err != nil {
+		return err
+	}
+	// The interface may have moved again before the new socket was bound,
+	// in which case the socket won't see that move.
+	if same, err := tun.inNetnsOf(c.sock); err != nil || !same {
+		c.close()
 		if err != nil {
+			return err
+		}
+		return errRetryFollow
+	}
+	old := tun.nl
+	tun.nl = c
+	return old.cancel.Cancel() // wake routineNetlinkListener, which closes old
+}
+
+// testHookDelLink, if non-nil, is called by routineNetlinkListener after it
+// handles RTM_DELLINK for the interface.
+var testHookDelLink func()
+
+// followAfterDelLink is called by routineNetlinkListener after seeing the
+// interface leave cur's network namespace (e.g. by "ip link set <name> netns
+// <ns>"), to keep tracking it in its new namespace. Without that, netlink
+// would no longer report its link changes, and MTU would fail or report some
+// other interface's MTU.
+//
+// Following requires Linux 5.2 or later (for TUNGETDEVNETNS), and
+// CAP_SYS_ADMIN and CAP_NET_ADMIN over the new namespace. If it fails, link
+// changes go unreported until the interface moves again. Name continues to
+// report the original name.
+//
+// The kernel sends RTM_DELLINK partway through a move, before the interface
+// joins its new namespace, and a move can take a while on a loaded system.
+// So this retries with backoff for up to followTimeout, without holding
+// tun.nlMu while waiting. If the interface is still (or again, after moving
+// away and back) in cur's namespace after a second, cur is replaced anyway to
+// pick up its possibly new index.
+func (tun *NativeTun) followAfterDelLink(cur *netlinkConn) {
+	const (
+		followTimeout = 10 * time.Second
+		sameNetnsWait = time.Second
+		maxDelay      = 250 * time.Millisecond
+	)
+	start := time.Now()
+	for delay := time.Millisecond; ; delay = min(2*delay, maxDelay) {
+		tun.nlMu.Lock()
+		if tun.nlClosed || tun.nl != cur {
+			tun.nlMu.Unlock()
 			return
 		}
-		err2 := sysconn.Control(func(fd uintptr) {
-			_, err = unix.Write(int(fd), nil)
-		})
-		if err2 != nil {
+		same, err := tun.inNetnsOf(cur.sock)
+		if err != nil {
+			// Most likely, the interface was deleted.
+			tun.nlMu.Unlock()
 			return
 		}
-		switch err {
-		case unix.EINVAL:
-			if last != up {
-				// If the tunnel is up, it reports that write() is
-				// allowed but we provided invalid data.
-				tun.events <- EventUp
-				last = up
-			}
-		case unix.EIO:
-			if last != down {
-				// If the tunnel is down, it reports that no I/O
-				// is possible, without checking our provided data.
-				tun.events <- EventDown
-				last = down
-			}
-		default:
+		if !same || time.Since(start) >= sameNetnsWait {
+			err = tun.tryFollowLocked()
+		}
+		followed := tun.nl != cur
+		tun.nlMu.Unlock()
+		if followed || (err != nil && err != errRetryFollow) {
 			return
 		}
+		if time.Since(start) >= followTimeout {
+			return
+		}
+		t := time.NewTimer(delay)
 		select {
-		case <-time.After(time.Second):
-			// nothing
+		case <-t.C:
 		case <-tun.statusListenersShutdown:
+			t.Stop()
 			return
 		}
 	}
+}
+
+// tunGetDevNetns is the TUNGETDEVNETNS ioctl, _IO('T', 227), which returns a
+// new file descriptor for the network namespace of a tun fd's interface. It
+// is missing from x/sys/unix.
+const tunGetDevNetns = 0x54e3
+
+// netnsFD returns a new file descriptor for the interface's current network
+// namespace.
+func (tun *NativeTun) netnsFD() (int, error) {
+	var nsFD int
+	var ioctlErr error
+	if err := tun.queues[0].rawConn.Control(func(fd uintptr) {
+		nsFD, ioctlErr = unix.IoctlRetInt(int(fd), tunGetDevNetns)
+	}); err != nil {
+		return -1, err
+	}
+	if ioctlErr != nil {
+		return -1, fmt.Errorf("TUNGETDEVNETNS: %w", ioctlErr)
+	}
+	return nsFD, nil
+}
+
+// inNetnsOf reports whether the interface is in the same network namespace
+// as socket sock.
+func (tun *NativeTun) inNetnsOf(sock int) (bool, error) {
+	devNS, err := tun.netnsFD()
+	if err != nil {
+		return false, err
+	}
+	defer unix.Close(devNS)
+	sockNS, err := unix.IoctlRetInt(sock, unix.SIOCGSKNS)
+	if err != nil {
+		return false, fmt.Errorf("SIOCGSKNS: %w", err)
+	}
+	defer unix.Close(sockNS)
+	var a, b unix.Stat_t
+	if err := unix.Fstat(devNS, &a); err != nil {
+		return false, err
+	}
+	if err := unix.Fstat(sockNS, &b); err != nil {
+		return false, err
+	}
+	return a.Dev == b.Dev && a.Ino == b.Ino, nil
+}
+
+// inNetns calls fn on an OS thread that has temporarily joined network
+// namespace nsFD. Sockets created by fn are in that namespace.
+//
+// The thread's original namespace is restored afterwards. Relying on the
+// runtime to terminate a still-locked thread when its goroutine exits is not
+// enough: if the goroutine happens to run on the main thread, the runtime
+// can't terminate it, and parks it instead. That would leave the main thread
+// (and so /proc/self/ns/net) in the other namespace, and keep that namespace
+// alive, for the life of the process.
+func inNetns(nsFD int, fn func() error) error {
+	errc := make(chan error, 1)
+	go func() {
+		runtime.LockOSThread()
+		orig, err := unix.Open(fmt.Sprintf("/proc/self/task/%d/ns/net", unix.Gettid()), unix.O_RDONLY|unix.O_CLOEXEC, 0)
+		if err != nil {
+			runtime.UnlockOSThread()
+			errc <- err
+			return
+		}
+		defer unix.Close(orig)
+		if err := unix.Setns(nsFD, unix.CLONE_NEWNET); err != nil {
+			runtime.UnlockOSThread()
+			errc <- fmt.Errorf("setns: %w", err)
+			return
+		}
+		fnErr := fn()
+		if err := unix.Setns(orig, unix.CLONE_NEWNET); err != nil {
+			// Leave the thread locked, so that the runtime doesn't reuse
+			// it for other goroutines in the wrong namespace.
+			errc <- errors.Join(fnErr, fmt.Errorf("restoring netns: %w", err))
+			return
+		}
+		runtime.UnlockOSThread()
+		errc <- fnErr
+	}()
+	return <-errc
+}
+
+// newNetlinkConnIn returns a netlinkConn in network namespace nsFD for the
+// interface of tun fd file. It queues a request for the interface's current
+// state on the new socket, so that routineNetlinkListener reports it.
+func newNetlinkConnIn(nsFD int, file *os.File) (*netlinkConn, error) {
+	c := &netlinkConn{sock: -1, ioctlSock: -1}
+	err := inNetns(nsFD, func() (err error) {
+		if c.sock, err = createNetlinkSocket(); err != nil {
+			return err
+		}
+		c.ioctlSock, err = unix.Socket(unix.AF_INET, unix.SOCK_DGRAM|unix.SOCK_CLOEXEC, 0)
+		return err
+	})
+	if err != nil {
+		if c.sock >= 0 {
+			c.close()
+		}
+		return nil, err
+	}
+	if c.cancel, err = rwcancel.NewRWCancel(c.sock); err != nil {
+		c.close()
+		return nil, err
+	}
+	name, err := tunNameOf(file)
+	if err != nil {
+		c.close()
+		return nil, err
+	}
+	if c.index, err = getIFIndexOn(c.ioctlSock, name); err != nil {
+		c.close()
+		return nil, err
+	}
+	req := struct {
+		hdr unix.NlMsghdr
+		ifi unix.IfInfomsg
+	}{
+		hdr: unix.NlMsghdr{
+			Len:   unix.SizeofNlMsghdr + unix.SizeofIfInfomsg,
+			Type:  unix.RTM_GETLINK,
+			Flags: unix.NLM_F_REQUEST,
+		},
+		ifi: unix.IfInfomsg{Family: unix.AF_UNSPEC, Index: c.index},
+	}
+	b := unsafe.Slice((*byte)(unsafe.Pointer(&req)), unsafe.Sizeof(req))
+	if err := unix.Sendto(c.sock, b, 0, &unix.SockaddrNetlink{Family: unix.AF_NETLINK}); err != nil {
+		c.close()
+		return nil, fmt.Errorf("RTM_GETLINK: %w", err)
+	}
+	return c, nil
 }
 
 func createNetlinkSocket() (int, error) {
@@ -180,25 +420,55 @@ func createNetlinkSocket() (int, error) {
 }
 
 func (tun *NativeTun) routineNetlinkListener() {
+	var cur *netlinkConn
 	defer func() {
-		unix.Close(tun.netlinkSock)
-		tun.hackListenerClosed.Lock()
+		tun.nlMu.Lock()
+		tun.nlClosed = true
+		if tun.nl != nil && tun.nl != cur {
+			tun.nl.close() // swapped in, but never picked up
+		}
+		if cur != nil {
+			cur.close()
+		}
+		tun.nl = nil
 		close(tun.events)
-		tun.netlinkCancel.Close()
+		tun.nlMu.Unlock()
 	}()
 
-	for msg := make([]byte, 1<<16); ; {
+	// wasEverUp is whether we have ever emitted EventUp from netlink.
+	wasEverUp := false
+	msg := make([]byte, 1<<16)
+	for {
+		tun.nlMu.Lock()
+		if tun.nl != cur {
+			if cur != nil {
+				cur.close()
+			}
+			cur = tun.nl
+		}
+		tun.nlMu.Unlock()
+
 		var err error
 		var msgn int
 		for {
-			msgn, _, _, _, err = unix.Recvmsg(tun.netlinkSock, msg[:], nil, 0)
+			msgn, _, _, _, err = unix.Recvmsg(cur.sock, msg[:], nil, 0)
 			if err == nil || !rwcancel.RetryAfterError(err) {
 				break
 			}
-			if !tun.netlinkCancel.ReadyRead() {
-				tun.errors <- fmt.Errorf("netlink socket closed: %w", err)
-				return
+			if !cur.cancel.ReadyRead() {
+				break
 			}
+		}
+		if err != nil && rwcancel.RetryAfterError(err) {
+			// Canceled, either by Close or by tryFollowLocked.
+			tun.nlMu.Lock()
+			swapped := !tun.nlClosed && tun.nl != cur
+			tun.nlMu.Unlock()
+			if swapped {
+				continue
+			}
+			tun.errors <- fmt.Errorf("netlink socket closed: %w", err)
+			return
 		}
 		if err != nil {
 			tun.errors <- fmt.Errorf("failed to receive netlink message: %w", err)
@@ -211,12 +481,16 @@ func (tun *NativeTun) routineNetlinkListener() {
 		default:
 		}
 
-		wasEverUp := false
 		for remain := msg[:msgn]; len(remain) >= unix.SizeofNlMsghdr; {
 
 			hdr := *(*unix.NlMsghdr)(unsafe.Pointer(&remain[0]))
 
-			if int(hdr.Len) > len(remain) {
+			if hdr.Len < unix.SizeofNlMsghdr || int(hdr.Len) > len(remain) {
+				break
+			}
+			msgLen := hdr.Len
+			isLink := hdr.Type == unix.RTM_NEWLINK || hdr.Type == unix.RTM_DELLINK
+			if isLink && msgLen < unix.SizeofNlMsghdr+unix.SizeofIfInfomsg {
 				break
 			}
 
@@ -226,9 +500,9 @@ func (tun *NativeTun) routineNetlinkListener() {
 
 			case unix.RTM_NEWLINK:
 				info := *(*unix.IfInfomsg)(unsafe.Pointer(&remain[unix.SizeofNlMsghdr]))
-				remain = remain[hdr.Len:]
+				remain = remain[msgLen:]
 
-				if info.Index != tun.index {
+				if info.Index != cur.index {
 					// not our interface
 					continue
 				}
@@ -240,8 +514,9 @@ func (tun *NativeTun) routineNetlinkListener() {
 
 				if info.Flags&unix.IFF_RUNNING == 0 {
 					// Don't emit EventDown before we've ever emitted EventUp.
-					// This avoids a startup race with HackListener, which
-					// might detect Up before we have finished reporting Down.
+					// This avoids a race with the startup link state probe,
+					// which might detect Up before we have finished reporting
+					// Down.
 					if wasEverUp {
 						tun.events <- EventDown
 					}
@@ -249,8 +524,24 @@ func (tun *NativeTun) routineNetlinkListener() {
 
 				tun.events <- EventMTUUpdate
 
+			case unix.RTM_DELLINK:
+				info := *(*unix.IfInfomsg)(unsafe.Pointer(&remain[unix.SizeofNlMsghdr]))
+				remain = remain[msgLen:]
+
+				if info.Index != cur.index {
+					continue
+				}
+				// The interface was deleted or moved to another namespace.
+				// Either way, its index here may now be reused by another
+				// interface, so stop matching it.
+				cur.index = 0
+				tun.followAfterDelLink(cur)
+				if testHookDelLink != nil {
+					testHookDelLink()
+				}
+
 			default:
-				remain = remain[hdr.Len:]
+				remain = remain[msgLen:]
 			}
 		}
 	}
@@ -265,9 +556,13 @@ func getIFIndex(name string) (int32, error) {
 	if err != nil {
 		return 0, err
 	}
-
 	defer unix.Close(fd)
+	return getIFIndexOn(fd, name)
+}
 
+// getIFIndexOn returns the index of interface name in the network namespace
+// of datagram socket fd.
+func getIFIndexOn(fd int, name string) (int32, error) {
 	var ifr [ifReqSize]byte
 	copy(ifr[:], name)
 	_, _, errno := unix.Syscall(
@@ -315,6 +610,19 @@ func (tun *NativeTun) setMTU(n int) error {
 }
 
 func (tun *NativeTun) MTU() (int, error) {
+	tun.nlMu.Lock()
+	if c := tun.nl; c != nil && c.ioctlSock >= 0 {
+		// The interface was followed into another network namespace, and
+		// may have been renamed there, so look up its current name.
+		defer tun.nlMu.Unlock()
+		name, err := tunNameOf(tun.File())
+		if err != nil {
+			return 0, err
+		}
+		return getMTUOn(c.ioctlSock, name)
+	}
+	tun.nlMu.Unlock()
+
 	name, err := tun.Name()
 	if err != nil {
 		return 0, err
@@ -331,9 +639,12 @@ func (tun *NativeTun) MTU() (int, error) {
 	}
 
 	defer unix.Close(fd)
+	return getMTUOn(fd, name)
+}
 
-	// do ioctl call
-
+// getMTUOn returns the MTU of interface name in the network namespace of
+// datagram socket fd.
+func getMTUOn(fd int, name string) (int, error) {
 	var ifr [ifReqSize]byte
 	copy(ifr[:], name)
 	_, _, errno := unix.Syscall(
@@ -544,9 +855,12 @@ func (tun *NativeTun) Close() error {
 	tun.closeOnce.Do(func() {
 		if tun.statusListenersShutdown != nil {
 			close(tun.statusListenersShutdown)
-			if tun.netlinkCancel != nil {
-				err1 = tun.netlinkCancel.Cancel()
+			tun.nlMu.Lock()
+			if tun.nl != nil && !tun.nlClosed {
+				err1 = tun.nl.cancel.Cancel()
 			}
+			tun.nlClosed = true
+			tun.nlMu.Unlock()
 		} else if tun.events != nil {
 			close(tun.events)
 		}
@@ -666,8 +980,6 @@ func CreateTUN(name string, mtu int, opts ...Option) (Device, error) {
 	if config.queues < 1 {
 		return nil, fmt.Errorf("%d tun queues requested, must be at least 1", config.queues)
 	}
-	// IFF_VNET_HDR enables the "tun status hack" via routineHackListener()
-	// where a null write will return EINVAL indicating the TUN is up.
 	flags := uint16(unix.IFF_TUN | unix.IFF_NO_PI | unix.IFF_VNET_HDR)
 	if config.queues > 1 {
 		// all members must declare multiqueue
@@ -711,7 +1023,7 @@ func CreateTUNFromFiles(files []*os.File, mtu int) (Device, error) {
 		errors:                  make(chan error, 5),
 		statusListenersShutdown: make(chan struct{}),
 	}
-	// Append every queue before spawning routineHackListener et al.
+	// Append every queue before spawning routineNetlinkListener.
 	for _, file := range files {
 		if err := appendQueue(tun, file); err != nil {
 			for _, f := range files {
@@ -746,28 +1058,33 @@ func CreateTUNFromFiles(files []*os.File, mtu int) (Device, error) {
 	}
 
 	// start event listener
-	tun.index, err = getIFIndex(name)
+	index, err := getIFIndex(name)
 	if err != nil {
 		tun.Close()
 		return nil, err
 	}
 
-	tun.netlinkSock, err = createNetlinkSocket()
+	sock, err := createNetlinkSocket()
 	if err != nil {
 		tun.Close()
 		return nil, err
 	}
-	tun.netlinkCancel, err = rwcancel.NewRWCancel(tun.netlinkSock)
+	cancel, err := rwcancel.NewRWCancel(sock)
 	if err != nil {
-		// No goroutine owns netlinkSock yet, and tun.Close won't reach it.
-		unix.Close(tun.netlinkSock)
+		// No goroutine owns sock yet, and tun.Close won't reach it.
+		unix.Close(sock)
 		tun.Close()
 		return nil, err
 	}
+	tun.nl = &netlinkConn{sock: sock, cancel: cancel, index: index, ioctlSock: -1}
 
-	tun.hackListenerClosed.Lock()
+	// Report the initial link state. The netlink socket is already bound, so
+	// no changes after this are lost, and nothing else can have filled the
+	// events buffer yet.
+	if ev := tun.initialLinkState(); ev != 0 {
+		tun.events <- ev
+	}
 	go tun.routineNetlinkListener()
-	go tun.routineHackListener() // cross namespace
 
 	err = tun.setMTU(mtu)
 	if err != nil {
