@@ -72,6 +72,10 @@ jobs:
       run: sudo apt-get install -y binutils-arm-linux-gnueabihf
     - name: test
       run: go test -race -v ./...
+    - name: test tun as root
+      # The tun tests need CAP_NET_ADMIN (and CAP_SYS_ADMIN for netns),
+      # so they skip in the unprivileged run above.
+      run: go test -exec sudo -race -v ./tun
 
   check-lockorder:
     runs-on: ubuntu-22.04
