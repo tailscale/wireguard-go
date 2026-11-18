@@ -138,12 +138,16 @@ func (f optionFunc) apply(config *config) {
 }
 
 type config struct {
-	queues int // Tun fd's in IFF_MULTI_QUEUE group to open.
+	// Tun fd's in IFF_MULTI_QUEUE group to open.
+	queues int
+	// Whether to set IFF_TUN_EXCL upon opening the first fd.
+	exclusive bool
 }
 
 func defaultConfig() config {
 	return config{
-		queues: 1,
+		queues:    1,
+		exclusive: true,
 	}
 }
 
@@ -164,6 +168,18 @@ func defaultConfig() config {
 func WithQueues(n int) Option {
 	return optionFunc(func(config *config) {
 		config.queues = n
+	})
+}
+
+// NonExclusive requests to join an interface that already exists under a
+// matching name. Disables return of [ErrExists].
+//
+// The existing interface must carry the same flags or the kernel returns
+// EINVAL. Callers must establish that no other process holds a queue of a
+// multiqueue interface before passing this.
+func NonExclusive() Option {
+	return optionFunc(func(config *config) {
+		config.exclusive = false
 	})
 }
 

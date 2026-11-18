@@ -986,8 +986,15 @@ func CreateTUN(name string, mtu int, opts ...Option) (Device, error) {
 		flags |= unix.IFF_MULTI_QUEUE
 	}
 	// Set IFF_TUN_EXCL to fail with EBUSY if name already exists.
-	first, err := openTUNFile(name, flags|unix.IFF_TUN_EXCL)
+	firstFlags := flags
+	if config.exclusive {
+		firstFlags |= unix.IFF_TUN_EXCL
+	}
+	first, err := openTUNFile(name, firstFlags)
 	if err != nil {
+		if config.exclusive && errors.Is(err, unix.EBUSY) {
+			err = fmt.Errorf("%w: %w", ErrExists, err)
+		}
 		return nil, err
 	}
 	files := []*os.File{first}

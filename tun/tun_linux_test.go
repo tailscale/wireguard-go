@@ -231,7 +231,32 @@ func TestCreateTUNDoesNotAdopt(t *testing.T) {
 			if !errors.Is(err, unix.EBUSY) {
 				t.Errorf("second CreateTUN(%q) = %v, want EBUSY", name, err)
 			}
+			if !errors.Is(err, ErrExists) {
+				t.Errorf("second CreateTUN(%q) = %v, want ErrExists", name, err)
+			}
 		})
+	}
+}
+
+func TestNonExclusiveBusyIsNotErrExists(t *testing.T) {
+	requireNetAdmin(t)
+	name := testTUNName(t)
+	dev, err := CreateTUN(name, testMTU)
+	if err != nil {
+		t.Fatalf("CreateTUN(%q): %v", name, err)
+	}
+	defer dev.Close()
+
+	second, err := CreateTUN(name, testMTU, NonExclusive())
+	if err == nil {
+		second.Close()
+		t.Fatalf("CreateTUN(%q, NonExclusive) succeeded, want EBUSY", name)
+	}
+	if !errors.Is(err, unix.EBUSY) {
+		t.Errorf("CreateTUN(%q, NonExclusive) = %v, want EBUSY", name, err)
+	}
+	if errors.Is(err, ErrExists) {
+		t.Errorf("CreateTUN(%q, NonExclusive) = %v, want no ErrExists", name, err)
 	}
 }
 
