@@ -354,7 +354,16 @@ func (device *Device) RoutineHandshake(id int) {
 			peer.timersAnyAuthenticatedPacketTraversal()
 			peer.timersAnyAuthenticatedPacketReceived()
 
-			device.log.Verbosef("%v - Received handshake initiation", peer)
+			handshakeType := ""
+			if msg.HasKEM {
+				if msg.IsRetry {
+					handshakeType = " (hybrid, retry)"
+				} else {
+					handshakeType = " (hybrid)"
+				}
+			}
+			device.log.Verbosef("%v - Received handshake initiation%s", peer, handshakeType)
+
 			peer.rxBytes.Add(uint64(len(elem.packet)))
 
 			peer.SendHandshakeResponse(msg.IsRetry)
@@ -381,7 +390,16 @@ func (device *Device) RoutineHandshake(id int) {
 				goto skip
 			}
 
-			device.log.Verbosef("%v - Received handshake response", peer)
+			handshakeType := ""
+			if msg.HasKEM {
+				if msg.IsRetry {
+					handshakeType = " (hybrid, retry)"
+				} else {
+					handshakeType = " (hybrid)"
+				}
+			}
+			device.log.Verbosef("%v - Received handshake response%s", peer, handshakeType)
+
 			peer.rxBytes.Add(uint64(len(elem.packet)))
 
 			// update timers
