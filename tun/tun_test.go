@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT
  *
  * Copyright (C) 2017-2023 WireGuard LLC. All Rights Reserved.
+ * Copyright (c) Tailscale Inc & contributors
  */
 
 package tun
@@ -79,7 +80,7 @@ func TestQueuesOf(t *testing.T) {
 }
 
 func TestTUNConfig(t *testing.T) {
-	if c := defaultConfig(); c.queues != 1 {
+	if c := defaultConfig(); c.queues != 1 || c.adoptExisting {
 		t.Fatalf("default tun config: %+v", c)
 	}
 }
@@ -87,7 +88,8 @@ func TestTUNConfig(t *testing.T) {
 func TestTUNOptions(t *testing.T) {
 	c := defaultConfig()
 	WithQueues(4).apply(&c)
-	if c.queues != 4 {
+	WithAdoptExisting().apply(&c)
+	if c.queues != 4 || !c.adoptExisting {
 		t.Fatalf("configured tun config: %+v", c)
 	}
 }

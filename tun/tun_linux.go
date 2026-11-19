@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT
  *
  * Copyright (C) 2017-2023 WireGuard LLC. All Rights Reserved.
+ * Copyright (c) Tailscale Inc & contributors
  */
 
 package tun
@@ -9,15 +10,21 @@ package tun
  */
 
 import (
+	"bytes"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"os"
+	"runtime"
+	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
 	"unsafe"
 
+	"github.com/mdlayher/netlink"
 	"github.com/tailscale/wireguard-go/conn"
 	"github.com/tailscale/wireguard-go/rwcancel"
 	"golang.org/x/sys/unix"
@@ -627,69 +634,325 @@ func (tun *NativeTun) initFromFlags(name string) error {
 
 // openTUNFile opens /dev/net/tun and attaches it to name.
 func openTUNFile(name string, flags uint16) (*os.File, error) {
-	nfd, err := unix.Open(cloneDevicePath, unix.O_RDWR|unix.O_CLOEXEC, 0)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("CreateTUN(%q) failed; %s does not exist", name, cloneDevicePath)
+	file, _, err := openTUNQueue(name, flags)
+	return file, err
+}
+
+// adoptTUNFiles attaches to an existing TUN interface and preserves its queue mode.
+// It uses one queue for a single-queue interface, regardless of queues.
+// Multiqueue attachment checks do not prevent concurrent attachments.
+func adoptTUNFiles(name string, queues int) (_ []*os.File, err error) {
+	defer func() {
+		if err != nil {
+			err = fmt.Errorf("adoptTUNFiles: %w", err)
 		}
+	}()
+	if name == "" || len(name) >= unix.IFNAMSIZ || strings.IndexByte(name, 0) >= 0 {
+		return nil, fmt.Errorf("invalid TUN name %q", name)
+	}
+	if queues < 1 {
+		return nil, fmt.Errorf("invalid queue count %d", queues)
+	}
+	conn, err := netlink.Dial(unix.NETLINK_ROUTE, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	if err := conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		return nil, err
+	}
+	link, err := queryTUNLink(conn, name)
+	if err != nil {
+		return nil, err
+	}
+	if link.flags&tunRequiredFlags != tunRequiredFlags {
+		return nil, fmt.Errorf("TUN %q has incompatible flags %#x", name, link.flags)
+	}
+	if err := link.checkQueues(0); err != nil {
 		return nil, err
 	}
 
+	first, _, err := openTUNQueue(name, link.flags)
+	if err != nil {
+		return nil, err
+	}
+	files := []*os.File{first}
+	defer func() {
+		for _, f := range files {
+			f.Close()
+		}
+	}()
+	check := func() error {
+		current, err := queryTUNLink(conn, name)
+		if err != nil {
+			return err
+		}
+		if current.index != link.index || current.flags != link.flags {
+			return fmt.Errorf("TUN %q changed during adoption", name)
+		}
+		return current.checkQueues(uint32(len(files)))
+	}
+	// TUNSETIFF can create an interface if the queried one has disappeared.
+	if err := check(); err != nil {
+		return nil, err
+	}
+	if link.flags&unix.IFF_MULTI_QUEUE != 0 {
+		files = addTUNQueues(files, name, link.flags, queues)
+		if err := check(); err != nil {
+			return nil, err
+		}
+	}
+	// The caller owns the files on success.
+	owned := files
+	files = nil
+	return owned, nil
+}
+
+const (
+	tunRequiredFlags  = uint16(unix.IFF_TUN | unix.IFF_NO_PI)
+	tunQueueFlagsMask = tunRequiredFlags | unix.IFF_TAP | unix.IFF_VNET_HDR | unix.IFF_MULTI_QUEUE
+)
+
+func createTUNFiles(name string, queues int) ([]*os.File, error) {
+	if queues < 1 {
+		return nil, fmt.Errorf("createTUNFiles: invalid queue count %d", queues)
+	}
+	flags := tunRequiredFlags | unix.IFF_VNET_HDR
+	if queues > 1 {
+		flags |= unix.IFF_MULTI_QUEUE
+	}
+	first, resolved, err := openTUNQueue(name, flags|unix.IFF_TUN_EXCL)
+	if err != nil {
+		return nil, err
+	}
+	return addTUNQueues([]*os.File{first}, resolved, flags, queues), nil
+}
+
+func addTUNQueues(files []*os.File, name string, flags uint16, queues int) []*os.File {
+	for len(files) < queues {
+		f, _, err := openTUNQueue(name, flags)
+		if err != nil {
+			break // Use the queues already opened.
+		}
+		files = append(files, f)
+	}
+	return files
+}
+
+func openTUNQueue(name string, flags uint16) (_ *os.File, _ string, err error) {
+	defer func() {
+		if err != nil {
+			err = fmt.Errorf("openTUNQueue(%q): %w", name, err)
+		}
+	}()
+	if strings.IndexByte(name, 0) >= 0 {
+		return nil, "", fmt.Errorf("invalid TUN name")
+	}
 	ifr, err := unix.NewIfreq(name)
 	if err != nil {
-		unix.Close(nfd)
-		return nil, err
+		return nil, "", err
 	}
+	fd, err := unix.Open(cloneDevicePath, unix.O_RDWR|unix.O_CLOEXEC|unix.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, "", fmt.Errorf("open %s: %w", cloneDevicePath, err)
+	}
+	defer func() {
+		if err != nil {
+			unix.Close(fd)
+		}
+	}()
 	ifr.SetUint16(flags)
-	err = unix.IoctlIfreq(nfd, unix.TUNSETIFF, ifr)
+	if err := unix.IoctlIfreq(fd, unix.TUNSETIFF, ifr); err != nil {
+		return nil, "", err
+	}
+	if err := unix.IoctlIfreq(fd, unix.TUNGETIFF, ifr); err != nil {
+		return nil, "", err
+	}
+	got := ifr.Uint16()
+	if got&tunRequiredFlags != tunRequiredFlags || got&tunQueueFlagsMask != flags&tunQueueFlagsMask {
+		return nil, "", fmt.Errorf("incompatible TUN flags %#x, requested %#x", got, flags)
+	}
+	if got&unix.IFF_VNET_HDR != 0 {
+		if err := checkTUNVnetHeader(fd); err != nil {
+			return nil, "", err
+		}
+	}
+	return os.NewFile(uintptr(fd), cloneDevicePath), ifr.Name(), nil
+}
+
+func checkTUNVnetHeader(fd int) error {
+	size, err := unix.IoctlGetInt(fd, unix.TUNGETVNETHDRSZ)
 	if err != nil {
-		unix.Close(nfd)
+		return err
+	}
+	if size != virtioNetHdrLen {
+		return fmt.Errorf("incompatible virtio net header size %d, want %d", size, virtioNetHdrLen)
+	}
+	little, err := tunVnetByteOrderFlag(fd, unix.TUNGETVNETLE)
+	if err != nil {
+		return err
+	}
+	big, err := tunVnetByteOrderFlag(fd, unix.TUNGETVNETBE)
+	if err != nil {
+		return err
+	}
+	nativeLittle := binary.NativeEndian.Uint16([]byte{1, 0}) == 1
+	headerLittle := little || !big && nativeLittle
+	if headerLittle != nativeLittle {
+		return fmt.Errorf("virtio net header uses non-native byte order")
+	}
+	return nil
+}
+
+func tunVnetByteOrderFlag(fd int, request uint) (bool, error) {
+	v, err := unix.IoctlGetInt(fd, request)
+	// Kernels without byte-order overrides use native byte order.
+	if errors.Is(err, unix.EINVAL) || errors.Is(err, unix.ENOTTY) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if v != 0 && v != 1 {
+		return false, fmt.Errorf("invalid virtio net byte-order flag %d from ioctl %#x", v, request)
+	}
+	return v != 0, nil
+}
+
+type tunLink struct {
+	index                  uint32
+	flags                  uint16
+	queues, disabledQueues uint32
+}
+
+func (link tunLink) checkQueues(owned uint32) error {
+	if link.flags&unix.IFF_MULTI_QUEUE != 0 && (link.queues != owned || link.disabledQueues != 0) {
+		return fmt.Errorf("unexpected TUN attachments (active=%d, disabled=%d, owned=%d): %w", link.queues, link.disabledQueues, owned, unix.EBUSY)
+	}
+	return nil
+}
+
+func queryTUNLink(conn *netlink.Conn, name string) (tunLink, error) {
+	attrs, err := netlink.MarshalAttributes([]netlink.Attribute{{Type: unix.IFLA_IFNAME, Data: append([]byte(name), 0)}})
+	if err != nil {
+		return tunLink{}, err
+	}
+	msgs, err := conn.Execute(netlink.Message{
+		Header: netlink.Header{Type: unix.RTM_GETLINK, Flags: netlink.Request},
+		Data:   append(make([]byte, unix.SizeofIfInfomsg), attrs...),
+	})
+	if err != nil {
+		return tunLink{}, err
+	}
+	if len(msgs) != 1 || msgs[0].Header.Type != unix.RTM_NEWLINK || msgs[0].Header.Flags&netlink.Multi != 0 {
+		return tunLink{}, fmt.Errorf("unexpected RTM_GETLINK response")
+	}
+	return parseTUNLink(msgs[0].Data, name)
+}
+
+func parseTUNLink(data []byte, name string) (tunLink, error) {
+	var link tunLink
+	if len(data) < unix.SizeofIfInfomsg {
+		return link, fmt.Errorf("short link message")
+	}
+	link.index = binary.NativeEndian.Uint32(data[4:])
+	attrs, err := tunAttrs(data[unix.SizeofIfInfomsg:], unix.IFLA_IFNAME, unix.IFLA_LINKINFO)
+	if err != nil {
+		return link, err
+	}
+	if int32(link.index) <= 0 || !bytes.Equal(attrs[unix.IFLA_IFNAME], append([]byte(name), 0)) {
+		return link, fmt.Errorf("unexpected link identity")
+	}
+	info, err := tunAttrs(attrs[unix.IFLA_LINKINFO], unix.IFLA_INFO_KIND, unix.IFLA_INFO_DATA)
+	if err != nil {
+		return link, err
+	}
+	if !bytes.Equal(info[unix.IFLA_INFO_KIND], []byte("tun\x00")) {
+		return link, fmt.Errorf("interface is not a TUN")
+	}
+	attrs, err = tunAttrs(info[unix.IFLA_INFO_DATA], unix.IFLA_TUN_TYPE, unix.IFLA_TUN_MULTI_QUEUE, unix.IFLA_TUN_PI, unix.IFLA_TUN_VNET_HDR, unix.IFLA_TUN_NUM_QUEUES, unix.IFLA_TUN_NUM_DISABLED_QUEUES)
+	if err != nil {
+		return link, err
+	}
+	if typ := attrs[unix.IFLA_TUN_TYPE]; len(typ) != 1 || typ[0] != unix.IFF_TUN {
+		return link, fmt.Errorf("interface is not a TUN")
+	}
+	link.flags = unix.IFF_TUN
+	for _, field := range []struct {
+		attr     uint16
+		flag     uint16
+		inverted bool
+	}{
+		{unix.IFLA_TUN_MULTI_QUEUE, unix.IFF_MULTI_QUEUE, false},
+		{unix.IFLA_TUN_PI, unix.IFF_NO_PI, true},
+		{unix.IFLA_TUN_VNET_HDR, unix.IFF_VNET_HDR, false},
+	} {
+		v := attrs[field.attr]
+		if len(v) != 1 || v[0] > 1 {
+			return link, fmt.Errorf("missing or invalid TUN flag %d", field.attr)
+		}
+		if (v[0] != 0) != field.inverted {
+			link.flags |= field.flag
+		}
+	}
+	for _, field := range []struct {
+		attr  uint16
+		value *uint32
+	}{
+		{unix.IFLA_TUN_NUM_QUEUES, &link.queues},
+		{unix.IFLA_TUN_NUM_DISABLED_QUEUES, &link.disabledQueues},
+	} {
+		v, present := attrs[field.attr]
+		if !present && link.flags&unix.IFF_MULTI_QUEUE == 0 {
+			continue
+		}
+		if len(v) != 4 {
+			return link, fmt.Errorf("missing or invalid TUN queue count %d", field.attr)
+		}
+		*field.value = binary.NativeEndian.Uint32(v)
+	}
+	return link, nil
+}
+
+// tunAttrs returns the requested attributes, rejecting duplicate occurrences.
+func tunAttrs(data []byte, fields ...uint16) (map[uint16][]byte, error) {
+	ad, err := netlink.NewAttributeDecoder(data)
+	if err != nil {
 		return nil, err
 	}
-
-	err = unix.SetNonblock(nfd, true)
-	if err != nil {
-		unix.Close(nfd)
-		return nil, err
+	attrs := make(map[uint16][]byte)
+	for ad.Next() {
+		typ := ad.Type()
+		if !slices.Contains(fields, typ) {
+			continue
+		}
+		if _, present := attrs[typ]; present {
+			return nil, fmt.Errorf("duplicate netlink attribute %d", typ)
+		}
+		attrs[typ] = ad.Bytes()
 	}
-
-	// Note that the above -- open,ioctl,nonblock -- must happen prior to handing it to netpoll as below this line.
-	return os.NewFile(uintptr(nfd), cloneDevicePath), nil
+	return attrs, ad.Err()
 }
 
 // CreateTUN creates a Device with the provided name and MTU.
+// Existing names fail with EBUSY unless [WithAdoptExisting] is set.
 func CreateTUN(name string, mtu int, opts ...Option) (Device, error) {
 	config := defaultConfig()
 	for _, opt := range opts {
 		opt.apply(&config)
 	}
 	if config.queues < 1 {
-		return nil, fmt.Errorf("%d tun queues requested, must be at least 1", config.queues)
+		return nil, fmt.Errorf("CreateTUN(%q): %d tun queues requested, must be at least 1", name, config.queues)
 	}
-	// IFF_VNET_HDR enables the "tun status hack" via routineHackListener()
-	// where a null write will return EINVAL indicating the TUN is up.
-	flags := uint16(unix.IFF_TUN | unix.IFF_NO_PI | unix.IFF_VNET_HDR)
-	if config.queues > 1 {
-		// all members must declare multiqueue
-		flags |= unix.IFF_MULTI_QUEUE
-	}
-	// Set IFF_TUN_EXCL to fail with EBUSY if name already exists.
-	first, err := openTUNFile(name, flags|unix.IFF_TUN_EXCL)
-	if err != nil {
-		return nil, err
-	}
-	files := []*os.File{first}
-	if config.queues > 1 {
-		// Resolve name wildcards (%d) to not spawn new groups.
-		if resolved, err := tunNameOf(first); err == nil {
-			for range config.queues - 1 {
-				f, err := openTUNFile(resolved, flags)
-				if err != nil {
-					break // return a short group
-				}
-				files = append(files, f)
-			}
+	files, err := createTUNFiles(name, config.queues)
+	if errors.Is(err, unix.EBUSY) && config.adoptExisting && runtime.GOOS != "android" {
+		files, err = adoptTUNFiles(name, config.queues)
+		if err != nil && !errors.Is(err, unix.EBUSY) {
+			err = fmt.Errorf("%w: %w", unix.EBUSY, err)
 		}
+	}
+	if err != nil {
+		return nil, fmt.Errorf("CreateTUN(%q): %w", name, err)
 	}
 	return CreateTUNFromFiles(files, mtu)
 }

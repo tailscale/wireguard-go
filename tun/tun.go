@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT
  *
  * Copyright (C) 2017-2023 WireGuard LLC. All Rights Reserved.
+ * Copyright (c) Tailscale Inc & contributors
  */
 
 package tun
@@ -138,7 +139,8 @@ func (f optionFunc) apply(config *config) {
 }
 
 type config struct {
-	queues int // Tun fd's in IFF_MULTI_QUEUE group to open.
+	queues        int // Tun fd's in IFF_MULTI_QUEUE group to open.
+	adoptExisting bool
 }
 
 func defaultConfig() config {
@@ -164,6 +166,19 @@ func defaultConfig() config {
 func WithQueues(n int) Option {
 	return optionFunc(func(config *config) {
 		config.queues = n
+	})
+}
+
+// WithAdoptExisting allows CreateTUN to acquire an unused existing TUN interface.
+// It preserves the interface's queue mode. An existing single-queue interface
+// uses one queue even when [WithQueues] requests more.
+//
+// Multiqueue attachment checks do not prevent concurrent attachments.
+// Errors for interfaces that cannot be adopted wrap EBUSY.
+// This option has no effect on Android or platforms other than Linux.
+func WithAdoptExisting() Option {
+	return optionFunc(func(config *config) {
+		config.adoptExisting = true
 	})
 }
 

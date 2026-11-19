@@ -3,6 +3,7 @@ module github.com/tailscale/wireguard-go
 go 1.26.0
 
 require (
+	github.com/mdlayher/netlink v1.11.2
 	golang.org/x/crypto v0.52.0
 	golang.org/x/net v0.54.0
 	golang.org/x/sys v0.45.0
@@ -13,6 +14,8 @@ require (
 
 require (
 	github.com/google/btree v1.1.2 // indirect
+	github.com/google/go-cmp v0.7.0 // indirect
+	github.com/mdlayher/socket v0.6.0 // indirect
 	golang.org/x/mod v0.35.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect
 	golang.org/x/time v0.7.0 // indirect
