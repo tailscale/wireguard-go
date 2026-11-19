@@ -971,7 +971,9 @@ func openTUNFile(name string, flags uint16) (*os.File, error) {
 	return os.NewFile(uintptr(nfd), cloneDevicePath), nil
 }
 
-// CreateTUN creates a Device with the provided name and MTU.
+// CreateTUN creates a Device with the provided name and MTU. An existing
+// interface with that name is attached to, with one queue if it is not
+// multiqueue.
 func CreateTUN(name string, mtu int, opts ...Option) (Device, error) {
 	config := defaultConfig()
 	for _, opt := range opts {
@@ -985,13 +987,17 @@ func CreateTUN(name string, mtu int, opts ...Option) (Device, error) {
 		// all members must declare multiqueue
 		flags |= unix.IFF_MULTI_QUEUE
 	}
-	// Set IFF_TUN_EXCL to fail with EBUSY if name already exists.
-	first, err := openTUNFile(name, flags|unix.IFF_TUN_EXCL)
+	first, err := openTUNFile(name, flags)
+	if errors.Is(err, unix.EINVAL) && flags&unix.IFF_MULTI_QUEUE != 0 {
+		// The kernel rejects IFF_MULTI_QUEUE against a single-queue interface.
+		flags &^= unix.IFF_MULTI_QUEUE
+		first, err = openTUNFile(name, flags)
+	}
 	if err != nil {
 		return nil, err
 	}
 	files := []*os.File{first}
-	if config.queues > 1 {
+	if flags&unix.IFF_MULTI_QUEUE != 0 {
 		// Resolve name wildcards (%d) to not spawn new groups.
 		if resolved, err := tunNameOf(first); err == nil {
 			for range config.queues - 1 {
