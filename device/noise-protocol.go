@@ -7,6 +7,7 @@ package device
 
 import (
 	"crypto/mlkem"
+	"crypto/subtle"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -540,11 +541,14 @@ func (device *Device) ConsumeMessageInitiation(msg *MessageInitiation, endpoint 
 		handshake.mutex.RUnlock()
 		return nil
 	}
+	precomputedStaticStatic := handshake.precomputedStaticStatic
+	defer setZero(precomputedStaticStatic[:])
+
 	KDF2(
 		&chainKey,
 		&key,
 		chainKey[:],
-		handshake.precomputedStaticStatic[:],
+		precomputedStaticStatic[:],
 	)
 	aead, _ = chacha20poly1305New(key[:])
 	_, err = aead.Open(timestamp[:0], ZeroNonce[:], msg.Timestamp[:], hash[:])
@@ -571,6 +575,16 @@ func (device *Device) ConsumeMessageInitiation(msg *MessageInitiation, endpoint 
 	// update handshake state
 
 	handshake.mutex.Lock()
+
+	// We race with the duplicate initiation that already advanced the handshake.
+	// Ensure that all checks still hold between the read-unlock and the write-lock.
+	if msg.HasKEM != handshake.hybridHandshake ||
+		subtle.ConstantTimeCompare(precomputedStaticStatic[:], handshake.precomputedStaticStatic[:]) == 0 ||
+		!timestamp.After(handshake.lastTimestamp) /* replay */ ||
+		time.Since(handshake.lastInitiationConsumption) <= HandshakeInitationRate /* flood */ {
+		handshake.mutex.Unlock()
+		return nil
+	}
 
 	handshake.hash = hash
 	handshake.chainKey = chainKey
