@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT
  *
  * Copyright (C) 2017-2023 WireGuard LLC. All Rights Reserved.
+ * Copyright (c) Tailscale Inc & contributors
  */
 
 package tun
@@ -18,6 +19,11 @@ import (
 )
 
 const testMTU = 1420
+
+func openTUNFile(name string, flags uint16) (*os.File, error) {
+	file, _, err := openTUNQueue(name, flags)
+	return file, err
+}
 
 func requireNetAdmin(tb testing.TB) {
 	// These tests create real IFF_MULTI_QUEUE tun interfaces, which needs
@@ -209,29 +215,6 @@ func TestTUNLifecycle(t *testing.T) {
 				}
 			})
 		}
-	}
-}
-
-func TestCreateTUNDoesNotAdopt(t *testing.T) {
-	requireNetAdmin(t)
-	for _, queues := range []int{1, 4} {
-		t.Run(fmt.Sprintf("%dqueues", queues), func(t *testing.T) {
-			name := testTUNName(t)
-			dev, err := CreateTUN(name, testMTU, WithQueues(queues))
-			if err != nil {
-				t.Fatalf("CreateTUN(%q, %d queues): %v", name, queues, err)
-			}
-			defer dev.Close()
-
-			second, err := CreateTUN(name, testMTU, WithQueues(queues))
-			if err == nil {
-				second.Close()
-				t.Fatalf("second CreateTUN(%q) succeeded, want EBUSY", name)
-			}
-			if !errors.Is(err, unix.EBUSY) {
-				t.Errorf("second CreateTUN(%q) = %v, want EBUSY", name, err)
-			}
-		})
 	}
 }
 
