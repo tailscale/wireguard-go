@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT
  *
  * Copyright (C) 2017-2023 WireGuard LLC. All Rights Reserved.
+ * Copyright (c) Tailscale Inc & contributors
  */
 
 package tun
@@ -137,8 +138,11 @@ func (f optionFunc) apply(config *config) {
 	f(config)
 }
 
+type logFunc func(format string, args ...any)
+
 type config struct {
-	queues int // Tun fd's in IFF_MULTI_QUEUE group to open.
+	queues int // Tun fds in IFF_MULTI_QUEUE group to open.
+	logf   logFunc
 }
 
 func defaultConfig() config {
@@ -164,6 +168,14 @@ func defaultConfig() config {
 func WithQueues(n int) Option {
 	return optionFunc(func(config *config) {
 		config.queues = n
+	})
+}
+
+// WithLogf sets the logger for Linux TUN queue fallback and ownership errors.
+// [CreateTUN] calls logf synchronously. A nil function disables logging.
+func WithLogf(logf func(format string, args ...any)) Option {
+	return optionFunc(func(config *config) {
+		config.logf = logf
 	})
 }
 

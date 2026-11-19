@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT
  *
  * Copyright (C) 2017-2023 WireGuard LLC. All Rights Reserved.
+ * Copyright (c) Tailscale Inc & contributors
  */
 
 package tun
@@ -79,8 +80,33 @@ func TestQueuesOf(t *testing.T) {
 }
 
 func TestTUNConfig(t *testing.T) {
-	if c := defaultConfig(); c.queues != 1 {
+	if c := defaultConfig(); c.queues != 1 || c.logf != nil {
 		t.Fatalf("default tun config: %+v", c)
+	}
+}
+
+func TestWithLogf(t *testing.T) {
+	c := defaultConfig()
+	calls := 0
+	WithLogf(func(format string, args ...any) {
+		calls++
+		if format != "queue %d" || len(args) != 1 || args[0] != 4 {
+			t.Errorf("format=%q args=%v", format, args)
+		}
+	}).apply(&c)
+	if c.logf == nil {
+		t.Fatal("logger was not configured")
+	}
+	if calls != 0 {
+		t.Fatal("configuring the logger called it")
+	}
+	c.logf("queue %d", 4)
+	if calls != 1 {
+		t.Errorf("logger calls = %d, want 1", calls)
+	}
+	WithLogf(nil).apply(&c)
+	if c.logf != nil {
+		t.Error("nil logger did not disable logging")
 	}
 }
 

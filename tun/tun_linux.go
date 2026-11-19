@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT
  *
  * Copyright (C) 2017-2023 WireGuard LLC. All Rights Reserved.
+ * Copyright (c) Tailscale Inc & contributors
  */
 
 package tun
@@ -12,7 +13,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -939,40 +942,81 @@ func (tun *NativeTun) initFromFlags(name string) error {
 	return err
 }
 
-// openTUNFile opens /dev/net/tun and attaches it to name.
-func openTUNFile(name string, flags uint16) (*os.File, error) {
-	nfd, err := unix.Open(cloneDevicePath, unix.O_RDWR|unix.O_CLOEXEC, 0)
+const (
+	tunRequiredFlags = uint16(unix.IFF_TUN | unix.IFF_NO_PI)
+	tunDefaultFlags  = tunRequiredFlags | unix.IFF_VNET_HDR
+)
+
+// checkTUNQueues checks active queues in the caller's network namespace's sysfs.
+// Detached queue fds are invisible here and can be reattached after this check.
+func checkTUNQueues(path string, owned int) error {
+	entries, err := os.ReadDir(path)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("CreateTUN(%q) failed; %s does not exist", name, cloneDevicePath)
+		return err
+	}
+	var rx, tx int
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
 		}
-		return nil, err
+		switch {
+		case strings.HasPrefix(entry.Name(), "rx-"):
+			rx++
+		case strings.HasPrefix(entry.Name(), "tx-"):
+			tx++
+		}
 	}
-
-	ifr, err := unix.NewIfreq(name)
-	if err != nil {
-		unix.Close(nfd)
-		return nil, err
+	if rx != owned || tx != owned {
+		return fmt.Errorf("active queues rx=%d tx=%d, owned=%d: %w", rx, tx, owned, unix.EBUSY)
 	}
-	ifr.SetUint16(flags)
-	err = unix.IoctlIfreq(nfd, unix.TUNSETIFF, ifr)
-	if err != nil {
-		unix.Close(nfd)
-		return nil, err
-	}
-
-	err = unix.SetNonblock(nfd, true)
-	if err != nil {
-		unix.Close(nfd)
-		return nil, err
-	}
-
-	// Note that the above -- open,ioctl,nonblock -- must happen prior to handing it to netpoll as below this line.
-	return os.NewFile(uintptr(nfd), cloneDevicePath), nil
+	return nil
 }
 
-// CreateTUN creates a Device with the provided name and MTU.
-func CreateTUN(name string, mtu int, opts ...Option) (Device, error) {
+func openTUNQueue(name string, flags uint16) (_ *os.File, _ *unix.Ifreq, err error) {
+	ifr, err := unix.NewIfreq(name)
+	if err != nil {
+		return nil, nil, err
+	}
+	fd, err := unix.Open(cloneDevicePath, unix.O_RDWR|unix.O_CLOEXEC|unix.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open %s: %w", cloneDevicePath, err)
+	}
+	defer func() {
+		if err != nil {
+			unix.Close(fd)
+		}
+	}()
+	ifr.SetUint16(flags)
+	err = unix.IoctlIfreq(fd, unix.TUNSETIFF, ifr)
+	if errors.Is(err, unix.EINVAL) && flags&unix.IFF_MULTI_QUEUE != 0 {
+		flags &^= unix.IFF_MULTI_QUEUE
+		ifr.SetUint16(flags)
+		err = unix.IoctlIfreq(fd, unix.TUNSETIFF, ifr)
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := unix.IoctlIfreq(fd, unix.TUNGETIFF, ifr); err != nil {
+		return nil, nil, err
+	}
+	return os.NewFile(uintptr(fd), cloneDevicePath), ifr, nil
+}
+
+// CreateTUN creates or acquires a TUN interface with the provided name and MTU.
+// A single-queue interface uses one queue even when more are requested.
+// Multiqueue acquisition requires sysfs to show only the acquired active queues.
+// Detached queue holders and subsequent attachments are not excluded.
+// The sysfs mount must correspond to the caller's network namespace.
+func CreateTUN(name string, mtu int, opts ...Option) (_ Device, err error) {
+	var files []*os.File
+	defer func() {
+		if err != nil {
+			for _, f := range files {
+				f.Close()
+			}
+			err = fmt.Errorf("CreateTUN(%q): %w", name, err)
+		}
+	}()
 	config := defaultConfig()
 	for _, opt := range opts {
 		opt.apply(&config)
@@ -980,28 +1024,36 @@ func CreateTUN(name string, mtu int, opts ...Option) (Device, error) {
 	if config.queues < 1 {
 		return nil, fmt.Errorf("%d tun queues requested, must be at least 1", config.queues)
 	}
-	flags := uint16(unix.IFF_TUN | unix.IFF_NO_PI | unix.IFF_VNET_HDR)
+	flags := tunDefaultFlags
 	if config.queues > 1 {
-		// all members must declare multiqueue
 		flags |= unix.IFF_MULTI_QUEUE
 	}
-	// Set IFF_TUN_EXCL to fail with EBUSY if name already exists.
-	first, err := openTUNFile(name, flags|unix.IFF_TUN_EXCL)
+	first, ifr, err := openTUNQueue(name, flags)
 	if err != nil {
 		return nil, err
 	}
-	files := []*os.File{first}
-	if config.queues > 1 {
-		// Resolve name wildcards (%d) to not spawn new groups.
-		if resolved, err := tunNameOf(first); err == nil {
-			for range config.queues - 1 {
-				f, err := openTUNFile(resolved, flags)
-				if err != nil {
-					break // return a short group
+	files = append(files, first)
+	resolved, flags := ifr.Name(), ifr.Uint16()&(tunDefaultFlags|unix.IFF_MULTI_QUEUE)
+	if flags&unix.IFF_MULTI_QUEUE != 0 {
+		for len(files) < config.queues {
+			f, _, openErr := openTUNQueue(resolved, flags)
+			if openErr != nil {
+				if config.logf != nil {
+					config.logf("TUN %q: opened %d of %d requested queues: %v", resolved, len(files), config.queues, openErr)
 				}
-				files = append(files, f)
+				break
 			}
+			files = append(files, f)
 		}
+		if err := checkTUNQueues(filepath.Join("/sys/class/net", resolved, "queues"), len(files)); err != nil {
+			err = fmt.Errorf("TUN %q: cannot acquire all active queues: %w", resolved, err)
+			if config.logf != nil {
+				config.logf("%v", err)
+			}
+			return nil, err
+		}
+	} else if config.queues > 1 && config.logf != nil {
+		config.logf("TUN %q: using single queue instead of %d requested queues", resolved, config.queues)
 	}
 	return CreateTUNFromFiles(files, mtu)
 }
@@ -1128,7 +1180,7 @@ func CreateUnmonitoredTUNFromFDs(fds []int) (Device, string, error) {
 		errors: make(chan error, 5),
 	}
 	for i, fd := range fds {
-		// See openTUNFile: this must precede os.NewFile.
+		// Set nonblocking before os.NewFile registers the fd with the runtime poller.
 		if err := unix.SetNonblock(fd, true); err != nil {
 			tun.Close()
 			for _, rest := range fds[i:] {
