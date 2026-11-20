@@ -6,6 +6,7 @@
 package tun
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"net"
@@ -165,6 +166,80 @@ func TestCheckTUNQueues(t *testing.T) {
 				t.Fatalf("checkTUNQueues = %v, want error=%v", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestCreateTUNFailureCleanup(t *testing.T) {
+	requireNetAdmin(t)
+	for _, queues := range []int{1, 4} {
+		for _, failure := range []string{"largeHeader", "foreignByteOrder", "initialization"} {
+			t.Run(fmt.Sprintf("%d/%s", queues, failure), func(t *testing.T) {
+				old, name := persistentTestTUN(t, queues)
+				request, value := uint(unix.TUNSETVNETHDRSZ), 12
+				if failure == "foreignByteOrder" {
+					request, value = unix.TUNSETVNETLE, 1
+					if binary.NativeEndian.Uint16([]byte{1, 0}) == 1 {
+						request = unix.TUNSETVNETBE
+					}
+				}
+				set := func(value int) {
+					ioctlRecoveryFile(t, old.File(), func(fd int) error {
+						err := unix.IoctlSetPointerInt(fd, request, value)
+						if errors.Is(err, unix.EINVAL) || errors.Is(err, unix.ENOTTY) {
+							t.Skipf("unsupported header setting: %v", err)
+						}
+						return err
+					})
+				}
+				if failure != "initialization" {
+					set(value)
+				}
+				old.Close()
+				mtu := 1280
+				if failure == "initialization" {
+					mtu = 1
+				}
+				dev, err := CreateTUN(name, mtu, WithQueues(queues))
+				if dev != nil {
+					dev.Close()
+				}
+				if err == nil || dev != nil {
+					t.Fatalf("CreateTUN = %v, %v, want failure", dev, err)
+				}
+				// Restore the header through a raw fd, bypassing format validation.
+				fd, err := unix.Open(cloneDevicePath, unix.O_RDWR|unix.O_CLOEXEC, 0)
+				if err != nil {
+					t.Fatal(err)
+				}
+				file := os.NewFile(uintptr(fd), cloneDevicePath)
+				defer file.Close()
+				ifr, _ := unix.NewIfreq(name)
+				flags := tunDefaultFlags
+				if queues > 1 {
+					flags |= unix.IFF_MULTI_QUEUE
+				}
+				ifr.SetUint16(flags)
+				if err := unix.IoctlIfreq(fd, unix.TUNSETIFF, ifr); err != nil {
+					t.Fatalf("failed acquisition leaked queues: %v", err)
+				}
+				if failure != "initialization" {
+					value = 0
+					if failure == "largeHeader" {
+						value = virtioNetHdrLen
+					}
+					if err := unix.IoctlSetPointerInt(fd, request, value); err != nil {
+						t.Fatal(err)
+					}
+				}
+				file.Close()
+				// A complete retry also detects leaked multiqueue fds.
+				dev, err = CreateTUN(name, 1280, WithQueues(queues))
+				if err != nil {
+					t.Fatalf("retry after failure: %v", err)
+				}
+				dev.Close()
+			})
+		}
 	}
 }
 
