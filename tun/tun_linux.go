@@ -10,6 +10,7 @@ package tun
  */
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"os"
@@ -973,6 +974,9 @@ func checkTUNQueues(path string, owned int) error {
 }
 
 func openTUNQueue(name string, flags uint16) (_ *os.File, _ *unix.Ifreq, err error) {
+	if strings.IndexByte(name, 0) >= 0 {
+		return nil, nil, fmt.Errorf("invalid TUN name")
+	}
 	ifr, err := unix.NewIfreq(name)
 	if err != nil {
 		return nil, nil, err
@@ -999,7 +1003,54 @@ func openTUNQueue(name string, flags uint16) (_ *os.File, _ *unix.Ifreq, err err
 	if err := unix.IoctlIfreq(fd, unix.TUNGETIFF, ifr); err != nil {
 		return nil, nil, err
 	}
+	got := ifr.Uint16()
+	const formatFlags = tunRequiredFlags | unix.IFF_TAP | unix.IFF_VNET_HDR
+	hasRequiredFlags := got&tunRequiredFlags == tunRequiredFlags
+	formatMatches := got&formatFlags == flags&formatFlags
+	// Older kernels can silently ignore IFF_MULTI_QUEUE.
+	unexpectedMultiQueue := got&unix.IFF_MULTI_QUEUE != 0 && flags&unix.IFF_MULTI_QUEUE == 0
+	if !hasRequiredFlags || !formatMatches || unexpectedMultiQueue {
+		return nil, nil, fmt.Errorf("incompatible TUN flags %#x, requested %#x", got, flags)
+	}
+	if got&unix.IFF_VNET_HDR != 0 {
+		if err := checkTUNVnetHeader(fd); err != nil {
+			return nil, nil, err
+		}
+	}
 	return os.NewFile(uintptr(fd), cloneDevicePath), ifr, nil
+}
+
+func checkTUNVnetHeader(fd int) error {
+	size, err := unix.IoctlGetInt(fd, unix.TUNGETVNETHDRSZ)
+	if err != nil {
+		return err
+	}
+	if size != virtioNetHdrLen {
+		return fmt.Errorf("incompatible virtio net header size %d, want %d", size, virtioNetHdrLen)
+	}
+	nativeLittle := binary.NativeEndian.Uint16([]byte{1, 0}) == 1
+	headerLittle := nativeLittle
+	// The little-endian override takes precedence when both are enabled.
+	for _, request := range []uint{unix.TUNGETVNETBE, unix.TUNGETVNETLE} {
+		v, err := unix.IoctlGetInt(fd, request)
+		// Kernels without byte-order overrides use native byte order.
+		if errors.Is(err, unix.EINVAL) || errors.Is(err, unix.ENOTTY) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if v != 0 && v != 1 {
+			return fmt.Errorf("invalid virtio net byte-order flag %d from ioctl %#x", v, request)
+		}
+		if v != 0 {
+			headerLittle = request == unix.TUNGETVNETLE
+		}
+	}
+	if headerLittle != nativeLittle {
+		return fmt.Errorf("virtio net header uses non-native byte order")
+	}
+	return nil
 }
 
 // CreateTUN creates or acquires a TUN interface with the provided name and MTU.
