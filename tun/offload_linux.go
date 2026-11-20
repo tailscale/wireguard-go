@@ -495,6 +495,19 @@ func checksumValid(pkt []byte, iphLen, proto uint8, isV6 bool) bool {
 	return ^Checksum(pkt[iphLen:], cSum) == 0
 }
 
+// udp4ChecksumAbsent reports whether pkt is an IPv4 UDP datagram that carries
+// no checksum (a zero checksum field, RFC 768) and whose UDP length agrees with
+// the IP payload. Without a checksum nothing else would catch a UDP length that
+// disagrees, so this requires them to match, as the kernel's UDP GRO does.
+func udp4ChecksumAbsent(pkt []byte, iphLen uint8) bool {
+	udph := int(iphLen)
+	if len(pkt) < udph+udphLen {
+		return false
+	}
+	return pkt[udph+6] == 0 && pkt[udph+7] == 0 &&
+		int(binary.BigEndian.Uint16(pkt[udph+4:])) == len(pkt)-udph
+}
+
 // coalesceResult represents the result of attempting to coalesce two packets.
 type coalesceResult int
 
@@ -507,15 +520,21 @@ const (
 
 // coalesceUDPPackets attempts to coalesce pkt with the packet described by
 // item, and returns the outcome.
-func coalesceUDPPackets(pkt []byte, item *udpGROItem, wi *groToWrite, isV6 bool) coalesceResult {
+func coalesceUDPPackets(pkt []byte, item *udpGROItem, wi *groToWrite, isV6, allowNoCsum bool) coalesceResult {
+	csumOK := func(p []byte) bool {
+		if allowNoCsum && !isV6 && udp4ChecksumAbsent(p, item.iphLen) {
+			return true
+		}
+		return checksumValid(p, item.iphLen, unix.IPPROTO_UDP, isV6)
+	}
 	headersLen := int(item.iphLen) + udphLen
 	iov := &wi.iovs[item.outputIdx]
 	if len(*iov) == iovSinglePacketLen {
-		if item.cSumKnownInvalid || !checksumValid((*iov)[iovHeadPacketIdx], item.iphLen, unix.IPPROTO_UDP, isV6) {
+		if item.cSumKnownInvalid || !csumOK((*iov)[iovHeadPacketIdx]) {
 			return coalesceItemInvalidCSum
 		}
 	}
-	if !checksumValid(pkt, item.iphLen, unix.IPPROTO_UDP, isV6) {
+	if !csumOK(pkt) {
 		return coalescePktInvalidCSum
 	}
 	*iov = append(*iov, pkt[headersLen:])
@@ -837,7 +856,7 @@ const (
 // action was taken, groResultTableInsert when the evaluated packet was
 // inserted into table, and groResultCoalesced when the evaluated packet was
 // coalesced with another packet in table.
-func udpGRO(pkt []byte, table *udpGROTable, wi *groToWrite, isV6 bool) groResult {
+func udpGRO(pkt []byte, table *udpGROTable, wi *groToWrite, isV6, allowNoCsum bool) groResult {
 	if len(pkt) > maxUint16 {
 		// A valid IPv4 or IPv6 packet will never exceed this.
 		return groResultNoop
@@ -889,7 +908,7 @@ func udpGRO(pkt []byte, table *udpGROTable, wi *groToWrite, isV6 bool) groResult
 	can := udpPacketsCanCoalesce(pkt, gsoSize, item, wi)
 	var pktCSumKnownInvalid bool
 	if can == coalesceAppend {
-		result := coalesceUDPPackets(pkt, &item, wi, isV6)
+		result := coalesceUDPPackets(pkt, &item, wi, isV6, allowNoCsum)
 		switch result {
 		case coalesceSuccess:
 			table.updateAt(item, len(items)-1)
@@ -928,9 +947,9 @@ func handleGRO(bufs [][]byte, offset int, tcpTable *tcpGROTable, udpTable *udpGR
 		case tcp6GROCandidate:
 			result = tcpGRO(pkt, tcpTable, wi, true)
 		case udp4GROCandidate:
-			result = udpGRO(pkt, udpTable, wi, false)
+			result = udpGRO(pkt, udpTable, wi, false, gro.canUDPGROZeroCsum())
 		case udp6GROCandidate:
-			result = udpGRO(pkt, udpTable, wi, true)
+			result = udpGRO(pkt, udpTable, wi, true, false)
 		}
 		switch result {
 		case groResultNoop:
