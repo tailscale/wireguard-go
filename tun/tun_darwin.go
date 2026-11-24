@@ -11,10 +11,13 @@ import (
 	"net"
 	"os"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/tailscale/wireguard-go/internal/darwinbatch"
 )
 
 const utunControlName = "com.apple.net.utun_control"
@@ -26,6 +29,9 @@ type NativeTun struct {
 	errors      chan error
 	routeSocket int
 	closeOnce   sync.Once
+
+	mtuCache atomic.Int32       // interface MTU for batched reads; zero means look it up again
+	batch    *darwinbatch.State // batched-read state; reads come from one goroutine
 }
 
 func (tun *NativeTun) routineRouteListener(tunIfindex int) {
@@ -76,6 +82,7 @@ func (tun *NativeTun) routineRouteListener(tunIfindex int) {
 
 		// MTU changes
 		if mtu != statusMTU {
+			tun.mtuCache.Store(0)
 			tun.events <- EventMTUUpdate
 		}
 		statusMTU = mtu
@@ -137,6 +144,7 @@ func CreateTUNFromFiles(files []*os.File, mtu int) (Device, error) {
 }
 
 func CreateTUNFromFile(file *os.File, mtu int) (Device, error) {
+	setMaxPending(file)
 	tun := &NativeTun{
 		tunFile: file,
 		events:  make(chan Event, 10),
@@ -213,6 +221,9 @@ func (tun *NativeTun) Read(slab []byte, packets []ReadPacket) (int, error) {
 	case err := <-tun.errors:
 		return 0, err
 	default:
+		if darwinBatch > 1 && len(packets) > 1 {
+			return tun.readBatch(slab, packets)
+		}
 		buf := slab[ReadPacketSpacing-4 : len(slab)-ReadPacketSpacing]
 		n, err := tun.tunFile.Read(buf[:])
 		if n < 4 {
@@ -228,6 +239,13 @@ func (tun *NativeTun) Write(bufs [][]byte, offset int) (int, error) {
 	if offset < 4 {
 		return 0, io.ErrShortBuffer
 	}
+	if darwinBatch > 1 && len(bufs) > 1 {
+		return tun.writeBatch(bufs, offset)
+	}
+	return tun.writeUnbatched(bufs, offset)
+}
+
+func (tun *NativeTun) writeUnbatched(bufs [][]byte, offset int) (int, error) {
 	for i, buf := range bufs {
 		buf = buf[offset-4:]
 		buf[0] = 0x00
@@ -266,6 +284,7 @@ func (tun *NativeTun) Close() error {
 }
 
 func (tun *NativeTun) setMTU(n int) error {
+	tun.mtuCache.Store(0)
 	fd, err := socketCloexec(
 		unix.AF_INET,
 		unix.SOCK_DGRAM,
@@ -309,7 +328,7 @@ func (tun *NativeTun) MTU() (int, error) {
 }
 
 func (tun *NativeTun) BatchSize() int {
-	return 1
+	return darwinBatch
 }
 
 func socketCloexec(family, sotype, proto int) (fd int, err error) {
