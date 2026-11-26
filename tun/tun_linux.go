@@ -1085,18 +1085,18 @@ func openTUNQueue(name string, flags uint16) (_ *os.File, _ *unix.Ifreq, err err
 }
 
 func checkTUNVnetHeader(fd int) error {
-	size, err := unix.IoctlGetInt(fd, unix.TUNGETVNETHDRSZ)
+	size, err := unix.IoctlGetUint32(fd, unix.TUNGETVNETHDRSZ)
 	if err != nil {
 		return err
 	}
-	if size != virtioNetHdrLen {
+	if int(size) != virtioNetHdrLen {
 		return fmt.Errorf("incompatible virtio net header size %d, want %d", size, virtioNetHdrLen)
 	}
 	nativeLittle := binary.NativeEndian.Uint16([]byte{1, 0}) == 1
 	headerLittle := nativeLittle
 	// The little-endian override takes precedence when both are enabled.
 	for _, request := range []uint{unix.TUNGETVNETBE, unix.TUNGETVNETLE} {
-		v, err := unix.IoctlGetInt(fd, request)
+		v, err := unix.IoctlGetUint32(fd, request)
 		// Kernels without byte-order overrides use native byte order.
 		if errors.Is(err, unix.EINVAL) || errors.Is(err, unix.ENOTTY) {
 			continue
